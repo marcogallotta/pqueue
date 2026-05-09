@@ -1,6 +1,8 @@
 #include "queue.h"
+#include "internal/lock_owner.h"
 #include "storage_common.h"
 
+#include <cstdint>
 #include <utility>
 
 #ifdef ARDUINO
@@ -23,12 +25,15 @@ constexpr int kLockRetryDelayMs = 10;
 
 std::string makeLockContents(const void* owner) {
     std::ostringstream out;
-    out << "pqueue-lock-v1\n";
+    out << "pqueue-lock-v2\n";
+    out << "owner=queue\n";
 #ifdef ARDUINO
     out << "pid=0\n";
+    out << "boot_id=" << lock_detail::currentBootId() << "\n";
     out << "token=" << reinterpret_cast<std::uintptr_t>(owner) << "-" << millis() << "\n";
 #else
     out << "pid=" << static_cast<long>(::getpid()) << "\n";
+    out << "boot_id=" << lock_detail::currentBootId() << "\n";
     const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     out << "token=" << reinterpret_cast<std::uintptr_t>(owner) << "-" << now << "\n";
 #endif

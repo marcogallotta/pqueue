@@ -1,5 +1,5 @@
 CXX := g++
-CLI11_INCLUDE ?= third_party
+CLI11_INCLUDE ?= third_party/CLI11/include
 DOCTEST_INCLUDE ?= ../third_party/doctest
 
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -MMD -MP \
@@ -18,6 +18,7 @@ PQUEUE_SRC := \
 	src/pqueue/http/posix_curl_transport.cpp \
 	src/pqueue/http/request_envelope.cpp \
 	src/pqueue/file_store.cpp \
+	src/pqueue/internal/lock_owner.cpp \
 	src/pqueue/diagnostics.cpp \
 	src/pqueue/storage_common.cpp \
 	src/pqueue/storage_posix.cpp \
