@@ -37,11 +37,11 @@ OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
 
 .PHONY: all test tests run-tests clean
 
-all: tests
+all: $(TEST_TARGET)
 
-test: tests
+test: run-tests
 
-tests: $(TEST_TARGET)
+tests: run-tests
 
 run-tests: $(TEST_TARGET)
 	./$(TEST_TARGET)
