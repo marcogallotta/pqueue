@@ -15,7 +15,7 @@
 namespace {
 
 #ifndef ARDUINO
-const std::filesystem::path kOutboxSpoolDir = "pqueue_outbox_test_spool";
+const std::filesystem::path kOutboxSpoolDir = "build/pqueue-spools/pqueue_outbox_test_spool";
 
 void cleanOutboxSpool() {
     std::error_code ec;

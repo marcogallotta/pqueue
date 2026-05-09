@@ -16,7 +16,7 @@
 namespace {
 
 #ifndef ARDUINO
-const std::filesystem::path kSpoolDir = "pqueue_test_spool";
+const std::filesystem::path kSpoolDir = "build/pqueue-spools/pqueue_test_spool";
 
 void cleanSpool() {
     std::error_code ec;

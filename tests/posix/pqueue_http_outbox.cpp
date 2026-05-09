@@ -12,7 +12,7 @@
 namespace {
 
 #ifndef ARDUINO
-const std::filesystem::path kHttpOutboxSpoolDir = "pqueue_http_outbox_test_spool";
+const std::filesystem::path kHttpOutboxSpoolDir = "build/pqueue-spools/pqueue_http_outbox_test_spool";
 
 void cleanHttpOutboxSpool() {
     std::error_code ec;
