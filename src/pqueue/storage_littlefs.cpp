@@ -238,6 +238,10 @@ private:
     }
 
     Status readLockFile(const std::string& name, std::string& out) const {
+        if (!lockFileExists(name)) {
+            return Status::failure(StatusCode::ReadFailed, "LittleFS lock file does not exist");
+        }
+
         File file = LittleFS.open(path(name).c_str(), "r");
         if (!file) {
             return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS lock file for read");

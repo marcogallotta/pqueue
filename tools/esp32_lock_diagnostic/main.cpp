@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <LittleFS.h>
 
+#include <cstring>
 #include <cstdint>
 #include <string>
 
@@ -47,7 +48,33 @@ std::string lockPath() {
 }
 
 bool pathExists(const std::string& path) {
-    return LittleFS.exists(path.c_str());
+    const std::size_t slash = path.find_last_of('/');
+    const std::string dirPath = slash == std::string::npos || slash == 0 ? "/" : path.substr(0, slash);
+    const std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+
+    File dir = LittleFS.open(dirPath.c_str(), "r");
+    if (!dir || !dir.isDirectory()) {
+        if (dir) {
+            dir.close();
+        }
+        return false;
+    }
+
+    File file = dir.openNextFile();
+    while (file) {
+        const char* fileName = file.name();
+        const char* fileSlash = std::strrchr(fileName, '/');
+        const std::string base = fileSlash == nullptr ? std::string(fileName) : std::string(fileSlash + 1);
+        file.close();
+        if (base == name) {
+            dir.close();
+            return true;
+        }
+        file = dir.openNextFile();
+    }
+
+    dir.close();
+    return false;
 }
 
 bool removeLockFile() {
