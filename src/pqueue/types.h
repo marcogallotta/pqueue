@@ -12,11 +12,7 @@ namespace pqueue {
 using Record = std::string;
 
 struct Config {
-#ifdef ARDUINO
-    std::string basePath = "/pqueue_spool";
-#else
-    std::string basePath = "pqueue_spool";
-#endif
+    std::string basePath = kDefaultBasePath;
     StorageBackend storageBackend = StorageBackend::Default;
     std::uint32_t reservedBytes = 128 * 1024;
     std::size_t recordSizeBytes = 4096;

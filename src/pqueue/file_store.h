@@ -17,12 +17,14 @@ enum class StorageBackend {
     LittleFS,
 };
 
-struct FileStoreConfig {
 #ifdef ARDUINO
-    std::string basePath = "/pqueue_spool";
+inline constexpr const char* kDefaultBasePath = "/pqueue_spool";
 #else
-    std::string basePath = "pqueue_spool";
+inline constexpr const char* kDefaultBasePath = "build/pqueue-spools/pqueue_spool";
 #endif
+
+struct FileStoreConfig {
+    std::string basePath = kDefaultBasePath;
     StorageBackend backend = StorageBackend::Default;
     std::shared_ptr<FileSystem> fileSystem;
     std::uint32_t reservedBytes = 128 * 1024;

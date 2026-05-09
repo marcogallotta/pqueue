@@ -1,11 +1,15 @@
 CXX := g++
+CLI11_INCLUDE ?= third_party
+DOCTEST_INCLUDE ?= ../third_party/doctest
+
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -MMD -MP \
-	-Isrc -Itests -I../third_party/doctest
+	-Isrc -Itests -I$(DOCTEST_INCLUDE) -I$(CLI11_INCLUDE)
 LDFLAGS := -lcurl
 
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 TEST_TARGET := $(BUILD_DIR)/pqueue-tests
+REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 
 PQUEUE_SRC := \
 	src/pqueue/envelope.cpp \
@@ -36,7 +40,7 @@ TEST_SRC := \
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
 
-.PHONY: all test tests run-tests clean
+.PHONY: all test tests run-tests repair-tool clean
 
 all: test
 
@@ -46,6 +50,12 @@ tests: run-tests
 
 run-tests: $(TEST_TARGET)
 	./$(TEST_TARGET)
+
+repair-tool: $(REPAIR_TOOL_TARGET)
+
+$(REPAIR_TOOL_TARGET): tools/pqueue_repair_tool.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(TEST_TARGET): $(OBJ)
 	@mkdir -p $(dir $@)
