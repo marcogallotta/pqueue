@@ -265,6 +265,20 @@ Status Queue::rewriteFront(const std::string& record) {
 }
 
 
+
+Status Queue::format() {
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return lock.status();
+    }
+    Status st = store_.format();
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "format");
+    }
+    index_ = FileStoreIndex{};
+    return Status::success();
+}
+
 Status Queue::visitRecords(RecordVisitor visitor, void* context) {
     ScopedLock lock(*this);
     if (!lock.status().ok()) {

@@ -30,6 +30,7 @@ TEST_SRC := \
 	tests/posix/pqueue_http_outbox.cpp \
 	tests/posix/pqueue_http_request_envelope.cpp \
 	tests/posix/pqueue_outbox.cpp \
+	tests/posix/pqueue_repair.cpp \
 	tests/posix/pqueue_queue_edges.cpp \
 	$(PQUEUE_SRC)
 
@@ -37,7 +38,7 @@ OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
 
 .PHONY: all test tests run-tests clean
 
-all: $(TEST_TARGET)
+all: test
 
 test: run-tests
 

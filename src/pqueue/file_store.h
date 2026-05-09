@@ -124,6 +124,7 @@ private:
     Status diagnostic(Severity severity, Status status, const char* operation, std::uint32_t sequence = kNoSequence, const char* path = "") const;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{});
     Status readIndexFromDisk(FileStoreIndex& out);
+    Status format();
 
     FileStoreConfig config_;
     mutable std::shared_ptr<FileSystem> fileSystem_;

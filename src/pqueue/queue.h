@@ -31,6 +31,7 @@ public:
     Status peek(std::string& out);
     Status pop();
     Status rewriteFront(const std::string& record);
+    Status format();
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     StatsResult statsResult();
     Stats stats();

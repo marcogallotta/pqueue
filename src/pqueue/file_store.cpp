@@ -373,6 +373,41 @@ Status commitRewrite(FileSystem& fs, const Layout& layout, FileStoreRuntimeState
     return st;
 }
 
+
+Status rawMount(const FileStoreConfig& config, std::shared_ptr<FileSystem>& fileSystem, StorageBackend backend) {
+    if (!fileSystem) {
+        switch (backend) {
+        case StorageBackend::Posix:
+            fileSystem = makePosixFileSystem();
+            break;
+        case StorageBackend::LittleFS:
+            fileSystem = makeLittleFsFileSystem();
+            break;
+        case StorageBackend::Default:
+            break;
+        }
+    }
+    if (!fileSystem) {
+        return Status::failure(StatusCode::BackendUnavailable, "file system backend unavailable");
+    }
+    return fileSystem->mount(config.basePath);
+}
+
+Status zeroFile(FileSystem& fs, const Layout& layout) {
+    constexpr std::uint32_t kChunkBytes = 256;
+    const std::string zeros(kChunkBytes, '\0');
+    std::uint32_t offset = 0;
+    while (offset < layout.spoolBytes) {
+        const std::uint32_t bytes = std::min(kChunkBytes, layout.spoolBytes - offset);
+        Status st = fs.writeAt(kSpoolName, offset, zeros.substr(0, bytes));
+        if (!st.ok()) {
+            return st;
+        }
+        offset += bytes;
+    }
+    return Status::success();
+}
+
 } // namespace
 
 FileStore::FileStore(FileStoreConfig config)
@@ -685,6 +720,39 @@ ValidationResult FileStore::validateUnlocked(const ValidationOptions& options) {
     return result;
 }
 
+
+Status FileStore::format() {
+    const StorageBackend backend = resolvedBackend();
+    Status st = rawMount(config_, fileSystem_, backend);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "format");
+    }
+
+    Layout layout;
+    if (!makeLayout(config_, layout)) {
+        return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidArgument, "invalid pqueue storage config: reservedBytes must fit at least one recordSizeBytes slot and journalBytes must fit at least one entry"), "format");
+    }
+
+    st = fileSystem_->resizeFile(kSpoolName, layout.spoolBytes);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "format", kNoSequence, kSpoolName);
+    }
+
+    st = zeroFile(*fileSystem_, layout);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "format", kNoSequence, kSpoolName);
+    }
+
+    constexpr std::uint32_t kInitialGeneration = 1;
+    st = writeCheckpoint(*fileSystem_, layout, FileStoreIndex{}, kInitialGeneration);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "format", kNoSequence, kSpoolName);
+    }
+
+    setRuntimeFresh(runtime_, layout, kInitialGeneration);
+    return Status::success();
+}
+
 Status FileStore::readIndex(FileStoreIndex& out) {
     Status st = mount();
     if (!st.ok()) {
@@ -821,19 +889,21 @@ Status FileStore::removeRecord(std::uint32_t sequence) {
 }
 
 Status FileStore::tryAcquireLockFile(const std::string& name, const std::string& contents) {
-    Status st = mount();
+    const StorageBackend backend = resolvedBackend();
+    Status st = rawMount(config_, fileSystem_, backend);
     if (!st.ok()) {
-        return st;
+        return diagnostic(Severity::Error, st, "tryAcquireLockFile");
     }
-    return fileSystem()->tryAcquireLockFile(name, contents);
+    return fileSystem_->tryAcquireLockFile(name, contents);
 }
 
 Status FileStore::releaseLockFile(const std::string& name, const std::string& expectedContents) {
-    Status st = mount();
+    const StorageBackend backend = resolvedBackend();
+    Status st = rawMount(config_, fileSystem_, backend);
     if (!st.ok()) {
-        return st;
+        return diagnostic(Severity::Error, st, "releaseLockFile");
     }
-    return fileSystem()->releaseLockFile(name, expectedContents);
+    return fileSystem_->releaseLockFile(name, expectedContents);
 }
 
 std::uint64_t FileStore::freeBytes() const {
