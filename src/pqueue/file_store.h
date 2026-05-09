@@ -38,6 +38,12 @@ struct FileStoreIndex {
     std::uint32_t count = 0;
 };
 
+enum class ValidationRepairAction {
+    None,
+    Format,
+    DropFrontIfCorrupt,
+};
+
 enum class ValidationIssueCode {
     InvalidConfig,
     MetadataMissing,
@@ -65,6 +71,7 @@ struct ValidationIssue {
     bool hasSlotIndex = false;
     bool hasExpectedSequence = false;
     bool hasActualSequence = false;
+    ValidationRepairAction repairAction = ValidationRepairAction::None;
 };
 
 struct ValidationResult {

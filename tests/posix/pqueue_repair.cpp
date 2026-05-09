@@ -94,4 +94,56 @@ TEST_CASE("queue dropFrontIfCorrupt refuses empty queue") {
     CHECK(queue.dropFrontIfCorrupt().code == pqueue::StatusCode::QueueEmpty);
 }
 
+
+TEST_CASE("queue validate suggests format for corrupt metadata") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
+
+    {
+        pqueue::Queue queue(config);
+        REQUIRE(queue.enqueue("before-corruption").ok());
+        REQUIRE(fileSystem->exists(kSpoolName));
+    }
+
+    fileSystem->files[kSpoolName].assign(fileSystem->files[kSpoolName].size(), static_cast<char>(0xff));
+
+    pqueue::Queue queue(config);
+    const auto validation = queue.validate();
+    REQUIRE_FALSE(validation.ok);
+    REQUIRE_FALSE(validation.errors.empty());
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::Format);
+}
+
+TEST_CASE("queue validate suggests dropFrontIfCorrupt only for corrupt front slot") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
+    pqueue::Queue queue(config);
+
+    REQUIRE(queue.enqueue("bad-front").ok());
+    REQUIRE(queue.enqueue("good-second").ok());
+    fileSystem->corruptSlotPayload(0, pqueue_test::slotSize(64));
+
+    const auto validation = queue.validate();
+    REQUIRE_FALSE(validation.ok);
+    REQUIRE_FALSE(validation.errors.empty());
+    CHECK(validation.errors[0].code == pqueue::ValidationIssueCode::SlotCrcMismatch);
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::DropFrontIfCorrupt);
+}
+
+TEST_CASE("queue validate does not suggest front drop for later corrupt slot") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
+    pqueue::Queue queue(config);
+
+    REQUIRE(queue.enqueue("good-front").ok());
+    REQUIRE(queue.enqueue("bad-second").ok());
+    fileSystem->corruptSlotPayload(1, pqueue_test::slotSize(64));
+
+    const auto validation = queue.validate();
+    REQUIRE_FALSE(validation.ok);
+    REQUIRE_FALSE(validation.errors.empty());
+    CHECK(validation.errors[0].code == pqueue::ValidationIssueCode::SlotCrcMismatch);
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::None);
+}
+
 #endif // !ARDUINO

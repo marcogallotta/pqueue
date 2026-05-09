@@ -53,11 +53,51 @@ void addQueueValidationError(ValidationResult& result, const ValidationOptions& 
     }
 }
 
-ValidationIssue makeQueueIssue(ValidationIssueCode code, std::string message) {
+ValidationIssue makeQueueIssue(ValidationIssueCode code, std::string message, ValidationRepairAction repairAction = ValidationRepairAction::None) {
     ValidationIssue issue;
     issue.code = code;
     issue.message = std::move(message);
+    issue.repairAction = repairAction;
     return issue;
+}
+
+bool isFormatRepairIssue(ValidationIssueCode code) {
+    switch (code) {
+        case ValidationIssueCode::MetadataMissing:
+        case ValidationIssueCode::MetadataCorrupt:
+        case ValidationIssueCode::JournalCorrupt:
+        case ValidationIssueCode::ConfigMismatch:
+        case ValidationIssueCode::SpoolMissing:
+        case ValidationIssueCode::SpoolSizeMismatch:
+        case ValidationIssueCode::InvalidRingState:
+        case ValidationIssueCode::QueueLoadFailed:
+        case ValidationIssueCode::QueueIndexMismatch:
+            return true;
+        case ValidationIssueCode::InvalidConfig:
+        case ValidationIssueCode::SlotReadFailed:
+        case ValidationIssueCode::SlotHeaderInvalid:
+        case ValidationIssueCode::SlotCrcMismatch:
+        case ValidationIssueCode::OutboxEnvelopeInvalid:
+        case ValidationIssueCode::HttpRequestEnvelopeInvalid:
+            return false;
+    }
+    return false;
+}
+
+void addRepairHints(ValidationResult& result, std::uint32_t head) {
+    for (auto& issue : result.errors) {
+        if (issue.repairAction != ValidationRepairAction::None) {
+            continue;
+        }
+        if (isFormatRepairIssue(issue.code)) {
+            issue.repairAction = ValidationRepairAction::Format;
+            continue;
+        }
+        if ((issue.code == ValidationIssueCode::SlotHeaderInvalid || issue.code == ValidationIssueCode::SlotCrcMismatch) &&
+            issue.hasExpectedSequence && issue.expectedSequence == head) {
+            issue.repairAction = ValidationRepairAction::DropFrontIfCorrupt;
+        }
+    }
 }
 
 bool sameIndex(const FileStoreIndex& lhs, const FileStoreIndex& rhs) {
@@ -361,11 +401,12 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
     }
     Status st = loadLatestIndex();
     if (!st.ok()) {
-        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message));
+        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
         return result;
     }
 
     result = store_.validateUnlocked(options);
+    addRepairHints(result, index_.head);
     if (result.stoppedEarly || result.errors.size() >= options.maxErrors) {
         return result;
     }
@@ -373,12 +414,12 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
     FileStoreIndex diskIndex;
     st = store_.readIndexFromDisk(diskIndex);
     if (!st.ok()) {
-        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message));
+        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
         return result;
     }
 
     if (!sameIndex(index_, diskIndex)) {
-        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueIndexMismatch, "queue cached index does not match storage metadata"));
+        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueIndexMismatch, "queue cached index does not match storage metadata", ValidationRepairAction::Format));
     }
 
     return result;
