@@ -54,4 +54,44 @@ TEST_CASE("queue format recovers corrupt metadata explicitly") {
     CHECK_EQ(out, "after-format");
 }
 
+
+TEST_CASE("queue dropFrontIfCorrupt drops corrupt front record only") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
+    pqueue::Queue queue(config);
+
+    REQUIRE(queue.enqueue("bad-front").ok());
+    REQUIRE(queue.enqueue("good-second").ok());
+    fileSystem->corruptSlotPayload(0, pqueue_test::slotSize(64));
+
+    std::string out;
+    CHECK(queue.peek(out).code == pqueue::StatusCode::CrcMismatch);
+
+    CHECK(queue.dropFrontIfCorrupt().ok());
+    CHECK_EQ(queue.stats().count, 1U);
+
+    REQUIRE(queue.peek(out).ok());
+    CHECK_EQ(out, "good-second");
+}
+
+TEST_CASE("queue dropFrontIfCorrupt refuses healthy front record") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Queue queue(pqueue_test::makeQueueConfig(fileSystem, 4096, 64));
+
+    REQUIRE(queue.enqueue("healthy").ok());
+    CHECK(queue.dropFrontIfCorrupt().code == pqueue::StatusCode::InvalidArgument);
+    CHECK_EQ(queue.stats().count, 1U);
+
+    std::string out;
+    REQUIRE(queue.peek(out).ok());
+    CHECK_EQ(out, "healthy");
+}
+
+TEST_CASE("queue dropFrontIfCorrupt refuses empty queue") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Queue queue(pqueue_test::makeQueueConfig(fileSystem, 4096, 64));
+
+    CHECK(queue.dropFrontIfCorrupt().code == pqueue::StatusCode::QueueEmpty);
+}
+
 #endif // !ARDUINO

@@ -64,6 +64,11 @@ bool sameIndex(const FileStoreIndex& lhs, const FileStoreIndex& rhs) {
     return lhs.head == rhs.head && lhs.tail == rhs.tail && lhs.count == rhs.count;
 }
 
+
+bool isCorruptRecordStatus(StatusCode code) {
+    return code == StatusCode::InvalidRecord || code == StatusCode::CrcMismatch;
+}
+
 } // namespace
 
 Queue::Queue(Config config)
@@ -265,6 +270,45 @@ Status Queue::rewriteFront(const std::string& record) {
 }
 
 
+
+
+Status Queue::dropFrontIfCorrupt() {
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return lock.status();
+    }
+
+    Status st = loadLatestIndex();
+    if (!st.ok()) {
+        return st;
+    }
+    if (index_.count == 0) {
+        return Status::failure(StatusCode::QueueEmpty, "queue is empty");
+    }
+
+    std::string ignored;
+    st = store_.readRecord(index_.head, ignored);
+    if (st.ok()) {
+        return Status::failure(StatusCode::InvalidArgument, "front record is not corrupt");
+    }
+    if (!isCorruptRecordStatus(st.code)) {
+        return st;
+    }
+
+    const std::uint32_t corruptHead = index_.head;
+    FileStoreIndex next = index_;
+    next.head += 1;
+    next.count -= 1;
+
+    st = store_.writeIndex(next);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "dropFrontIfCorrupt");
+    }
+
+    index_ = next;
+    store_.removeRecord(corruptHead);
+    return Status::success();
+}
 
 Status Queue::format() {
     ScopedLock lock(*this);
