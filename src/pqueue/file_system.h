@@ -15,6 +15,7 @@ public:
 
     virtual Status acquire(const std::string& name, const std::string& contents) = 0;
     virtual Status release(const std::string& name, const std::string& expectedContents) = 0;
+    virtual Status recoverStale(const std::string& name, const std::string& currentContents) = 0;
 };
 
 class FileSystem {
@@ -33,6 +34,7 @@ public:
     virtual Status listFiles(std::vector<std::string>& out) = 0;
     virtual Status tryAcquireLockFile(const std::string& name, const std::string& contents) = 0;
     virtual Status releaseLockFile(const std::string& name, const std::string& expectedContents) = 0;
+    virtual Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) = 0;
     virtual std::uint64_t freeBytes() const = 0;
 };
 

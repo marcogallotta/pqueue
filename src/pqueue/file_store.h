@@ -123,6 +123,7 @@ public:
 
     Status tryAcquireLockFile(const std::string& name, const std::string& contents);
     Status releaseLockFile(const std::string& name, const std::string& expectedContents);
+    Status recoverStaleLockFile(const std::string& name, const std::string& currentContents);
 
     std::uint64_t freeBytes() const;
 

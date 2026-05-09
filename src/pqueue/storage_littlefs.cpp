@@ -1,4 +1,5 @@
 #include "file_system.h"
+#include "internal/lock_owner.h"
 
 #ifdef ARDUINO
 
@@ -112,7 +113,7 @@ class LittleFsMutexLock final : public Lock {
 public:
     explicit LittleFsMutexLock(std::string basePath) : basePath_(std::move(basePath)) {}
 
-    Status acquire(const std::string& name, const std::string&) override {
+    Status acquire(const std::string& name, const std::string& contents) override {
         SemaphoreHandle_t mutex = littleFsMutexForKey(path(name));
         if (mutex == nullptr) {
             return Status::failure(StatusCode::LockTimeout, "failed to create LittleFS queue mutex");
@@ -122,24 +123,69 @@ public:
             return Status::failure(StatusCode::LockTimeout, "LittleFS queue mutex is busy");
         }
 
+        const Status recoveryStatus = recoverStaleFileLocked(name, contents);
+        if (!recoveryStatus.ok() && recoveryStatus.code != StatusCode::LockTimeout) {
+            xSemaphoreGive(mutex);
+            return recoveryStatus;
+        }
+        if (lockFileExists(name)) {
+            xSemaphoreGive(mutex);
+            return Status::failure(StatusCode::LockTimeout, "LittleFS queue lock already exists");
+        }
+
+        Status st = writeLockFile(name, contents);
+        if (!st.ok()) {
+            xSemaphoreGive(mutex);
+            return st;
+        }
+
         acquired_ = true;
         acquiredMutex_ = mutex;
+        lockName_ = name;
+        lockContents_ = contents;
 
-        removeLegacyLockPath(name);
         removeLegacyLockPath("pqueue.lock");
 
         return Status::success();
     }
 
-    Status release(const std::string&, const std::string&) override {
+    Status release(const std::string& name, const std::string& expectedContents) override {
         if (!acquired_) {
             return Status::success();
+        }
+
+        Status result = Status::success();
+        std::string actual;
+        Status st = readLockFile(name, actual);
+        if (st.ok()) {
+            if (actual == expectedContents) {
+                result = removeLockFile(name);
+            } else {
+                result = Status::failure(StatusCode::LockTimeout, "LittleFS queue lock is owned by another session");
+            }
+        } else {
+            result = st;
         }
 
         acquired_ = false;
         xSemaphoreGive(acquiredMutex_);
         acquiredMutex_ = nullptr;
-        return Status::success();
+        lockName_.clear();
+        lockContents_.clear();
+        return result;
+    }
+
+    Status recoverStale(const std::string& name, const std::string& currentContents) override {
+        SemaphoreHandle_t mutex = littleFsMutexForKey(path(name));
+        if (mutex == nullptr) {
+            return Status::failure(StatusCode::LockTimeout, "failed to create LittleFS queue mutex");
+        }
+        if (xSemaphoreTake(mutex, 0) != pdTRUE) {
+            return Status::failure(StatusCode::LockTimeout, "LittleFS queue mutex is busy");
+        }
+        Status st = recoverStaleFileLocked(name, currentContents);
+        xSemaphoreGive(mutex);
+        return st;
     }
 
 private:
@@ -187,9 +233,71 @@ private:
         LittleFS.rmdir(fullPath.c_str());
     }
 
+    bool lockFileExists(const std::string& name) const {
+        return baseEntryExists(name);
+    }
+
+    Status readLockFile(const std::string& name, std::string& out) const {
+        File file = LittleFS.open(path(name).c_str(), "r");
+        if (!file) {
+            return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS lock file for read");
+        }
+        out.clear();
+        while (file.available()) {
+            char buffer[96];
+            const std::size_t bytesRead = file.read(reinterpret_cast<std::uint8_t*>(buffer), sizeof(buffer));
+            if (bytesRead == 0) {
+                file.close();
+                return Status::failure(StatusCode::ReadFailed, "failed to read LittleFS lock file");
+            }
+            out.append(buffer, bytesRead);
+        }
+        file.close();
+        return Status::success();
+    }
+
+    Status writeLockFile(const std::string& name, const std::string& contents) const {
+        File file = LittleFS.open(path(name).c_str(), "w");
+        if (!file) {
+            return Status::failure(StatusCode::WriteFailed, "failed to open LittleFS lock file for write");
+        }
+        const std::size_t written = file.write(reinterpret_cast<const std::uint8_t*>(contents.data()), contents.size());
+        file.flush();
+        file.close();
+        if (written != contents.size()) {
+            LittleFS.remove(path(name).c_str());
+            return Status::failure(StatusCode::WriteFailed, "failed to write LittleFS lock file");
+        }
+        return Status::success();
+    }
+
+    Status removeLockFile(const std::string& name) const {
+        if (!LittleFS.remove(path(name).c_str())) {
+            return Status::failure(StatusCode::RemoveFailed, "failed to remove LittleFS lock file");
+        }
+        return Status::success();
+    }
+
+    Status recoverStaleFileLocked(const std::string& name, const std::string& currentContents) const {
+        if (!lockFileExists(name)) {
+            return Status::success();
+        }
+        std::string existing;
+        Status st = readLockFile(name, existing);
+        if (!st.ok()) {
+            return Status::failure(StatusCode::LockTimeout, "LittleFS queue lock exists but cannot be proven stale");
+        }
+        if (!lock_detail::lockHasDifferentBootId(existing, currentContents)) {
+            return Status::failure(StatusCode::LockTimeout, "LittleFS queue lock is not stale");
+        }
+        return removeLockFile(name);
+    }
+
     std::string basePath_;
     bool acquired_ = false;
     SemaphoreHandle_t acquiredMutex_ = nullptr;
+    std::string lockName_;
+    std::string lockContents_;
 };
 
 #else
@@ -203,6 +311,10 @@ public:
     }
 
     Status release(const std::string&, const std::string&) override {
+        return Status::success();
+    }
+
+    Status recoverStale(const std::string&, const std::string&) override {
         return Status::success();
     }
 };
@@ -394,6 +506,13 @@ public:
             return Status::failure(StatusCode::BackendUnavailable, "LittleFS lock backend is not mounted");
         }
         return lock_->release(name, expectedContents);
+    }
+
+    Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override {
+        if (!lock_) {
+            return Status::failure(StatusCode::BackendUnavailable, "LittleFS lock backend is not mounted");
+        }
+        return lock_->recoverStale(name, currentContents);
     }
 
     std::uint64_t freeBytes() const override {

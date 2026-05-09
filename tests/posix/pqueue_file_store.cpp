@@ -13,6 +13,7 @@
 #include "pqueue/outbox.h"
 #include "pqueue/queue.h"
 #include "pqueue/storage_common.h"
+#include "pqueue/internal/lock_owner.h"
 
 #include "doctest/doctest.h"
 
@@ -153,6 +154,18 @@ public:
         }
         if (it->second != expectedContents) {
             return pqueue::Status::failure(pqueue::StatusCode::LockTimeout, "fake lock owned by another queue");
+        }
+        files.erase(it);
+        return pqueue::Status::success();
+    }
+
+    pqueue::Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override {
+        const auto it = files.find(name);
+        if (it == files.end()) {
+            return pqueue::Status::success();
+        }
+        if (!pqueue::lock_detail::lockHasDifferentBootId(it->second, currentContents)) {
+            return pqueue::Status::failure(pqueue::StatusCode::LockTimeout, "fake lock is not stale");
         }
         files.erase(it);
         return pqueue::Status::success();
@@ -812,7 +825,6 @@ TEST_CASE("FileStore rejects index transition when journal append fails") {
     CHECK_EQ(after.tail, before.tail);
     CHECK_EQ(after.count, before.count);
 }
-
 
 
 TEST_CASE("FileStore ignores partially written journal entry after reboot") {

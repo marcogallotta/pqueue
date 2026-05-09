@@ -1,4 +1,5 @@
 #include "file_system.h"
+#include "internal/lock_owner.h"
 
 #ifndef ARDUINO
 
@@ -61,6 +62,20 @@ public:
         return removeFile(name);
     }
 
+    Status recoverStale(const std::string& name, const std::string&) override {
+        std::error_code ec;
+        if (!std::filesystem::exists(path(name), ec)) {
+            return Status::success();
+        }
+        if (ec) {
+            return Status::failure(StatusCode::ReadFailed, "failed to inspect queue lock file", ec.value());
+        }
+        if (removeStalePosixLock(name)) {
+            return Status::success();
+        }
+        return Status::failure(StatusCode::LockTimeout, "queue lock is not stale");
+    }
+
 private:
     Status readFile(const std::string& name, std::string& out) const {
         errno = 0;
@@ -84,29 +99,12 @@ private:
         return Status::success();
     }
 
-    static long parseLockPid(const std::string& contents) {
-        const std::string key = "pid=";
-        const auto pos = contents.find(key);
-        if (pos == std::string::npos) {
-            return -1;
-        }
-        const auto start = pos + key.size();
-        const auto end = contents.find('\n', start);
-        const std::string value = contents.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        char* parsedEnd = nullptr;
-        const long pid = std::strtol(value.c_str(), &parsedEnd, 10);
-        if (parsedEnd == value.c_str() || *parsedEnd != '\0') {
-            return -1;
-        }
-        return pid;
-    }
-
     bool removeStalePosixLock(const std::string& name) const {
         std::string contents;
         if (!readFile(name, contents).ok()) {
             return false;
         }
-        const long pid = parseLockPid(contents);
+        const long pid = lock_detail::lockPid(contents);
         if (pid <= 0) {
             return false;
         }
@@ -272,6 +270,13 @@ public:
             return Status::failure(StatusCode::BackendUnavailable, "POSIX lock backend is not mounted");
         }
         return lock_->release(name, expectedContents);
+    }
+
+    Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override {
+        if (!lock_) {
+            return Status::failure(StatusCode::BackendUnavailable, "POSIX lock backend is not mounted");
+        }
+        return lock_->recoverStale(name, currentContents);
     }
 
     std::uint64_t freeBytes() const override {

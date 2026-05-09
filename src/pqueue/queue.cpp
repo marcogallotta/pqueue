@@ -205,6 +205,20 @@ void Queue::releaseLock() {
     lockHeld_ = false;
 }
 
+Status Queue::recoverStaleLock() {
+    if (lockHeld_) {
+        return Status::failure(StatusCode::InvalidArgument, "queue already holds the lock");
+    }
+    if (lockContents_.empty()) {
+        lockContents_ = makeLockContents(this);
+    }
+    Status st = store_.recoverStaleLockFile(kLockFileName, lockContents_);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "recoverStaleLock");
+    }
+    return Status::success();
+}
+
 Status Queue::loadLatestIndex() {
     const Status st = store_.readIndexFromDisk(index_);
     if (!st.ok()) {

@@ -906,6 +906,15 @@ Status FileStore::releaseLockFile(const std::string& name, const std::string& ex
     return fileSystem_->releaseLockFile(name, expectedContents);
 }
 
+Status FileStore::recoverStaleLockFile(const std::string& name, const std::string& currentContents) {
+    const StorageBackend backend = resolvedBackend();
+    Status st = rawMount(config_, fileSystem_, backend);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "recoverStaleLockFile");
+    }
+    return fileSystem_->recoverStaleLockFile(name, currentContents);
+}
+
 std::uint64_t FileStore::freeBytes() const {
     const auto fs = fileSystem();
     if (!fs || !fs->mount(config_.basePath).ok()) {
