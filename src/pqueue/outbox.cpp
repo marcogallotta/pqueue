@@ -104,9 +104,9 @@ void Outbox::emitRequestEvent(
     Status status,
     const char* operation,
     std::uint8_t attempt,
-    std::uint32_t remainingMs
+    std::uint32_t remainingMs,
+    std::uint32_t queueCount
 ) {
-    const Stats currentStats = queue_.stats();
     Event event;
     event.kind = kind;
     event.severity = severity;
@@ -114,7 +114,7 @@ void Outbox::emitRequestEvent(
     event.component = "Outbox";
     event.operation = operation;
     event.attempt = attempt;
-    event.queueCount = currentStats.count;
+    event.queueCount = queueCount;
     event.remainingMs = remainingMs;
     emit(event);
 }
@@ -137,18 +137,18 @@ SubmitResult Outbox::submit(const std::string& payload) {
     const SendResult result = send_(sendContext_, payload, RetryState{});
     switch (result.decision) {
         case SendDecision::Sent:
-            emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "submit", 0, 0);
+            emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "submit", 0, 0, 0);
             return submitResult(SubmitStatus::Sent);
         case SendDecision::Drop: {
             const Status st = Status::failure(StatusCode::Dropped, "request was dropped by send policy");
-            emitRequestEvent(EventKind::RequestDropped, Severity::Warning, st, "submit", 0, 0);
+            emitRequestEvent(EventKind::RequestDropped, Severity::Warning, st, "submit", 0, 0, 0);
             return submitResult(SubmitStatus::Dropped, st);
         }
         case SendDecision::RetryLater: {
             const auto queued = enqueueRecord(payload, 1);
             if (queued.status == SubmitStatus::Queued) {
                 setFrontCooldown(clock_(clockContext_) + config_.retryDelayMs);
-                emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, config_.retryDelayMs);
+                emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, config_.retryDelayMs, 1);
             }
             return queued;
         }

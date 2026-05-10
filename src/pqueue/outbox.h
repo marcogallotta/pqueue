@@ -113,7 +113,8 @@ private:
         Status status,
         const char* operation,
         std::uint8_t attempt = 0,
-        std::uint32_t remainingMs = 0
+        std::uint32_t remainingMs = 0,
+        std::uint32_t queueCount = 0
     );
     bool frontIsCoolingDown(std::uint64_t nowMs) const;
     bool drainRateAllows(std::uint64_t nowMs) const;
