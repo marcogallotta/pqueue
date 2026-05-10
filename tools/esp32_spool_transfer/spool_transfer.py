@@ -17,7 +17,7 @@ import serial
 
 DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 115200
-DEFAULT_OUT = "pqueue.spool"
+DEFAULT_OUT = "build/pqueue-spools/pqueue_spool/pqueue.spool"
 DUMP_TIMEOUT_S = 120
 COMMAND_TIMEOUT_S = 10
 
