@@ -114,9 +114,12 @@ void addRepairHints(ValidationResult& result, std::uint32_t head) {
             issue.repairAction = ValidationRepairAction::RebuildMetadata;
             continue;
         }
-        if ((issue.code == ValidationIssueCode::SlotHeaderInvalid || issue.code == ValidationIssueCode::SlotCrcMismatch) &&
-            issue.hasExpectedSequence && issue.expectedSequence == head) {
-            issue.repairAction = ValidationRepairAction::DropFrontIfCorrupt;
+        if (issue.code == ValidationIssueCode::SlotHeaderInvalid || issue.code == ValidationIssueCode::SlotCrcMismatch) {
+            if (issue.hasExpectedSequence && issue.expectedSequence == head) {
+                issue.repairAction = ValidationRepairAction::DropFrontIfCorrupt;
+            } else {
+                issue.repairAction = ValidationRepairAction::Format;
+            }
         }
     }
 }
@@ -446,20 +449,24 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
         addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, lock.status().message));
         return result;
     }
-    Status st = loadLatestIndex();
-    if (!st.ok()) {
-        addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
-        return result;
-    }
+    const Status loadStatus = loadLatestIndex();
+    const bool indexLoaded = loadStatus.ok();
 
     result = store_.validateUnlocked(options);
-    addRepairHints(result, index_.head);
+    addRepairHints(result, indexLoaded ? index_.head : 0);
     if (result.stoppedEarly || result.errors.size() >= options.maxErrors) {
         return result;
     }
 
+    if (!indexLoaded) {
+        if (result.ok) {
+            addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, loadStatus.message, ValidationRepairAction::Format));
+        }
+        return result;
+    }
+
     FileStoreIndex diskIndex;
-    st = store_.readIndexFromDisk(diskIndex);
+    const Status st = store_.readIndexFromDisk(diskIndex);
     if (!st.ok()) {
         addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
         return result;

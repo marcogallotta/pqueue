@@ -572,12 +572,14 @@ ValidationResult FileStore::validateUnlocked(const ValidationOptions& options) {
 
     bool foundCheckpoint = false;
     bool configMismatch = false;
+    bool anyNonZeroCheckpoint = false;
     CheckpointRecord checkpoint;
 
     for (std::uint32_t slot = 0; slot < kCheckpointSlots; ++slot) {
         std::string bytes;
         st = fs->readAt(kSpoolName, checkpointOffset(slot), kCheckpointRecordBytes, bytes);
         if (!st.ok() || bytes.size() != kCheckpointRecordBytes) {
+            anyNonZeroCheckpoint = true;
             addValidationError(result, options, makeIssue(ValidationIssueCode::MetadataCorrupt, "failed to read pqueue checkpoint slot"));
             if (result.stoppedEarly) {
                 return result;
@@ -587,6 +589,7 @@ ValidationResult FileStore::validateUnlocked(const ValidationOptions& options) {
         if (bytesAllZero(bytes)) {
             continue;
         }
+        anyNonZeroCheckpoint = true;
 
         CheckpointRecord candidate;
         if (!parseCheckpointRecord(bytes, candidate) || candidate.magic != kFileStoreCheckpointMagic) {
@@ -621,7 +624,11 @@ ValidationResult FileStore::validateUnlocked(const ValidationOptions& options) {
         return result;
     }
     if (!foundCheckpoint) {
-        addValidationError(result, options, makeIssue(ValidationIssueCode::MetadataCorrupt, "no usable pqueue checkpoint found"));
+        if (anyNonZeroCheckpoint) {
+            addValidationError(result, options, makeIssue(ValidationIssueCode::MetadataCorrupt, "no usable pqueue checkpoint found"));
+        } else {
+            addValidationError(result, options, makeIssue(ValidationIssueCode::MetadataMissing, "pqueue checkpoint region is empty"));
+        }
         return result;
     }
 

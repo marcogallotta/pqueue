@@ -133,7 +133,7 @@ TEST_CASE("queue validate suggests format for corrupt metadata") {
     const auto validation = queue.validate();
     REQUIRE_FALSE(validation.ok);
     REQUIRE_FALSE(validation.errors.empty());
-    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::Format);
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::RebuildMetadata);
 }
 
 TEST_CASE("queue validate suggests dropFrontIfCorrupt only for corrupt front slot") {
@@ -152,7 +152,7 @@ TEST_CASE("queue validate suggests dropFrontIfCorrupt only for corrupt front slo
     CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::DropFrontIfCorrupt);
 }
 
-TEST_CASE("queue validate does not suggest front drop for later corrupt slot") {
+TEST_CASE("queue validate suggests format for later corrupt slot") {
     auto fileSystem = pqueue_test::makeFakeFileSystem();
     pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
     pqueue::Queue queue(config);
@@ -165,7 +165,30 @@ TEST_CASE("queue validate does not suggest front drop for later corrupt slot") {
     REQUIRE_FALSE(validation.ok);
     REQUIRE_FALSE(validation.errors.empty());
     CHECK(validation.errors[0].code == pqueue::ValidationIssueCode::SlotCrcMismatch);
-    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::None);
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::Format);
+}
+
+TEST_CASE("queue validate reports MetadataMissing when checkpoint region is empty") {
+    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem, 4096, 64);
+
+    {
+        pqueue::Queue queue(config);
+        REQUIRE(queue.enqueue("record").ok());
+    }
+
+    constexpr std::size_t kCheckpointBytes =
+        pqueue::storage_detail::kCheckpointSlots * pqueue::storage_detail::kCheckpointRecordBytes;
+    auto& spool = fileSystem->files["pqueue.spool"];
+    REQUIRE(spool.size() >= kCheckpointBytes);
+    std::fill(spool.begin(), spool.begin() + kCheckpointBytes, '\0');
+
+    pqueue::Queue queue(config);
+    const auto validation = queue.validate();
+    REQUIRE_FALSE(validation.ok);
+    REQUIRE_FALSE(validation.errors.empty());
+    CHECK(validation.errors[0].code == pqueue::ValidationIssueCode::MetadataMissing);
+    CHECK(validation.errors[0].repairAction == pqueue::ValidationRepairAction::RebuildMetadata);
 }
 
 
