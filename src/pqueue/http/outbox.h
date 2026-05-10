@@ -89,7 +89,7 @@ using ResponseCallback = void (*)(void* context, const RequestEnvelope& request,
 
 enum class DropReason {
     DecodeFailed,
-    ClassifiedDrop,
+    ServerRejected,
 };
 
 using DropCallback = void (*)(

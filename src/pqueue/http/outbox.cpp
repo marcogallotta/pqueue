@@ -146,7 +146,7 @@ SendResult Outbox::sendStoredRequest(const std::string& encodedRequest, const Re
 
     const SendDecision decision = classifyResponse(response);
     if (decision == SendDecision::Drop) {
-        notifyDrop(&request, DropReason::ClassifiedDrop, &response);
+        notifyDrop(&request, DropReason::ServerRejected, &response);
     }
 
     return {decision};

@@ -249,7 +249,7 @@ TEST_CASE("pqueue http outbox notifies when a request is dropped by classificati
 
     CHECK(submit.status == pqueue::SubmitStatus::Dropped);
     REQUIRE_EQ(observer.seen.size(), 1U);
-    CHECK(observer.seen[0].reason == pqueue::http::DropReason::ClassifiedDrop);
+    CHECK(observer.seen[0].reason == pqueue::http::DropReason::ServerRejected);
     CHECK(observer.seen[0].hasRequest);
     CHECK_EQ(observer.seen[0].path, "/bad");
     CHECK(observer.seen[0].hasResponse);
