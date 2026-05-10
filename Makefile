@@ -1,5 +1,5 @@
 CXX := g++
-CLI11_INCLUDE ?= third_party/CLI11/include
+CLI11_INCLUDE ?= third_party
 DOCTEST_INCLUDE ?= ../third_party/doctest
 
 CXXFLAGS := -std=c++17 -Wall -Wextra -Wpedantic -O2 -MMD -MP \
