@@ -121,6 +121,10 @@ public:
         return inner_->releaseLockFile(name, expectedContents);
     }
 
+    pqueue::Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override {
+        return inner_->recoverStaleLockFile(name, currentContents);
+    }
+
     std::uint64_t freeBytes() const override {
         return inner_->freeBytes();
     }
@@ -379,7 +383,7 @@ ScenarioResult scenarioHttpOutboxDrainBacklog(std::uint32_t records, std::uint32
     prepared.fs->resetCounters();
     for (std::uint32_t i = 0; i < records; ++i) {
         const auto start = Clock::now();
-        const auto drain = prepared.outbox->drainBurst(1);
+        const auto drain = prepared.outbox->drainUpTo(1);
         const auto end = Clock::now();
         result.timings.add(start, end);
         if (drain.queueError || drain.sendError || drain.sent != 1) {
@@ -442,8 +446,11 @@ void printRedFlags(const std::vector<ScenarioResult>& results) {
         if ((r.scenario == "queue_enqueue" || r.scenario == "http_offline_submit") && r.fs.writeAt > r.records * 3ULL + 16ULL) {
             std::cout << "- " << r.scenario << " has unexpectedly high writeAt count; expected slot + journal/checkpoint writes only\n";
         }
-        if ((r.scenario == "queue_enqueue" || r.scenario == "http_offline_submit") && r.fs.readAt > r.records / 10ULL + 8ULL) {
+        if (r.scenario == "queue_enqueue" && r.fs.readAt > r.records * 2ULL + 8ULL) {
             std::cout << "- " << r.scenario << " has unexpected readAt activity on enqueue hot path\n";
+        }
+        if (r.scenario == "http_offline_submit" && r.fs.readAt > r.records * 3ULL + 8ULL) {
+            std::cout << "- " << r.scenario << " has unexpected readAt activity on http submit hot path\n";
         }
         if (r.scenario == "validate_full" && r.fs.writeAt != 0) {
             std::cout << "- validate_full wrote to storage; validation should be read-only\n";

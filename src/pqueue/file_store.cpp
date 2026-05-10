@@ -244,13 +244,17 @@ bool applyJournalEntry(const JournalEntry& entry, FileStoreIndex& index) {
 
 StoredState loadStoredState(FileSystem& fs, const Layout& layout) {
     StoredState out;
+
+    const std::size_t metadataBytes = layout.checkpointBytes + layout.journalBytes;
+    std::string metadata;
+    if (!fs.readAt(kSpoolName, 0, metadataBytes, metadata).ok()) {
+        return out;
+    }
+
     for (std::uint32_t slot = 0; slot < kCheckpointSlots; ++slot) {
-        std::string bytes;
-        if (!fs.readAt(kSpoolName, checkpointOffset(slot), kCheckpointRecordBytes, bytes).ok()) {
-            continue;
-        }
+        const std::size_t offset = static_cast<std::size_t>(slot) * kCheckpointRecordBytes;
         CheckpointRecord candidate;
-        if (!parseCheckpointRecord(bytes, candidate) || !validCheckpointShape(candidate)) {
+        if (!parseCheckpointRecord(metadata.substr(offset, kCheckpointRecordBytes), candidate) || !validCheckpointShape(candidate)) {
             continue;
         }
         if (!validCheckpointForConfig(candidate, layout.capacityRecords, layout.recordSizeBytes, layout.reservedBytes, layout.journalBytes)) {
@@ -268,16 +272,12 @@ StoredState loadStoredState(FileSystem& fs, const Layout& layout) {
     }
 
     out.index = fromCheckpointRecord(out.checkpoint);
-    out.journalUsedBytes = 0;
     std::uint32_t offset = 0;
     std::uint32_t nextGeneration = out.checkpoint.generation + 1;
     while (offset + kJournalEntryBytes <= layout.journalBytes) {
-        std::string bytes;
-        if (!fs.readAt(kSpoolName, journalOffset(layout, offset), kJournalEntryBytes, bytes).ok()) {
-            break;
-        }
+        const std::size_t bufOffset = layout.checkpointBytes + offset;
         JournalEntry entry;
-        if (!parseJournalEntry(bytes, entry) || !validJournalEntryShape(entry) || entry.generation != nextGeneration) {
+        if (!parseJournalEntry(metadata.substr(bufOffset, kJournalEntryBytes), entry) || !validJournalEntryShape(entry) || entry.generation != nextGeneration) {
             break;
         }
         if (!applyJournalEntry(entry, out.index)) {

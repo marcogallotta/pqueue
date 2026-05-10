@@ -10,6 +10,7 @@ BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 TEST_TARGET := $(BUILD_DIR)/pqueue-tests
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
+PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
 
 PQUEUE_SRC := \
 	src/pqueue/envelope.cpp \
@@ -43,7 +44,7 @@ TEST_SRC := \
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
 
-.PHONY: all test tests run-tests repair-tool clean
+.PHONY: all test tests run-tests repair-tool profiling clean
 
 all: test
 
@@ -55,6 +56,12 @@ run-tests: $(TEST_TARGET)
 	./$(TEST_TARGET)
 
 repair-tool: $(REPAIR_TOOL_TARGET)
+
+profiling: $(PROFILING_TARGET)
+
+$(PROFILING_TARGET): tools/pqueue_profiling.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 $(REPAIR_TOOL_TARGET): tools/pqueue_repair_tool.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)
