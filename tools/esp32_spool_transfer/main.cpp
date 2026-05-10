@@ -65,9 +65,6 @@ pqueue::FileStoreConfig spoolConfig() {
     pqueue::FileStoreConfig config;
     config.basePath = kSpoolBasePath;
     config.backend = pqueue::StorageBackend::LittleFS;
-    config.reservedBytes = 128 * 1024;
-    config.recordSizeBytes = 512;
-    config.journalBytes = 4096;
     return config;
 }
 
@@ -77,6 +74,24 @@ std::string spoolPath() {
 
 std::string spoolTempPath() {
     return std::string(kSpoolBasePath) + "/" + kSpoolTempFileName;
+}
+
+bool readSerialLine(std::string& out, unsigned long timeoutMs) {
+    out.clear();
+    const unsigned long deadline = millis() + timeoutMs;
+    while (millis() < deadline) {
+        if (Serial.available()) {
+            const char c = static_cast<char>(Serial.read());
+            if (c == '\n') {
+                if (!out.empty() && out.back() == '\r') {
+                    out.pop_back();
+                }
+                return true;
+            }
+            out += c;
+        }
+    }
+    return false;
 }
 
 bool dumpSpool() {
@@ -112,33 +127,20 @@ bool dumpSpool() {
         }
 
         printLine("CHUNK:" + offsetHex(offset) + ":" + toHex(buf, bytesRead));
+
+        std::string ack;
+        if (!readSerialLine(ack, 10000) || ack != "ACK") {
+            f.close();
+            printLine("ERROR:ack_timeout offset=" + std::to_string(offset));
+            return false;
+        }
+
         offset += static_cast<std::uint32_t>(bytesRead);
     }
 
     f.close();
     printLine("SPOOL_END");
     return true;
-}
-
-// Reads a line from Serial, blocking until newline or timeout.
-// Returns false on timeout.
-bool readSerialLine(std::string& out, unsigned long timeoutMs) {
-    out.clear();
-    const unsigned long deadline = millis() + timeoutMs;
-    while (millis() < deadline) {
-        if (Serial.available()) {
-            const char c = static_cast<char>(Serial.read());
-            if (c == '\n') {
-                // Strip trailing CR if present
-                if (!out.empty() && out.back() == '\r') {
-                    out.pop_back();
-                }
-                return true;
-            }
-            out += c;
-        }
-    }
-    return false;
 }
 
 // Receives spool data from host and writes to temp file.
@@ -254,12 +256,14 @@ void runSpoolTransfer() {
     printLine("spool_transfer: base_path=" + std::string(kSpoolBasePath));
     printLine("spool_transfer: boot_id=" + bootId);
 
+    // Mount the FileStore only to set up the lock backend. The spool itself
+    // may be corrupt or mis-sized — that's exactly why we're here — so we
+    // tolerate mount failure and proceed with the raw dump regardless.
     pqueue::FileStore store(spoolConfig());
-
     const pqueue::Status mountSt = store.mount();
     if (!mountSt.ok()) {
-        printLine(std::string("ERROR:mount_failed ") + (mountSt.message ? mountSt.message : ""));
-        return;
+        printLine(std::string("WARNING:mount_failed ") + (mountSt.message ? mountSt.message : ""));
+        printLine("WARNING:proceeding with direct lock acquisition");
     }
 
     const pqueue::Status lockSt = store.tryAcquireLockFile(kLockFileName, lockContents);

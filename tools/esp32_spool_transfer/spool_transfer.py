@@ -39,7 +39,7 @@ def main():
     args = parse_args()
 
     log(f"Opening {args.port} at {args.baud} baud")
-    s = serial.Serial(args.port, args.baud, timeout=1)
+    s = serial.Serial(args.port, args.baud, timeout=5)
 
     if not args.no_reset:
         log("Resetting device via DTR...")
@@ -52,6 +52,7 @@ def main():
 
     chunks = {}
     spool_size = None
+    bad_lines = 0
     deadline = time.time() + DUMP_TIMEOUT_S
 
     log("Waiting for dump...")
@@ -63,31 +64,34 @@ def main():
         line = raw.decode("utf-8", errors="replace").rstrip()
 
         if line.startswith("CHUNK:"):
-            # CHUNK:<offset_hex>:<hexdata>
             parts = line.split(":", 2)
             if len(parts) != 3:
-                log(f"  WARNING: malformed chunk line: {line[:64]}")
+                bad_lines += 1
+                log(f"WARNING: malformed chunk (skipped): {line[:64]}")
                 continue
-            offset = int(parts[1], 16)
-            data = bytes.fromhex(parts[2])
+            try:
+                offset = int(parts[1], 16)
+                data = bytes.fromhex(parts[2])
+            except ValueError:
+                bad_lines += 1
+                log(f"WARNING: unparseable chunk (skipped): {line[:64]}")
+                continue
             chunks[offset] = data
-            print(f"  {offset:#010x} {len(data)} bytes\r", end="", flush=True)
+            s.write(b"ACK\n")
+            log(f"  chunk {offset:#010x} {len(data)} bytes")
         elif line.startswith("SPOOL_SIZE:"):
             spool_size = int(line.split(":", 1)[1])
             log(f"Spool size: {spool_size} bytes")
         elif line == "SPOOL_END":
-            print()  # newline after progress
             log("Dump complete.")
             break
         elif line.startswith("ERROR:"):
-            print()
             log(f"Device error: {line}")
             s.close()
             sys.exit(1)
         else:
             log(f"  [{line}]")
     else:
-        print()
         log("ERROR: timed out waiting for SPOOL_END")
         s.close()
         sys.exit(1)
@@ -97,13 +101,25 @@ def main():
         s.close()
         sys.exit(1)
 
-    # Reassemble
-    total_received = sum(len(d) for d in chunks.values())
-    if total_received != spool_size:
-        log(f"ERROR: size mismatch — got {total_received} bytes, expected {spool_size}")
+    # Verify no gaps — every expected 256-byte-aligned offset must be present.
+    chunk_size = 256
+    missing = []
+    offset = 0
+    while offset < spool_size:
+        if offset not in chunks:
+            missing.append(offset)
+        offset += chunk_size
+
+    if missing or bad_lines:
+        log(f"ERROR: transfer incomplete — {len(missing)} missing chunk(s), {bad_lines} bad line(s)")
+        for m in missing[:10]:
+            log(f"  missing offset {m:#010x}")
+        if len(missing) > 10:
+            log(f"  ... and {len(missing) - 10} more")
         s.close()
         sys.exit(1)
 
+    # Reassemble
     spool_data = bytearray(spool_size)
     for offset, data in chunks.items():
         spool_data[offset:offset + len(data)] = data
