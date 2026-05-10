@@ -753,6 +753,85 @@ Status FileStore::format() {
     return Status::success();
 }
 
+Status FileStore::rebuildMetadata() {
+    const StorageBackend backend = resolvedBackend();
+    Status st = rawMount(config_, fileSystem_, backend);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "rebuildMetadata");
+    }
+
+    Layout layout;
+    if (!makeLayout(config_, layout)) {
+        return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidArgument, "invalid pqueue storage config"), "rebuildMetadata");
+    }
+
+    std::uint64_t actualSize = 0;
+    st = fileSystem_->fileSize(kSpoolName, actualSize);
+    if (!st.ok() || actualSize != layout.spoolBytes) {
+        return diagnostic(Severity::Error, Status::failure(StatusCode::ReadFailed, "pqueue spool missing or wrong size; use format to reinitialize"), "rebuildMetadata");
+    }
+
+    std::vector<std::uint32_t> candidates;
+    for (std::uint32_t i = 0; i < layout.capacityRecords; ++i) {
+        std::string bytes;
+        st = fileSystem_->readAt(kSpoolName, layout.recordRegionOffset + static_cast<std::uint64_t>(i) * layout.slotSizeBytes, layout.slotSizeBytes, bytes);
+        if (!st.ok() || bytes.size() < kRecordHeaderBytes) {
+            continue;
+        }
+        RecordHeader header;
+        if (!parseRecordHeader(bytes, header)) {
+            continue;
+        }
+        if (header.magic != kFileStoreRecordMagic ||
+            header.version != kFormatVersion ||
+            header.headerBytes != kRecordHeaderBytes ||
+            header.recordBytes > layout.recordSizeBytes ||
+            header.sequence % layout.capacityRecords != i) {
+            continue;
+        }
+        candidates.push_back(header.sequence);
+    }
+
+    FileStoreIndex rebuilt;
+    if (!candidates.empty()) {
+        const auto [minIt, maxIt] = std::minmax_element(candidates.begin(), candidates.end());
+        const std::uint32_t minSeq = *minIt;
+        const std::uint32_t maxSeq = *maxIt;
+        if (maxSeq - minSeq + 1 != static_cast<std::uint32_t>(candidates.size())) {
+            return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidIndex, "gap in active slot sequence numbers; cannot safely rebuild metadata"), "rebuildMetadata");
+        }
+        rebuilt.head = minSeq;
+        rebuilt.tail = maxSeq + 1;
+        rebuilt.count = static_cast<std::uint32_t>(candidates.size());
+    }
+
+    constexpr std::uint32_t kChunkBytes = 256;
+    const std::string zeros(kChunkBytes, '\0');
+    const std::uint32_t metadataBytes = layout.checkpointBytes + layout.journalBytes;
+    std::uint32_t offset = 0;
+    while (offset < metadataBytes) {
+        const std::uint32_t toWrite = std::min(kChunkBytes, metadataBytes - offset);
+        st = fileSystem_->writeAt(kSpoolName, offset, zeros.substr(0, toWrite));
+        if (!st.ok()) {
+            return diagnostic(Severity::Error, st, "rebuildMetadata", kNoSequence, kSpoolName);
+        }
+        offset += toWrite;
+    }
+
+    constexpr std::uint32_t kRebuildGeneration = 1;
+    st = writeCheckpoint(*fileSystem_, layout, rebuilt, kRebuildGeneration);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "rebuildMetadata", kNoSequence, kSpoolName);
+    }
+
+    StoredState state;
+    state.foundCheckpoint = true;
+    state.checkpoint.generation = kRebuildGeneration;
+    state.index = rebuilt;
+    setRuntime(runtime_, layout, state);
+    return Status::success();
+}
+
 Status FileStore::readIndex(FileStoreIndex& out) {
     Status st = mount();
     if (!st.ok()) {

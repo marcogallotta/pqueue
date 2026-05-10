@@ -68,16 +68,16 @@ ValidationIssue makeQueueIssue(ValidationIssueCode code, std::string message, Va
 
 bool isFormatRepairIssue(ValidationIssueCode code) {
     switch (code) {
-        case ValidationIssueCode::MetadataMissing:
-        case ValidationIssueCode::MetadataCorrupt:
-        case ValidationIssueCode::JournalCorrupt:
         case ValidationIssueCode::ConfigMismatch:
         case ValidationIssueCode::SpoolMissing:
         case ValidationIssueCode::SpoolSizeMismatch:
-        case ValidationIssueCode::InvalidRingState:
         case ValidationIssueCode::QueueLoadFailed:
         case ValidationIssueCode::QueueIndexMismatch:
             return true;
+        case ValidationIssueCode::MetadataMissing:
+        case ValidationIssueCode::MetadataCorrupt:
+        case ValidationIssueCode::JournalCorrupt:
+        case ValidationIssueCode::InvalidRingState:
         case ValidationIssueCode::InvalidConfig:
         case ValidationIssueCode::SlotReadFailed:
         case ValidationIssueCode::SlotHeaderInvalid:
@@ -89,6 +89,18 @@ bool isFormatRepairIssue(ValidationIssueCode code) {
     return false;
 }
 
+bool isRebuildMetadataIssue(ValidationIssueCode code) {
+    switch (code) {
+        case ValidationIssueCode::MetadataMissing:
+        case ValidationIssueCode::MetadataCorrupt:
+        case ValidationIssueCode::JournalCorrupt:
+        case ValidationIssueCode::InvalidRingState:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void addRepairHints(ValidationResult& result, std::uint32_t head) {
     for (auto& issue : result.errors) {
         if (issue.repairAction != ValidationRepairAction::None) {
@@ -96,6 +108,10 @@ void addRepairHints(ValidationResult& result, std::uint32_t head) {
         }
         if (isFormatRepairIssue(issue.code)) {
             issue.repairAction = ValidationRepairAction::Format;
+            continue;
+        }
+        if (isRebuildMetadataIssue(issue.code)) {
+            issue.repairAction = ValidationRepairAction::RebuildMetadata;
             continue;
         }
         if ((issue.code == ValidationIssueCode::SlotHeaderInvalid || issue.code == ValidationIssueCode::SlotCrcMismatch) &&
@@ -380,6 +396,18 @@ Status Queue::format() {
     }
     index_ = FileStoreIndex{};
     return Status::success();
+}
+
+Status Queue::rebuildMetadata() {
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return lock.status();
+    }
+    Status st = store_.rebuildMetadata();
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "rebuildMetadata");
+    }
+    return loadLatestIndex();
 }
 
 Status Queue::visitRecords(RecordVisitor visitor, void* context) {

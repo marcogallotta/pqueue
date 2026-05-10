@@ -35,6 +35,7 @@ TEST_SRC := \
 	tests/posix/pqueue_http_outbox.cpp \
 	tests/posix/pqueue_http_request_envelope.cpp \
 	tests/posix/pqueue_outbox.cpp \
+	tests/posix/pqueue_rebuild_metadata.cpp \
 	tests/posix/pqueue_repair.cpp \
 	tests/posix/pqueue_queue_edges.cpp \
 	$(PQUEUE_SRC)

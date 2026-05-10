@@ -36,6 +36,7 @@ const char* repairActionHuman(pqueue::ValidationRepairAction action) {
         case pqueue::ValidationRepairAction::None: return "none";
         case pqueue::ValidationRepairAction::Format: return "format queue";
         case pqueue::ValidationRepairAction::DropFrontIfCorrupt: return "drop corrupt front record";
+        case pqueue::ValidationRepairAction::RebuildMetadata: return "rebuild metadata from slot scan";
     }
     return "unknown";
 }
@@ -120,6 +121,7 @@ enum class Command {
     Format,
     DropFrontIfCorrupt,
     RecoverStaleLock,
+    RebuildMetadata,
 };
 
 void addConfigOptions(CLI::App& app, pqueue::Config& config) {
@@ -161,6 +163,10 @@ int main(int argc, char** argv) {
     addConfigOptions(*recoverLock, config);
     recoverLock->callback([&command]() { command = Command::RecoverStaleLock; });
 
+    auto* rebuild = app.add_subcommand("rebuild-metadata", "Reconstruct checkpoint and journal by scanning slot headers");
+    addConfigOptions(*rebuild, config);
+    rebuild->callback([&command]() { command = Command::RebuildMetadata; });
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
@@ -187,6 +193,17 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << "Failed to recover stale lock.\n"
+                      << "status: " << pqueue::statusCodeName(st.code) << "\n"
+                      << "message: " << st.message << "\n";
+            return 2;
+        }
+        case Command::RebuildMetadata: {
+            const pqueue::Status st = queue.rebuildMetadata();
+            if (st.ok()) {
+                std::cout << "Metadata rebuilt from slot scan.\n";
+                return 0;
+            }
+            std::cout << "Rebuild failed.\n"
                       << "status: " << pqueue::statusCodeName(st.code) << "\n"
                       << "message: " << st.message << "\n";
             return 2;

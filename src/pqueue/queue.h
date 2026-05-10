@@ -34,6 +34,7 @@ public:
     Status format();
     Status dropFrontIfCorrupt();
     Status recoverStaleLock();
+    Status rebuildMetadata();
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     StatsResult statsResult();
     Stats stats();

@@ -44,6 +44,7 @@ enum class ValidationRepairAction {
     None,
     Format,
     DropFrontIfCorrupt,
+    RebuildMetadata,
 };
 
 enum class ValidationIssueCode {
@@ -135,6 +136,7 @@ private:
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{});
     Status readIndexFromDisk(FileStoreIndex& out);
     Status format();
+    Status rebuildMetadata();
 
     FileStoreConfig config_;
     mutable std::shared_ptr<FileSystem> fileSystem_;
