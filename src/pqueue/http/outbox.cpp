@@ -52,6 +52,12 @@ Response CallbackTransport::post(
     return post_(context_, url, headers, headerCount, body, bodySize);
 }
 
+pqueue::Config Outbox::resolveQueueConfig(const Config& config) {
+    pqueue::Config q = config.queue;
+    q.fullQueuePolicy = config.fullQueuePolicy;
+    return q;
+}
+
 Outbox::Outbox(
     Config httpConfig,
     Transport& transport,
@@ -59,7 +65,7 @@ Outbox::Outbox(
     void* clockContext
 ) : httpConfig_(httpConfig),
     transport_(transport),
-    outbox_(httpConfig.queue, httpConfig.outbox, sendStoredRequest, this, clock, clockContext) {}
+    outbox_(resolveQueueConfig(httpConfig), httpConfig.outbox, sendStoredRequest, this, clock, clockContext) {}
 
 pqueue::SubmitResult Outbox::submitPost(const std::string& path, const std::string& body) {
     RequestEnvelope request;

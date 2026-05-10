@@ -264,8 +264,15 @@ Status Queue::enqueue(const std::string& record) {
         return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidArgument, "invalid pqueue storage config"), "enqueue");
     }
     if (index_.count >= capacityRecords) {
-        // TODO: Consider making full-buffer behavior configurable. Options: reject newest, drop oldest, overwrite oldest.
-        return diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue is full"), "enqueue");
+        if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest) {
+            const Status evictStatus = evictFront();
+            if (!evictStatus.ok()) {
+                return evictStatus;
+            }
+            diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
+        } else {
+            return diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue is full"), "enqueue");
+        }
     }
 
     const std::uint32_t sequence = index_.tail;
@@ -349,6 +356,22 @@ Status Queue::rewriteFront(const std::string& record) {
 
 
 
+
+Status Queue::evictFront() {
+    const std::uint32_t oldHead = index_.head;
+    FileStoreIndex next = index_;
+    next.head += 1;
+    next.count -= 1;
+
+    const Status st = store_.writeIndex(next);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "evictFront");
+    }
+
+    index_ = next;
+    store_.removeRecord(oldHead);
+    return Status::success();
+}
 
 Status Queue::dropFrontIfCorrupt() {
     ScopedLock lock(*this);

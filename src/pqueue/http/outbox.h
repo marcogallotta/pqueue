@@ -102,6 +102,7 @@ using DropCallback = void (*)(
 struct Config {
     pqueue::Config queue;
     pqueue::OutboxConfig outbox;
+    pqueue::FullQueuePolicy fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
 
     const char* baseUrl = "";
     const Header* headers = nullptr;
@@ -134,6 +135,7 @@ public:
     Stats stats();
 
 private:
+    static pqueue::Config resolveQueueConfig(const Config& config);
     static SendResult sendStoredRequest(void* context, const std::string& encodedRequest, const RetryState& retry);
     SendResult sendStoredRequest(const std::string& encodedRequest, const RetryState& retry);
     void notifyResponse(const RequestEnvelope& request, const Response& response) const;

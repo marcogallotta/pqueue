@@ -11,6 +11,11 @@ namespace pqueue {
 
 using Record = std::string;
 
+enum class FullQueuePolicy {
+    RejectNewest,
+    DropOldest,
+};
+
 struct Config {
     std::string basePath = kDefaultBasePath;
     StorageBackend storageBackend = StorageBackend::Default;
@@ -18,11 +23,11 @@ struct Config {
     std::size_t recordSizeBytes = 4096;
     std::uint32_t journalBytes = 4096;
     std::uint32_t checkpointEveryOps = 64;
+    FullQueuePolicy fullQueuePolicy = FullQueuePolicy::RejectNewest;
     EventOptions events;
     // Optional filesystem injection for tests/profiling/custom backends.
     // Production users normally leave this unset and select storageBackend instead.
     std::shared_ptr<FileSystem> fileSystem;
-    // TODO: make full-buffer behavior configurable. Options: reject newest, drop oldest, overwrite oldest.
 };
 
 struct Stats {

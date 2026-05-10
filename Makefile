@@ -32,6 +32,7 @@ TEST_SRC := \
 	tests/posix/pqueue_diagnostics.cpp \
 	tests/posix/pqueue_envelope.cpp \
 	tests/posix/pqueue_file_store.cpp \
+	tests/posix/pqueue_full_queue_policy.cpp \
 	tests/posix/pqueue_http_outbox.cpp \
 	tests/posix/pqueue_http_request_envelope.cpp \
 	tests/posix/pqueue_outbox.cpp \

@@ -46,6 +46,7 @@ private:
     class ScopedLock;
 
     Status loadLatestIndex();
+    Status evictFront();
     Status acquireLock();
     void releaseLock();
     Status emit(Event event) const;
