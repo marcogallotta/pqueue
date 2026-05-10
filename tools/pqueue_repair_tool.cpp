@@ -119,6 +119,7 @@ enum class Command {
     Validate,
     Format,
     DropFrontIfCorrupt,
+    RecoverStaleLock,
 };
 
 void addConfigOptions(CLI::App& app, pqueue::Config& config) {
@@ -156,6 +157,10 @@ int main(int argc, char** argv) {
     addConfigOptions(*dropFront, config);
     dropFront->callback([&command]() { command = Command::DropFrontIfCorrupt; });
 
+    auto* recoverLock = app.add_subcommand("recover-stale-lock", "Remove a stale lock left by a dead process");
+    addConfigOptions(*recoverLock, config);
+    recoverLock->callback([&command]() { command = Command::RecoverStaleLock; });
+
     try {
         app.parse(argc, argv);
     } catch (const CLI::ParseError& e) {
@@ -170,6 +175,22 @@ int main(int argc, char** argv) {
             return printFormatStatus(queue.format());
         case Command::DropFrontIfCorrupt:
             return printDropFrontStatus(queue.dropFrontIfCorrupt());
+        case Command::RecoverStaleLock: {
+            const pqueue::Status st = queue.recoverStaleLock();
+            if (st.ok()) {
+                std::cout << "Stale lock removed.\n";
+                return 0;
+            }
+            if (st.code == pqueue::StatusCode::LockTimeout) {
+                std::cout << "Lock is not stale (held by current boot).\n"
+                          << "message: " << st.message << "\n";
+                return 1;
+            }
+            std::cout << "Failed to recover stale lock.\n"
+                      << "status: " << pqueue::statusCodeName(st.code) << "\n"
+                      << "message: " << st.message << "\n";
+            return 2;
+        }
         case Command::None:
             break;
     }
