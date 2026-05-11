@@ -221,42 +221,43 @@ public:
 
 
     Status readAt(const std::string& name, std::uint64_t offset, std::size_t size, std::string& out) override {
-        File file = LittleFS.open(path(name).c_str(), "r");
+        File& file = ensureOpen(name);
         if (!file) {
             return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS file for positioned read");
         }
         if (!file.seek(static_cast<std::uint32_t>(offset), SeekSet)) {
-            file.close();
+            closePersistent(name);
             return Status::failure(StatusCode::ReadFailed, "failed to seek LittleFS file for read");
         }
         out.assign(size, '\0');
         const std::size_t bytesRead = file.read(reinterpret_cast<std::uint8_t*>(out.data()), size);
-        file.close();
         if (bytesRead != size) {
+            closePersistent(name);
             return Status::failure(StatusCode::ReadFailed, "failed to read complete LittleFS range");
         }
         return Status::success();
     }
 
     Status writeAt(const std::string& name, std::uint64_t offset, const std::string& data) override {
-        File file = LittleFS.open(path(name).c_str(), "r+");
+        File& file = ensureOpen(name);
         if (!file) {
             return Status::failure(StatusCode::WriteFailed, "failed to open LittleFS file for positioned write");
         }
         if (!file.seek(static_cast<std::uint32_t>(offset), SeekSet)) {
-            file.close();
+            closePersistent(name);
             return Status::failure(StatusCode::WriteFailed, "failed to seek LittleFS file for write");
         }
         const std::size_t bytesWritten = file.write(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
         file.flush();
-        file.close();
         if (bytesWritten != data.size()) {
+            closePersistent(name);
             return Status::failure(StatusCode::WriteFailed, "failed to write complete LittleFS range");
         }
         return Status::success();
     }
 
     Status resizeFile(const std::string& name, std::uint64_t size) override {
+        closePersistent(name);
         const std::string fullPath = path(name);
         File file = fileExistsQuiet(name)
             ? LittleFS.open(fullPath.c_str(), "r+")
@@ -305,6 +306,7 @@ public:
     }
 
     Status removeFile(const std::string& name) override {
+        closePersistent(name);
         if (!LittleFS.remove(path(name).c_str())) {
             return Status::failure(StatusCode::RemoveFailed, "failed to remove LittleFS file");
         }
@@ -312,6 +314,7 @@ public:
     }
 
     Status renameFile(const std::string& fromName, const std::string& toName) override {
+        closePersistent(fromName);
         if (!LittleFS.rename(path(fromName).c_str(), path(toName).c_str())) {
             return Status::failure(StatusCode::RenameFailed, "failed to rename LittleFS file");
         }
@@ -395,8 +398,26 @@ private:
         return false;
     }
 
+    File& ensureOpen(const std::string& name) {
+        if (persistentName_ != name || !persistentFile_) {
+            if (persistentFile_) persistentFile_.close();
+            persistentFile_ = LittleFS.open(path(name).c_str(), "r+");
+            persistentName_ = name;
+        }
+        return persistentFile_;
+    }
+
+    void closePersistent(const std::string& name) {
+        if (persistentName_ == name && persistentFile_) {
+            persistentFile_.close();
+            persistentName_.clear();
+        }
+    }
+
     std::string basePath_ = "/pqueue_spool";
     std::unique_ptr<Lock> lock_;
+    File persistentFile_;
+    std::string persistentName_;
 };
 
 } // namespace
