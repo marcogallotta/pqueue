@@ -1,4 +1,5 @@
 #include "queue.h"
+#include "append_log_store.h"
 #include "internal/lock_owner.h"
 #include "storage_common.h"
 
@@ -135,20 +136,39 @@ bool isCorruptRecordStatus(StatusCode code) {
 
 } // namespace
 
+namespace {
+
+std::unique_ptr<Store> makeStore(const Config& config) {
+    if (config.storeLayout == StoreLayout::AppendLog) {
+        AppendLogConfig ac;
+        ac.basePath = config.basePath;
+        ac.backend = config.storageBackend;
+        ac.events = config.events;
+        ac.fileSystem = config.fileSystem;
+        ac.maxRecordBytes = config.recordSizeBytes;
+        ac.maxTotalBytes = config.reservedBytes;
+        ac.maxSegmentBytes = config.maxSegmentBytes;
+        ac.minFreeBytes = config.minFreeBytes;
+        ac.maxSegments = config.maxSegments;
+        return std::make_unique<AppendLogStore>(std::move(ac));
+    }
+    FileStoreConfig fc;
+    fc.basePath = config.basePath;
+    fc.backend = config.storageBackend;
+    fc.events = config.events;
+    fc.fileSystem = config.fileSystem;
+    fc.reservedBytes = config.reservedBytes;
+    fc.recordSizeBytes = config.recordSizeBytes;
+    fc.journalBytes = config.journalBytes;
+    fc.checkpointEveryOps = config.checkpointEveryOps;
+    return std::make_unique<FileStore>(std::move(fc));
+}
+
+} // namespace
+
 Queue::Queue(Config config)
     : config_(config),
-      store_([&config] {
-          FileStoreConfig storeConfig;
-          storeConfig.basePath = config.basePath;
-          storeConfig.backend = config.storageBackend;
-          storeConfig.events = config.events;
-          storeConfig.fileSystem = config.fileSystem;
-          storeConfig.reservedBytes = config.reservedBytes;
-          storeConfig.recordSizeBytes = config.recordSizeBytes;
-          storeConfig.journalBytes = config.journalBytes;
-          storeConfig.checkpointEveryOps = config.checkpointEveryOps;
-          return storeConfig;
-      }()) {}
+      store_(makeStore(config)) {}
 
 Queue::~Queue() {
     releaseLock();
@@ -201,7 +221,7 @@ Status Queue::acquireLock() {
 
     Status last = Status::failure(StatusCode::LockTimeout, "queue lock timeout");
     for (int attempt = 0; attempt < kLockAttempts; ++attempt) {
-        Status st = store_.tryAcquireLockFile(kLockFileName, lockContents_);
+        Status st = store_->tryAcquireLockFile(kLockFileName, lockContents_);
         if (st.ok()) {
             lockHeld_ = true;
             return Status::success();
@@ -220,7 +240,7 @@ void Queue::releaseLock() {
     if (!lockHeld_) {
         return;
     }
-    store_.releaseLockFile(kLockFileName, lockContents_);
+    store_->releaseLockFile(kLockFileName, lockContents_);
     lockHeld_ = false;
 }
 
@@ -231,7 +251,7 @@ Status Queue::recoverStaleLock() {
     if (lockContents_.empty()) {
         lockContents_ = makeLockContents(this);
     }
-    Status st = store_.recoverStaleLockFile(kLockFileName, lockContents_);
+    Status st = store_->recoverStaleLockFile(kLockFileName, lockContents_);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "recoverStaleLock");
     }
@@ -239,7 +259,7 @@ Status Queue::recoverStaleLock() {
 }
 
 Status Queue::loadLatestIndex() {
-    const Status st = store_.readIndexFromDisk(index_);
+    const Status st = store_->readIndexFromDisk(index_);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "loadLatestIndex");
     }
@@ -258,12 +278,7 @@ Status Queue::enqueue(const std::string& record) {
     if (record.size() > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "enqueue");
     }
-    const std::uint32_t slotSizeBytes = static_cast<std::uint32_t>(storage_detail::kRecordHeaderBytes + config_.recordSizeBytes);
-    const std::uint32_t capacityRecords = slotSizeBytes == 0 ? 0 : config_.reservedBytes / slotSizeBytes;
-    if (capacityRecords == 0) {
-        return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidArgument, "invalid pqueue storage config"), "enqueue");
-    }
-    if (index_.count >= capacityRecords) {
+    if (!store_->canEnqueue(record.size(), index_.count)) {
         if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest) {
             const Status evictStatus = evictFront();
             if (!evictStatus.ok()) {
@@ -276,7 +291,7 @@ Status Queue::enqueue(const std::string& record) {
     }
 
     const std::uint32_t sequence = index_.tail;
-    st = store_.writeRecord(sequence, record);
+    st = store_->writeRecord(sequence, record);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "enqueue");
     }
@@ -284,7 +299,7 @@ Status Queue::enqueue(const std::string& record) {
     FileStoreIndex next = index_;
     next.tail += 1;
     next.count += 1;
-    st = store_.writeIndex(next);
+    st = store_->writeIndex(next);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "enqueue");
     }
@@ -305,7 +320,7 @@ Status Queue::peek(std::string& out) {
     if (index_.count == 0) {
         return Status::failure(StatusCode::QueueEmpty, "queue is empty");
     }
-    return store_.readRecord(index_.head, out);
+    return store_->readRecord(index_.head, out);
 }
 
 Status Queue::pop() {
@@ -326,13 +341,13 @@ Status Queue::pop() {
     next.head += 1;
     next.count -= 1;
 
-    st = store_.writeIndex(next);
+    st = store_->writeIndex(next);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "pop");
     }
 
     index_ = next;
-    store_.removeRecord(oldHead);
+    store_->removeRecord(oldHead);
     return Status::success();
 }
 
@@ -351,7 +366,7 @@ Status Queue::rewriteFront(const std::string& record) {
     if (record.size() > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "rewriteFront");
     }
-    return store_.rewriteRecord(index_.head, record);
+    return store_->rewriteRecord(index_.head, record);
 }
 
 
@@ -363,13 +378,13 @@ Status Queue::evictFront() {
     next.head += 1;
     next.count -= 1;
 
-    const Status st = store_.writeIndex(next);
+    const Status st = store_->writeIndex(next);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "evictFront");
     }
 
     index_ = next;
-    store_.removeRecord(oldHead);
+    store_->removeRecord(oldHead);
     return Status::success();
 }
 
@@ -388,7 +403,7 @@ Status Queue::dropFrontIfCorrupt() {
     }
 
     std::string ignored;
-    st = store_.readRecord(index_.head, ignored);
+    st = store_->readRecord(index_.head, ignored);
     if (st.ok()) {
         return Status::failure(StatusCode::InvalidArgument, "front record is not corrupt");
     }
@@ -401,13 +416,13 @@ Status Queue::dropFrontIfCorrupt() {
     next.head += 1;
     next.count -= 1;
 
-    st = store_.writeIndex(next);
+    st = store_->writeIndex(next);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "dropFrontIfCorrupt");
     }
 
     index_ = next;
-    store_.removeRecord(corruptHead);
+    store_->removeRecord(corruptHead);
     return Status::success();
 }
 
@@ -416,7 +431,7 @@ Status Queue::format() {
     if (!lock.status().ok()) {
         return lock.status();
     }
-    Status st = store_.format();
+    Status st = store_->format();
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "format");
     }
@@ -429,7 +444,7 @@ Status Queue::rebuildMetadata() {
     if (!lock.status().ok()) {
         return lock.status();
     }
-    Status st = store_.rebuildMetadata();
+    Status st = store_->rebuildMetadata();
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "rebuildMetadata");
     }
@@ -452,7 +467,7 @@ Status Queue::visitRecords(RecordVisitor visitor, void* context) {
     for (std::uint32_t ordinal = 0; ordinal < index_.count; ++ordinal) {
         const std::uint32_t sequence = index_.head + ordinal;
         std::string record;
-        st = store_.readRecord(sequence, record);
+        st = store_->readRecord(sequence, record);
         if (!st.ok()) {
             return st;
         }
@@ -475,7 +490,7 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
     const Status loadStatus = loadLatestIndex();
     const bool indexLoaded = loadStatus.ok();
 
-    result = store_.validateUnlocked(options);
+    result = store_->validateUnlocked(options);
     addRepairHints(result, indexLoaded ? index_.head : 0);
     if (result.stoppedEarly || result.errors.size() >= options.maxErrors) {
         return result;
@@ -489,7 +504,7 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
     }
 
     FileStoreIndex diskIndex;
-    const Status st = store_.readIndexFromDisk(diskIndex);
+    const Status st = store_->readIndexFromDisk(diskIndex);
     if (!st.ok()) {
         addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
         return result;
@@ -517,7 +532,7 @@ StatsResult Queue::statsResult() {
     }
 
     result.stats.count = index_.count;
-    result.stats.freeBytes = store_.freeBytes();
+    result.stats.freeBytes = store_->freeBytes();
     return result;
 }
 

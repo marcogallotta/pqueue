@@ -1001,6 +1001,12 @@ Status FileStore::recoverStaleLockFile(const std::string& name, const std::strin
     return fileSystem_->recoverStaleLockFile(name, currentContents);
 }
 
+bool FileStore::canEnqueue(std::size_t /*recordSize*/, std::uint32_t currentCount) const {
+    const auto slotSize = static_cast<std::uint32_t>(storage_detail::kRecordHeaderBytes + config_.recordSizeBytes);
+    const auto capacity = slotSize > 0 ? config_.reservedBytes / slotSize : 0u;
+    return capacity > 0 && currentCount < capacity;
+}
+
 std::uint64_t FileStore::freeBytes() const {
     const auto fs = fileSystem();
     if (!fs || !fs->mount(config_.basePath).ok()) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "file_store.h"
@@ -54,7 +55,7 @@ private:
     Status diagnostic(Severity severity, Status status, const char* operation) const;
 
     Config config_;
-    FileStore store_;
+    std::unique_ptr<Store> store_;
     FileStoreIndex index_;
     std::string lockContents_;
     bool lockHeld_ = false;
