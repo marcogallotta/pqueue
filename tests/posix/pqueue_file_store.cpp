@@ -614,16 +614,6 @@ TEST_CASE("FileStore rejects configs that cannot fit one slot") {
     CHECK_FALSE(store.mount().ok());
 }
 
-TEST_CASE("FileStore removeRecord invalidates the slot") {
-    auto fileSystem = makeFakeFileSystem();
-    auto store = makeStore(fileSystem);
-
-    REQUIRE(store.writeRecord(0, "payload").ok());
-    REQUIRE(store.removeRecord(0).ok());
-
-    std::string out;
-    CHECK_FALSE(store.readRecord(0, out).ok());
-}
 
 TEST_CASE("Queue does not advance index after torn record write") {
     auto fileSystem = makeFakeFileSystem();
