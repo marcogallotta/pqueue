@@ -239,7 +239,7 @@ Status Queue::recoverStaleLock() {
 }
 
 Status Queue::loadLatestIndex() {
-    const Status st = store_.readIndex(index_);
+    const Status st = store_.readIndexFromDisk(index_);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "loadLatestIndex");
     }
