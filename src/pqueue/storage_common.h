@@ -21,8 +21,8 @@ constexpr std::uint16_t kFormatVersion = 0;
 constexpr std::size_t kMaxPathBytes = 160;
 
 constexpr std::uint16_t kCheckpointSlots = 4;
-constexpr std::uint16_t kCheckpointRecordBytes = 48;
-constexpr std::uint16_t kJournalEntryBytes = 24;
+constexpr std::uint16_t kCheckpointRecordBytes = 64;
+constexpr std::uint16_t kJournalEntryBytes = 32;
 constexpr std::uint16_t kRecordHeaderBytes = 20;
 
 enum class JournalOp : std::uint32_t {

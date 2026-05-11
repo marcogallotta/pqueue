@@ -45,6 +45,10 @@ std::string serializeCheckpointPrefix(const CheckpointRecord& record) {
     writeLe32(out, record.count);
     writeLe32(out, record.generation);
     writeLe32(out, record.journalUsedBytes);
+    writeLe32(out, 0); // reserved
+    writeLe32(out, 0); // reserved
+    writeLe32(out, 0); // reserved
+    writeLe32(out, 0); // reserved
     return out;
 }
 
@@ -57,6 +61,8 @@ std::string serializeJournalPrefix(const JournalEntry& entry) {
     writeLe32(out, static_cast<std::uint32_t>(entry.op));
     writeLe32(out, entry.sequence);
     writeLe32(out, entry.generation);
+    writeLe32(out, 0); // reserved
+    writeLe32(out, 0); // reserved
     return out;
 }
 
@@ -123,7 +129,8 @@ bool parseCheckpointRecord(const std::string& bytes, CheckpointRecord& out) {
     out.count = readLe32(bytes, 32);
     out.generation = readLe32(bytes, 36);
     out.journalUsedBytes = readLe32(bytes, 40);
-    out.crc = readLe32(bytes, 44);
+    // bytes 44–59: reserved
+    out.crc = readLe32(bytes, 60);
     return true;
 }
 
@@ -143,7 +150,8 @@ bool parseJournalEntry(const std::string& bytes, JournalEntry& out) {
     out.op = static_cast<JournalOp>(readLe32(bytes, 8));
     out.sequence = readLe32(bytes, 12);
     out.generation = readLe32(bytes, 16);
-    out.crc = readLe32(bytes, 20);
+    // bytes 20–27: reserved
+    out.crc = readLe32(bytes, 28);
     return true;
 }
 

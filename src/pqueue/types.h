@@ -20,7 +20,7 @@ struct Config {
     std::string basePath = kDefaultBasePath;
     StorageBackend storageBackend = StorageBackend::Default;
     std::uint32_t reservedBytes = 128 * 1024;
-    std::size_t recordSizeBytes = 512;
+    std::size_t recordSizeBytes = 492;
     std::uint32_t journalBytes = 4096;
     std::uint32_t checkpointEveryOps = 64;
     FullQueuePolicy fullQueuePolicy = FullQueuePolicy::RejectNewest;
