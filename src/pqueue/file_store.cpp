@@ -960,6 +960,20 @@ Status FileStore::readRecord(std::uint32_t sequence, std::string& out) {
     return Status::success();
 }
 
+Status FileStore::removeRecord(std::uint32_t sequence) {
+    Status st = mount();
+    if (!st.ok()) {
+        return st;
+    }
+    const Layout layout = layoutFromRuntime(runtime_);
+    const std::string empty(layout.slotSizeBytes, '\0');
+    st = fileSystem()->writeAt(kSpoolName, slotOffset(layout, sequence), empty);
+    if (!st.ok()) {
+        return diagnostic(Severity::Error, st, "removeRecord", sequence, kSpoolName);
+    }
+    return Status::success();
+}
+
 Status FileStore::tryAcquireLockFile(const std::string& name, const std::string& contents) {
     const StorageBackend backend = resolvedBackend();
     Status st = rawMount(config_, fileSystem_, backend);

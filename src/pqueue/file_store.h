@@ -134,6 +134,7 @@ private:
     Status diagnostic(Severity severity, Status status, const char* operation, std::uint32_t sequence = kNoSequence, const char* path = "") const;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{});
     Status readIndexFromDisk(FileStoreIndex& out);
+    Status removeRecord(std::uint32_t sequence);
     Status format();
     Status rebuildMetadata();
 

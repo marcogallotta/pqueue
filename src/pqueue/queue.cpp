@@ -321,6 +321,7 @@ Status Queue::pop() {
         return Status::failure(StatusCode::QueueEmpty, "queue is empty");
     }
 
+    const std::uint32_t oldHead = index_.head;
     FileStoreIndex next = index_;
     next.head += 1;
     next.count -= 1;
@@ -331,6 +332,7 @@ Status Queue::pop() {
     }
 
     index_ = next;
+    store_.removeRecord(oldHead);
     return Status::success();
 }
 
@@ -356,6 +358,7 @@ Status Queue::rewriteFront(const std::string& record) {
 
 
 Status Queue::evictFront() {
+    const std::uint32_t oldHead = index_.head;
     FileStoreIndex next = index_;
     next.head += 1;
     next.count -= 1;
@@ -366,6 +369,7 @@ Status Queue::evictFront() {
     }
 
     index_ = next;
+    store_.removeRecord(oldHead);
     return Status::success();
 }
 
@@ -392,6 +396,7 @@ Status Queue::dropFrontIfCorrupt() {
         return st;
     }
 
+    const std::uint32_t corruptHead = index_.head;
     FileStoreIndex next = index_;
     next.head += 1;
     next.count -= 1;
@@ -402,6 +407,7 @@ Status Queue::dropFrontIfCorrupt() {
     }
 
     index_ = next;
+    store_.removeRecord(corruptHead);
     return Status::success();
 }
 
