@@ -13,6 +13,8 @@ REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
 
 PQUEUE_SRC := \
+	src/pqueue/append_log_common.cpp \
+	src/pqueue/append_log_store.cpp \
 	src/pqueue/envelope.cpp \
 	src/pqueue/http/esp32_arduino_transport.cpp \
 	src/pqueue/http/outbox.cpp \
@@ -30,6 +32,7 @@ PQUEUE_SRC := \
 TEST_SRC := \
 	tests/posix/main.cpp \
 	tests/posix/pqueue.cpp \
+	tests/posix/pqueue_append_log.cpp \
 	tests/posix/pqueue_diagnostics.cpp \
 	tests/posix/pqueue_envelope.cpp \
 	tests/posix/pqueue_file_store.cpp \
