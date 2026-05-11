@@ -120,7 +120,6 @@ public:
     Status writeRecord(std::uint32_t sequence, const std::string& record);
     Status rewriteRecord(std::uint32_t sequence, const std::string& record);
     Status readRecord(std::uint32_t sequence, std::string& out);
-    Status removeRecord(std::uint32_t sequence);
 
     Status tryAcquireLockFile(const std::string& name, const std::string& contents);
     Status releaseLockFile(const std::string& name, const std::string& expectedContents);
