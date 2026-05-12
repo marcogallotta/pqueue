@@ -130,11 +130,8 @@ Status AppendLogStore::scanSegments() {
 
     std::vector<std::string> files;
     Status st = f->listFiles(files);
-    if (!st.ok()) {
-        return st;
-    }
+    if (!st.ok()) return st;
 
-    // Collect segment generations
     std::vector<std::uint32_t> generations;
     for (const auto& name : files) {
         std::uint32_t gen = 0;
@@ -144,33 +141,58 @@ Status AppendLogStore::scanSegments() {
     }
     std::sort(generations.begin(), generations.end());
 
+    // Missing segment: compaction always resets nextGeneration_ to 1, so any first segment
+    // with generation > 1, or any gap between consecutive found generations, means lost events.
+    if (!generations.empty() && generations.front() != 1) {
+        return Status::failure(StatusCode::DataCorrupt,
+            "missing segment: first generation is not 1");
+    }
+    for (std::size_t i = 1; i < generations.size(); ++i) {
+        if (generations[i] != generations[i - 1] + 1) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "missing segment: gap in generation sequence");
+        }
+    }
+
     records_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = kSegmentHeaderBytes;
     nextGeneration_ = 1;
     nextSequence_ = 0;
 
-    for (std::uint32_t gen : generations) {
+    for (std::size_t segIdx = 0; segIdx < generations.size(); ++segIdx) {
+        const std::uint32_t gen = generations[segIdx];
+        const bool isLastSegment = (segIdx + 1 == generations.size());
         const std::string name = segmentName(gen);
+
         std::uint64_t fileSize = 0;
-        if (!f->fileSize(name, fileSize).ok() || fileSize < kSegmentHeaderBytes) continue;
+        if (!f->fileSize(name, fileSize).ok() || fileSize < kSegmentHeaderBytes) {
+            return Status::failure(StatusCode::DataCorrupt, "segment missing or too small");
+        }
 
         std::string headerBytes;
-        if (!f->readAt(name, 0, kSegmentHeaderBytes, headerBytes).ok()) continue;
-
+        if (!f->readAt(name, 0, kSegmentHeaderBytes, headerBytes).ok()) {
+            return Status::failure(StatusCode::DataCorrupt, "cannot read segment header");
+        }
         SegmentHeader segHeader;
-        if (!parseSegmentHeader(headerBytes, segHeader)) continue;
-        if (segHeader.generation != gen) continue;
+        if (!parseSegmentHeader(headerBytes, segHeader)) {
+            return Status::failure(StatusCode::DataCorrupt, "corrupt segment header");
+        }
+        if (segHeader.generation != gen) {
+            return Status::failure(StatusCode::DataCorrupt, "segment generation mismatch");
+        }
 
         if (gen >= nextGeneration_) {
             nextGeneration_ = gen + 1;
         }
 
+        bool corrupt = false;
         std::uint32_t offset = kSegmentHeaderBytes;
+        std::uint32_t lastGoodOffset = kSegmentHeaderBytes;
+
         while (offset < static_cast<std::uint32_t>(fileSize)) {
-            // Read enough for the largest fixed header (20 bytes)
             const std::uint32_t remaining = static_cast<std::uint32_t>(fileSize) - offset;
-            if (remaining < 4) break; // need at least magic
+            if (remaining < 4) break; // too few bytes for magic: potential torn tail
 
             std::string headerBuf;
             const std::uint32_t toRead = std::min(remaining, static_cast<std::uint32_t>(kEnqueueHeaderBytes));
@@ -180,27 +202,30 @@ Status AppendLogStore::scanSegments() {
             const std::uint32_t magic = readLE32(headerBuf, 0);
 
             if (magic == kEnqueueMagic || magic == kRewriteMagic) {
-                if (toRead < kEnqueueHeaderBytes) break;
+                if (toRead < kEnqueueHeaderBytes) break; // partial header: torn tail
+
                 EnqueueHeader eh;
-                if (!parseEnqueueHeader(headerBuf, eh)) break;
+                if (!parseEnqueueHeader(headerBuf, eh)) { corrupt = true; break; }
 
                 // Guard: payloadBytes within configured limit (prevents huge allocation on corruption)
-                if (eh.payloadBytes > config_.maxRecordBytes) break;
+                if (eh.payloadBytes > config_.maxRecordBytes) { corrupt = true; break; }
 
                 const std::uint32_t totalEventBytes =
                     kEnqueueHeaderBytes + eh.payloadBytes + kEventTrailerBytes;
-                if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break;
+
+                if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break; // torn event
 
                 std::string payloadAndTrailer;
-                if (!f->readAt(name, offset + kEnqueueHeaderBytes, eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
+                if (!f->readAt(name, offset + kEnqueueHeaderBytes,
+                               eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
                 if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) break;
 
-                const std::string   payload      = payloadAndTrailer.substr(0, eh.payloadBytes);
-                const std::uint32_t expectedCrc  = enqueueEventCrc(eh, payload);
                 const std::uint32_t storedCrc    = readLE32(payloadAndTrailer, eh.payloadBytes);
                 const std::uint32_t storedFooter = readLE32(payloadAndTrailer, eh.payloadBytes + 4);
+                const std::string   payload      = payloadAndTrailer.substr(0, eh.payloadBytes);
+                const std::uint32_t expectedCrc  = enqueueEventCrc(eh, payload);
 
-                if (storedCrc != expectedCrc || storedFooter != kFooterMagic) break;
+                if (storedCrc != expectedCrc || storedFooter != kFooterMagic) { corrupt = true; break; }
 
                 if (magic == kEnqueueMagic) {
                     SegmentRecord sr;
@@ -210,7 +235,6 @@ Status AppendLogStore::scanSegments() {
                     sr.payloadBytes = eh.payloadBytes;
                     records_.push_back(sr);
                 } else {
-                    // REWRITE: update the existing record's payload location
                     for (auto& r : records_) {
                         if (r.sequence == eh.sequence) {
                             r.segmentGeneration = gen;
@@ -222,31 +246,51 @@ Status AppendLogStore::scanSegments() {
                 }
                 if (eh.sequence + 1 > nextSequence_) nextSequence_ = eh.sequence + 1;
                 offset += totalEventBytes;
+                lastGoodOffset = offset;
 
             } else if (magic == kPopMagic) {
-                if (remaining < kPopEventBytes) break;
+                if (remaining < kPopEventBytes) break; // torn pop event
+
                 std::string popBuf;
                 if (!f->readAt(name, offset, kPopEventBytes, popBuf).ok()) break;
                 PopEvent pe;
-                if (!parsePopEvent(popBuf, pe)) break;
+                if (!parsePopEvent(popBuf, pe)) { corrupt = true; break; }
 
                 if (!records_.empty() && records_.front().sequence == pe.sequence) {
                     records_.pop_front();
                 }
                 if (pe.sequence + 1 > nextSequence_) nextSequence_ = pe.sequence + 1;
                 offset += kPopEventBytes;
+                lastGoodOffset = offset;
 
             } else {
-                break; // unknown/corrupt magic: stop scanning this segment
+                // Unknown magic: data corruption
+                corrupt = true;
+                break;
             }
         }
 
         activeGeneration_ = gen;
-        activeSegmentBytes_ = offset;
+
+        if (corrupt) {
+            return Status::failure(StatusCode::DataCorrupt, "corrupt event data in segment");
+        }
+
+        if (offset < static_cast<std::uint32_t>(fileSize)) {
+            // Scan stopped before EOF (torn tail or I/O error on read).
+            // Only acceptable on the active (last) segment; elsewhere it means data was lost.
+            if (!isLastSegment) {
+                return Status::failure(StatusCode::DataCorrupt,
+                    "incomplete event in non-active segment");
+            }
+            // Recover: the next write will go at lastGoodOffset, overwriting the partial bytes.
+            activeSegmentBytes_ = lastGoodOffset;
+        } else {
+            activeSegmentBytes_ = offset;
+        }
     }
 
     if (generations.empty()) {
-        // Fresh store - will create first segment on first write
         activeGeneration_ = 0;
         activeSegmentBytes_ = 0;
         nextGeneration_ = 1;

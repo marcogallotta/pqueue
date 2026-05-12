@@ -27,6 +27,8 @@ enum class StatusCode {
     DecodeFailed,
     SendFailed,
     Dropped,
+
+    DataCorrupt,
 };
 
 inline const char* statusCodeName(StatusCode code) {
@@ -51,6 +53,7 @@ inline const char* statusCodeName(StatusCode code) {
         case StatusCode::DecodeFailed: return "decode_failed";
         case StatusCode::SendFailed: return "send_failed";
         case StatusCode::Dropped: return "dropped";
+        case StatusCode::DataCorrupt: return "data_corrupt";
     }
     return "unknown";
 }
