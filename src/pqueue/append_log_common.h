@@ -11,11 +11,13 @@ constexpr std::uint32_t kSegmentMagic  = 0x47535150; // "PQSG"
 constexpr std::uint32_t kEnqueueMagic  = 0x51455150; // "PQEQ"
 constexpr std::uint32_t kPopMagic      = 0x45505150; // "PQPE"
 constexpr std::uint32_t kRewriteMagic  = 0x45525150; // "PQRE"
-constexpr std::uint32_t kFooterMagic   = 0x214B4F50; // "POK!"
+constexpr std::uint32_t kFooterMagic           = 0x214B4F50; // "POK!"
+constexpr std::uint32_t kCompactionMagic        = 0x4A435150; // "PQCJ"
 
 constexpr std::uint16_t kFormatVersion = 0;
 
-constexpr std::uint16_t kSegmentHeaderBytes  = 20;
+constexpr std::uint16_t kSegmentHeaderBytes           = 20;
+constexpr std::uint16_t kCompactionJournalRecordBytes = 36;
 constexpr std::uint16_t kEnqueueHeaderBytes  = 16; // fixed header only: magic(4)+version(2)+headerBytes(2)+sequence(4)+payloadBytes(4)
 constexpr std::uint16_t kPopEventBytes       = 20;
 constexpr std::uint16_t kEventTrailerBytes   = 8;  // crc (4) + footer (4)
@@ -54,6 +56,20 @@ struct PopEvent {
     std::uint32_t footer      = kFooterMagic;
 };
 
+// Compaction journal record (36 bytes); appended to pqueue-compact.bin on each committed compaction
+struct CompactionJournalRecord {
+    std::uint32_t magic       = kCompactionMagic;
+    std::uint16_t version     = kFormatVersion;
+    std::uint16_t headerBytes = kCompactionJournalRecordBytes;
+    std::uint32_t commitSeq   = 0;
+    std::uint32_t oldStart    = 0; // first generation of replaced range (inclusive)
+    std::uint32_t oldEnd      = 0; // last generation of replaced range (inclusive)
+    std::uint32_t newStart    = 0; // first generation of compacted range (inclusive)
+    std::uint32_t newEnd      = 0; // last generation of compacted range (inclusive)
+    std::uint32_t crc         = 0; // CRC32 over all preceding fields
+    std::uint32_t footer      = kFooterMagic;
+};
+
 std::uint32_t crc32(std::uint32_t crc, const void* data, std::size_t len);
 
 std::uint32_t enqueueEventCrc(const EnqueueHeader& h, const std::string& payload);
@@ -67,5 +83,8 @@ std::string serializePopEvent(std::uint32_t sequence);
 
 bool parseEnqueueHeader(const std::string& bytes, EnqueueHeader& out);
 bool parsePopEvent(const std::string& bytes, PopEvent& out);
+
+std::string serializeCompactionJournalRecord(const CompactionJournalRecord& r);
+bool parseCompactionJournalRecord(const std::string& bytes, CompactionJournalRecord& out);
 
 } // namespace pqueue::append_log_detail

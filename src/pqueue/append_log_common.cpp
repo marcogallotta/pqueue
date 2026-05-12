@@ -184,6 +184,56 @@ bool parseEnqueueHeader(const std::string& bytes, EnqueueHeader& out) {
         && out.headerBytes == kEnqueueHeaderBytes;
 }
 
+std::string serializeCompactionJournalRecord(const CompactionJournalRecord& r) {
+    std::string prefix;
+    prefix.reserve(28);
+    writeU32(prefix, kCompactionMagic);
+    writeU16(prefix, kFormatVersion);
+    writeU16(prefix, kCompactionJournalRecordBytes);
+    writeU32(prefix, r.commitSeq);
+    writeU32(prefix, r.oldStart);
+    writeU32(prefix, r.oldEnd);
+    writeU32(prefix, r.newStart);
+    writeU32(prefix, r.newEnd);
+
+    const std::uint32_t computedCrc = crc32(0, prefix.data(), prefix.size());
+
+    std::string buf = prefix;
+    buf.reserve(kCompactionJournalRecordBytes);
+    writeU32(buf, computedCrc);
+    writeU32(buf, kFooterMagic);
+    return buf;
+}
+
+bool parseCompactionJournalRecord(const std::string& bytes, CompactionJournalRecord& out) {
+    if (bytes.size() < kCompactionJournalRecordBytes) return false;
+
+    std::size_t o = 0;
+    if (!readU32(bytes, o, out.magic))       { return false; } o += 4;
+    if (!readU16(bytes, o, out.version))     { return false; } o += 2;
+    if (!readU16(bytes, o, out.headerBytes)) { return false; } o += 2;
+    if (!readU32(bytes, o, out.commitSeq))   { return false; } o += 4;
+    if (!readU32(bytes, o, out.oldStart))    { return false; } o += 4;
+    if (!readU32(bytes, o, out.oldEnd))      { return false; } o += 4;
+    if (!readU32(bytes, o, out.newStart))    { return false; } o += 4;
+    if (!readU32(bytes, o, out.newEnd))      { return false; } o += 4;
+    if (!readU32(bytes, o, out.crc))         { return false; } o += 4;
+    if (!readU32(bytes, o, out.footer))      { return false; }
+
+    if (out.magic       != kCompactionMagic)               return false;
+    if (out.version     != kFormatVersion)                 return false;
+    if (out.headerBytes != kCompactionJournalRecordBytes)  return false;
+    if (out.footer      != kFooterMagic)                   return false;
+    if (out.oldStart    == 0 || out.newStart == 0)         return false;
+    if (out.oldStart    > out.oldEnd)                      return false;
+    if (out.newStart    > out.newEnd)                      return false;
+
+    const std::string prefix = bytes.substr(0, 28);
+    if (out.crc != crc32(0, prefix.data(), prefix.size())) return false;
+
+    return true;
+}
+
 bool parsePopEvent(const std::string& bytes, PopEvent& out) {
     if (bytes.size() < kPopEventBytes) return false;
     std::size_t o = 0;
