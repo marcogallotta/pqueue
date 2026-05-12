@@ -1,10 +1,13 @@
 #include "pqueue/queue.h"
 #include "pqueue/append_log_store.h"
+#include "pqueue/append_log_common.h"
+#include "pqueue/status.h"
 
 #include "doctest/doctest.h"
 
 #ifndef ARDUINO
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 #endif
@@ -13,6 +16,22 @@ namespace {
 
 #ifndef ARDUINO
 const std::filesystem::path kSpoolDir = "build/pqueue-spools/pqueue_append_log_spool";
+
+std::filesystem::path segmentPath(std::uint32_t gen) {
+    char buf[9];
+    std::snprintf(buf, sizeof(buf), "%08x", gen);
+    return kSpoolDir / ("pqueue-seg-" + std::string(buf, 8) + ".bin");
+}
+
+void patchFile(const std::filesystem::path& path, std::uintmax_t offset,
+               std::initializer_list<std::uint8_t> bytes) {
+    std::fstream f(path, std::ios::binary | std::ios::in | std::ios::out);
+    f.seekp(static_cast<std::streamoff>(offset));
+    for (std::uint8_t b : bytes) {
+        const char c = static_cast<char>(b);
+        f.write(&c, 1);
+    }
+}
 
 void cleanSpool() {
     std::error_code ec;
@@ -275,6 +294,128 @@ TEST_CASE("append-log: mixed enqueue and pop with persistence") {
         CHECK(q.pop().ok());
         CHECK(q.peek(out).ok());
         CHECK_EQ(out, "c");
+    }
+#endif
+}
+
+// --- Recovery policy tests ---
+
+TEST_CASE("append-log: corrupt payloadBytes causes mount failure") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    {
+        pqueue::Queue q(makeConfig());
+        CHECK(q.enqueue("hello").ok());
+    }
+    // payloadBytes field: seg_header(20) + magic(4)+version(2)+headerBytes(2)+sequence(4) = offset 32
+    constexpr std::uintmax_t kPayloadBytesOffset = kSegmentHeaderBytes + kEnqueueHeaderBytes - 4;
+    patchFile(segmentPath(1), kPayloadBytesOffset, {0xFF, 0xFF, 0xFF, 0xFF});
+    {
+        pqueue::Queue q(makeConfig());
+        std::string out;
+        const auto st = q.peek(out);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+#endif
+}
+
+TEST_CASE("append-log: torn tail on active segment is recoverable") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    auto cfg = makeConfig();
+    {
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("A").ok());
+        CHECK(q.enqueue("B").ok());
+        CHECK(q.enqueue("C").ok());
+    }
+    // Each 1-byte event: kEnqueueHeaderBytes(16) + 1 + kEventTrailerBytes(8) = 25 bytes
+    // Event A: offsets 20-44, B: 45-69, C: 70-94
+    // Truncate 5 bytes into event C's header → torn tail
+    constexpr std::uintmax_t kEventSize = kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
+    const std::uintmax_t tornOffset = kSegmentHeaderBytes + 2 * kEventSize + 5;
+    std::filesystem::resize_file(segmentPath(1), tornOffset);
+    {
+        pqueue::Queue q(cfg);
+        CHECK_EQ(q.stats().count, 2U);
+        std::string out;
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "A");
+        CHECK(q.pop().ok());
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "B");
+    }
+#endif
+}
+
+TEST_CASE("append-log: corrupt CRC causes mount failure") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    {
+        pqueue::Queue q(makeConfig());
+        CHECK(q.enqueue("A").ok());
+    }
+    // CRC offset: seg_header(20) + enqueue_header(16) + payload("A"=1 byte) = 37
+    constexpr std::uintmax_t kCrcOffset = kSegmentHeaderBytes + kEnqueueHeaderBytes + 1;
+    patchFile(segmentPath(1), kCrcOffset, {0xDE, 0xAD, 0xBE, 0xEF});
+    {
+        pqueue::Queue q(makeConfig());
+        std::string out;
+        const auto st = q.peek(out);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+#endif
+}
+
+TEST_CASE("append-log: corrupt magic in non-last segment causes mount failure") {
+#ifndef ARDUINO
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128; // fits ~4 one-byte events; 5th triggers rotation
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 6; ++i) {
+            CHECK(q.enqueue("X").ok()); // forces segment 1 full, segment 2 created
+        }
+    }
+    REQUIRE(std::filesystem::exists(segmentPath(2))); // confirm rotation happened
+    // Corrupt the magic of the first event in segment 1
+    patchFile(segmentPath(1), pqueue::append_log_detail::kSegmentHeaderBytes,
+              {0xDE, 0xAD, 0xBE, 0xEF});
+    {
+        pqueue::Queue q(cfg);
+        std::string out;
+        const auto st = q.peek(out);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+#endif
+}
+
+TEST_CASE("append-log: missing segment causes mount failure") {
+#ifndef ARDUINO
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 6; ++i) {
+            CHECK(q.enqueue("X").ok());
+        }
+    }
+    REQUIRE(std::filesystem::exists(segmentPath(2)));
+    std::filesystem::remove(segmentPath(1)); // delete first segment, leaving a gap
+    {
+        pqueue::Queue q(cfg);
+        std::string out;
+        const auto st = q.peek(out);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
     }
 #endif
 }
