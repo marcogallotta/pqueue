@@ -17,6 +17,13 @@ namespace {
 constexpr const char* kSegmentPrefix = "pqueue-seg-";
 constexpr const char* kSegmentSuffix = ".bin";
 
+inline std::uint32_t readLE32(const std::string& buf, std::size_t offset) {
+    return static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset]))
+         | static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset + 1])) << 8
+         | static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset + 2])) << 16
+         | static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset + 3])) << 24;
+}
+
 std::string formatGeneration(std::uint32_t gen) {
     char buf[9];
     std::snprintf(buf, sizeof(buf), "%08x", static_cast<unsigned>(gen));
@@ -170,43 +177,28 @@ Status AppendLogStore::scanSegments() {
             if (!f->readAt(name, offset, toRead, headerBuf).ok()) break;
             if (headerBuf.size() < 4) break;
 
-            std::uint32_t magic = 0;
-            magic = static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[0]))
-                  | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[1])) << 8
-                  | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[2])) << 16
-                  | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[3])) << 24;
+            const std::uint32_t magic = readLE32(headerBuf, 0);
 
             if (magic == kEnqueueMagic || magic == kRewriteMagic) {
                 if (toRead < kEnqueueHeaderBytes) break;
                 EnqueueHeader eh;
                 if (!parseEnqueueHeader(headerBuf, eh)) break;
 
+                // Guard: payloadBytes within configured limit (prevents huge allocation on corruption)
+                if (eh.payloadBytes > config_.maxRecordBytes) break;
+
                 const std::uint32_t totalEventBytes =
                     kEnqueueHeaderBytes + eh.payloadBytes + kEventTrailerBytes;
                 if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break;
 
-                // Read payload + trailer
                 std::string payloadAndTrailer;
                 if (!f->readAt(name, offset + kEnqueueHeaderBytes, eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
                 if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) break;
 
-                const std::string payload = payloadAndTrailer.substr(0, eh.payloadBytes);
-
-                // Verify CRC
-                const std::uint32_t expectedCrc = enqueueEventCrc(eh, payload);
-                std::uint32_t storedCrc = 0;
-                const std::size_t crcOff = eh.payloadBytes;
-                storedCrc = static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff]))
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+1])) << 8
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+2])) << 16
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+3])) << 24;
-
-                std::uint32_t storedFooter = 0;
-                const std::size_t footerOff = eh.payloadBytes + 4;
-                storedFooter = static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff]))
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+1])) << 8
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+2])) << 16
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+3])) << 24;
+                const std::string   payload      = payloadAndTrailer.substr(0, eh.payloadBytes);
+                const std::uint32_t expectedCrc  = enqueueEventCrc(eh, payload);
+                const std::uint32_t storedCrc    = readLE32(payloadAndTrailer, eh.payloadBytes);
+                const std::uint32_t storedFooter = readLE32(payloadAndTrailer, eh.payloadBytes + 4);
 
                 if (storedCrc != expectedCrc || storedFooter != kFooterMagic) break;
 
@@ -664,10 +656,7 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
             if (!f->readAt(name, offset, toRead, headerBuf).ok()) break;
             if (headerBuf.size() < 4) break;
 
-            std::uint32_t magic = static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[0]))
-                                | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[1])) << 8
-                                | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[2])) << 16
-                                | static_cast<std::uint32_t>(static_cast<std::uint8_t>(headerBuf[3])) << 24;
+            const std::uint32_t magic = readLE32(headerBuf, 0);
 
             if (magic == kEnqueueMagic || magic == kRewriteMagic) {
                 if (toRead < kEnqueueHeaderBytes) break;
@@ -677,27 +666,23 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
                         "invalid enqueue header in " + name);
                     break;
                 }
+                if (eh.payloadBytes > config_.maxRecordBytes) {
+                    addErr(ValidationIssueCode::JournalCorrupt,
+                        "payloadBytes exceeds maxRecordBytes at offset " + std::to_string(offset) + " in " + name);
+                    break;
+                }
                 const std::uint32_t totalEventBytes = kEnqueueOverheadBytes + eh.payloadBytes;
                 if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break;
 
                 std::string payloadAndTrailer;
-                if (!f->readAt(name, offset + kEnqueueHeaderBytes, eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
+                if (!f->readAt(name, offset + kEnqueueHeaderBytes,
+                               eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
+                if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) break;
 
-                const std::string payload = payloadAndTrailer.substr(0, eh.payloadBytes);
+                const std::string   payload     = payloadAndTrailer.substr(0, eh.payloadBytes);
                 const std::uint32_t expectedCrc = enqueueEventCrc(eh, payload);
-                std::uint32_t storedCrc = 0;
-                const std::size_t crcOff = eh.payloadBytes;
-                storedCrc = static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff]))
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+1])) << 8
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+2])) << 16
-                           | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[crcOff+3])) << 24;
-
-                std::uint32_t storedFooter = 0;
-                const std::size_t footerOff = eh.payloadBytes + 4;
-                storedFooter = static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff]))
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+1])) << 8
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+2])) << 16
-                             | static_cast<std::uint32_t>(static_cast<std::uint8_t>(payloadAndTrailer[footerOff+3])) << 24;
+                const std::uint32_t storedCrc   = readLE32(payloadAndTrailer, eh.payloadBytes);
+                const std::uint32_t storedFooter = readLE32(payloadAndTrailer, eh.payloadBytes + 4);
 
                 if (storedCrc != expectedCrc) {
                     addErr(ValidationIssueCode::SlotCrcMismatch,
