@@ -221,36 +221,37 @@ public:
 
 
     Status readAt(const std::string& name, std::uint64_t offset, std::size_t size, std::string& out) override {
-        File& file = ensureOpen(name);
+        File file = LittleFS.open(path(name).c_str(), "r");
         if (!file) {
             return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS file for positioned read");
         }
         if (!file.seek(static_cast<std::uint32_t>(offset), SeekSet)) {
-            closePersistent(name);
+            file.close();
             return Status::failure(StatusCode::ReadFailed, "failed to seek LittleFS file for read");
         }
         out.assign(size, '\0');
         const std::size_t bytesRead = file.read(reinterpret_cast<std::uint8_t*>(out.data()), size);
+        file.close();
         if (bytesRead != size) {
-            closePersistent(name);
             return Status::failure(StatusCode::ReadFailed, "failed to read complete LittleFS range");
         }
         return Status::success();
     }
 
     Status writeAt(const std::string& name, std::uint64_t offset, const std::string& data) override {
-        File& file = ensureOpen(name);
+        closePersistent(name);
+        File file = LittleFS.open(path(name).c_str(), "r+");
         if (!file) {
             return Status::failure(StatusCode::WriteFailed, "failed to open LittleFS file for positioned write");
         }
         if (!file.seek(static_cast<std::uint32_t>(offset), SeekSet)) {
-            closePersistent(name);
+            file.close();
             return Status::failure(StatusCode::WriteFailed, "failed to seek LittleFS file for write");
         }
         const std::size_t bytesWritten = file.write(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
         file.flush();
+        file.close();
         if (bytesWritten != data.size()) {
-            closePersistent(name);
             return Status::failure(StatusCode::WriteFailed, "failed to write complete LittleFS range");
         }
         return Status::success();

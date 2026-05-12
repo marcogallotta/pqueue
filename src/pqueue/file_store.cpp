@@ -163,6 +163,8 @@ ValidationIssue makeSlotIssue(ValidationIssueCode code, std::string message, std
 struct StoredState {
     bool foundCheckpoint = false;
     bool configMismatch = false;
+    bool readFailed = false;
+    Status readFailedStatus = Status::success();
     CheckpointRecord checkpoint;
     FileStoreIndex index;
     std::uint32_t journalUsedBytes = 0;
@@ -247,7 +249,10 @@ StoredState loadStoredState(FileSystem& fs, const Layout& layout) {
 
     const std::size_t metadataBytes = layout.checkpointBytes + layout.journalBytes;
     std::string metadata;
-    if (!fs.readAt(kSpoolName, 0, metadataBytes, metadata).ok()) {
+    const Status readStatus = fs.readAt(kSpoolName, 0, metadataBytes, metadata);
+    if (!readStatus.ok()) {
+        out.readFailed = true;
+        out.readFailedStatus = readStatus;
         return out;
     }
 
@@ -513,6 +518,9 @@ Status FileStore::mount() {
     }
 
     const StoredState state = loadStoredState(*fs, layout);
+    if (state.readFailed) {
+        return diagnostic(Severity::Error, state.readFailedStatus, "mount");
+    }
     if (state.configMismatch) {
         return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidIndex, "pqueue storage config changed; delete or reformat queue files to continue"), "mount");
     }
@@ -855,6 +863,9 @@ Status FileStore::readIndexFromDisk(FileStoreIndex& out) {
     }
     const Layout layout = layoutFromRuntime(runtime_);
     const StoredState state = loadStoredState(*fileSystem(), layout);
+    if (state.readFailed) {
+        return diagnostic(Severity::Error, state.readFailedStatus, "readIndexFromDisk");
+    }
     if (state.configMismatch) {
         return diagnostic(Severity::Error, Status::failure(StatusCode::InvalidIndex, "pqueue storage config changed; delete or reformat queue files to continue"), "readIndexFromDisk");
     }
