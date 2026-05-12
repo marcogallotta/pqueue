@@ -213,7 +213,7 @@ Status AppendLogStore::scanSegments() {
                 const std::uint32_t totalEventBytes =
                     kEnqueueHeaderBytes + eh.payloadBytes + kEventTrailerBytes;
 
-                if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break; // torn event
+                if (totalEventBytes > remaining) break; // torn event (overflow-safe)
 
                 std::string payloadAndTrailer;
                 if (!f->readAt(name, offset + kEnqueueHeaderBytes,
@@ -272,18 +272,32 @@ Status AppendLogStore::scanSegments() {
 
         activeGeneration_ = gen;
 
+        // Corruption in the last segment is treated as a torn-tail: everything from
+        // lastGoodOffset onward is discarded. This covers power-loss mid-write (partial
+        // CRC/footer), but also silently drops any valid events that follow a bad one.
+        // With a sequential append-only log the bytes after a bad event are of unknown
+        // validity, so discarding from lastGoodOffset is the safest option.
+        if (corrupt && isLastSegment) {
+            corrupt = false;
+        }
+
         if (corrupt) {
             return Status::failure(StatusCode::DataCorrupt, "corrupt event data in segment");
         }
 
         if (offset < static_cast<std::uint32_t>(fileSize)) {
-            // Scan stopped before EOF (torn tail or I/O error on read).
+            // Scan stopped before EOF: torn tail (or I/O error, treated the same way).
             // Only acceptable on the active (last) segment; elsewhere it means data was lost.
             if (!isLastSegment) {
                 return Status::failure(StatusCode::DataCorrupt,
                     "incomplete event in non-active segment");
             }
-            // Recover: the next write will go at lastGoodOffset, overwriting the partial bytes.
+            diagnostic(Severity::Warning,
+                Status::failure(StatusCode::DataCorrupt, "discarding active-segment tail after last good event"),
+                "mount");
+            // Truncate to remove partial bytes. If truncation fails, recovery remains
+            // deterministic: future remounts will discard the same tail again.
+            f->resizeFile(name, lastGoodOffset);
             activeSegmentBytes_ = lastGoodOffset;
         } else {
             activeSegmentBytes_ = offset;
@@ -716,7 +730,7 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
                     break;
                 }
                 const std::uint32_t totalEventBytes = kEnqueueOverheadBytes + eh.payloadBytes;
-                if (offset + totalEventBytes > static_cast<std::uint32_t>(fileSize)) break;
+                if (totalEventBytes > remaining) break; // overflow-safe
 
                 std::string payloadAndTrailer;
                 if (!f->readAt(name, offset + kEnqueueHeaderBytes,

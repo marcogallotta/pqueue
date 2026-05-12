@@ -300,19 +300,50 @@ TEST_CASE("append-log: mixed enqueue and pop with persistence") {
 
 // --- Recovery policy tests ---
 
-TEST_CASE("append-log: corrupt payloadBytes causes mount failure") {
+TEST_CASE("append-log: corrupt payloadBytes at tail of last segment is recoverable") {
 #ifndef ARDUINO
     using namespace pqueue::append_log_detail;
     cleanSpool();
+    auto cfg = makeConfig();
     {
-        pqueue::Queue q(makeConfig());
-        CHECK(q.enqueue("hello").ok());
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("keep").ok());
+        CHECK(q.enqueue("torn").ok());
     }
-    // payloadBytes field: seg_header(20) + magic(4)+version(2)+headerBytes(2)+sequence(4) = offset 32
+    // Corrupt payloadBytes of the second (last) event to 0xFFFFFFFF.
+    // The guard fires before any allocation; the event is discarded as a torn tail.
+    // payloadBytes field offset within an event: magic(4)+version(2)+headerBytes(2)+sequence(4) = 12
+    constexpr std::uintmax_t kEventSize = kEnqueueHeaderBytes + 4 + kEventTrailerBytes; // "keep" = 4 bytes
+    constexpr std::uintmax_t kPayloadBytesOffset = kSegmentHeaderBytes + kEventSize + kEnqueueHeaderBytes - 4;
+    patchFile(segmentPath(1), kPayloadBytesOffset, {0xFF, 0xFF, 0xFF, 0xFF});
+    {
+        pqueue::Queue q(cfg);
+        CHECK_EQ(q.stats().count, 1U);
+        std::string out;
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "keep");
+    }
+#endif
+}
+
+TEST_CASE("append-log: corrupt payloadBytes in non-last segment causes mount failure") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 6; ++i) {
+            CHECK(q.enqueue("X").ok());
+        }
+    }
+    REQUIRE(std::filesystem::exists(segmentPath(2)));
+    // Corrupt payloadBytes of first event in segment 1 (non-last segment)
     constexpr std::uintmax_t kPayloadBytesOffset = kSegmentHeaderBytes + kEnqueueHeaderBytes - 4;
     patchFile(segmentPath(1), kPayloadBytesOffset, {0xFF, 0xFF, 0xFF, 0xFF});
     {
-        pqueue::Queue q(makeConfig());
+        pqueue::Queue q(cfg);
         std::string out;
         const auto st = q.peek(out);
         CHECK_FALSE(st.ok());
@@ -351,19 +382,49 @@ TEST_CASE("append-log: torn tail on active segment is recoverable") {
 #endif
 }
 
-TEST_CASE("append-log: corrupt CRC causes mount failure") {
+TEST_CASE("append-log: corrupt CRC at tail of last segment is recoverable") {
 #ifndef ARDUINO
     using namespace pqueue::append_log_detail;
     cleanSpool();
+    auto cfg = makeConfig();
     {
-        pqueue::Queue q(makeConfig());
-        CHECK(q.enqueue("A").ok());
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("keep").ok());
+        CHECK(q.enqueue("torn").ok());
     }
-    // CRC offset: seg_header(20) + enqueue_header(16) + payload("A"=1 byte) = 37
+    // Corrupt CRC of the second (last) event: seg_header + event_"keep"(25) + header(16) + payload(4) = 65
+    constexpr std::uintmax_t kEventSize = kEnqueueHeaderBytes + 4 + kEventTrailerBytes; // "keep" = 4 bytes
+    constexpr std::uintmax_t kCrcOffset = kSegmentHeaderBytes + kEventSize + kEnqueueHeaderBytes + 4;
+    patchFile(segmentPath(1), kCrcOffset, {0xDE, 0xAD, 0xBE, 0xEF});
+    {
+        pqueue::Queue q(cfg);
+        // Mount succeeds; the corrupt final event is discarded as a torn tail
+        CHECK_EQ(q.stats().count, 1U);
+        std::string out;
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "keep");
+    }
+#endif
+}
+
+TEST_CASE("append-log: corrupt CRC in non-last segment causes mount failure") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 6; ++i) {
+            CHECK(q.enqueue("X").ok());
+        }
+    }
+    REQUIRE(std::filesystem::exists(segmentPath(2)));
+    // Corrupt CRC of the first event in segment 1 (non-last segment)
     constexpr std::uintmax_t kCrcOffset = kSegmentHeaderBytes + kEnqueueHeaderBytes + 1;
     patchFile(segmentPath(1), kCrcOffset, {0xDE, 0xAD, 0xBE, 0xEF});
     {
-        pqueue::Queue q(makeConfig());
+        pqueue::Queue q(cfg);
         std::string out;
         const auto st = q.peek(out);
         CHECK_FALSE(st.ok());
@@ -393,6 +454,34 @@ TEST_CASE("append-log: corrupt magic in non-last segment causes mount failure") 
         const auto st = q.peek(out);
         CHECK_FALSE(st.ok());
         CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+#endif
+}
+
+TEST_CASE("append-log: corrupt mid-last-segment discards tail from lastGoodOffset") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    auto cfg = makeConfig();
+    {
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("A").ok());
+        CHECK(q.enqueue("B").ok()); // will be corrupted
+        CHECK(q.enqueue("C").ok()); // valid but follows the bad event
+    }
+    // Corrupt CRC of event B (middle event). All three fit in segment 1.
+    // Event A: offsets 20-44 (1-byte payload, 25 bytes total).
+    // Event B starts at 45; CRC is at 45 + kEnqueueHeaderBytes(16) + 1 = 62.
+    constexpr std::uintmax_t kEventSize = kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
+    constexpr std::uintmax_t kBCrcOffset = kSegmentHeaderBytes + kEventSize + kEnqueueHeaderBytes + 1;
+    patchFile(segmentPath(1), kBCrcOffset, {0xDE, 0xAD, 0xBE, 0xEF});
+    {
+        pqueue::Queue q(cfg);
+        // B and C are both discarded; only A (before lastGoodOffset) survives.
+        CHECK_EQ(q.stats().count, 1U);
+        std::string out;
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "A");
     }
 #endif
 }
