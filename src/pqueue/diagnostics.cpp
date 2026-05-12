@@ -162,6 +162,9 @@ CheckpointSlotDiagnostic diagnoseCheckpointSlot(
     out.reservedBytes = record.reservedBytes;
     out.journalBytes = record.journalBytes;
     out.journalUsedBytes = record.journalUsedBytes;
+    out.checkpointBytes = record.checkpointBytes;
+    out.storedCrc = record.crc;
+    out.computedCrc = checkpointCrc(record);
 
     if (record.magic != kFileStoreCheckpointMagic) {
         out.state = CheckpointSlotState::InvalidMagic;

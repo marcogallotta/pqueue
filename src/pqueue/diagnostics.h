@@ -37,6 +37,9 @@ struct CheckpointSlotDiagnostic {
     std::uint32_t reservedBytes = 0;
     std::uint32_t journalBytes = 0;
     std::uint32_t journalUsedBytes = 0;
+    std::uint16_t checkpointBytes = 0;
+    std::uint32_t storedCrc = 0;
+    std::uint32_t computedCrc = 0;
 };
 
 struct FileStoreLayoutDiagnostic {
