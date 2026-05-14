@@ -4,7 +4,9 @@
 #include <deque>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "append_log_common.h"
 #include "events.h"
 #include "file_store.h"
 #include "file_system.h"
@@ -48,6 +50,12 @@ public:
     Status format() override;
     Status rebuildMetadata() override;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) override;
+
+    // Test-visible helper for Stage 2A; not public API.
+    static Status buildActiveSegmentOrder(
+        const std::vector<std::uint32_t>& sortedGenerations,
+        const std::vector<append_log_detail::CompactionJournalRecord>& replacements,
+        std::vector<std::uint32_t>& out);
 
 private:
     struct SegmentRecord {

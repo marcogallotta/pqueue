@@ -508,3 +508,126 @@ TEST_CASE("append-log: missing segment causes mount failure") {
     }
 #endif
 }
+
+// --- buildActiveSegmentOrder unit tests ---
+
+using pqueue::AppendLogStore;
+using pqueue::append_log_detail::CompactionJournalRecord;
+
+namespace {
+
+CompactionJournalRecord makeReplacement(std::uint32_t oldStart, std::uint32_t oldEnd,
+                                        std::uint32_t newStart, std::uint32_t newEnd) {
+    CompactionJournalRecord r;
+    r.oldStart = oldStart;
+    r.oldEnd   = oldEnd;
+    r.newStart = newStart;
+    r.newEnd   = newEnd;
+    return r;
+}
+
+} // namespace
+
+TEST_CASE("buildActiveSegmentOrder: no journal, consecutive -> returns as-is") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder({1, 2, 3}, {}, out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({1, 2, 3}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: no journal, gap -> DataCorrupt") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder({1, 3}, {}, out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("buildActiveSegmentOrder: journal 1..2->10..11, old segs still present") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {1, 2, 3, 10, 11}, {makeReplacement(1, 2, 10, 11)}, out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({10, 11, 3}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: journal 1..2->10..11, old segs cleaned up") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {3, 10, 11}, {makeReplacement(1, 2, 10, 11)}, out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({10, 11, 3}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: 4 old segs compacted into 2") {
+    // Real compaction shape: many old segments -> fewer new segments
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {5, 10, 11}, {makeReplacement(1, 4, 10, 11)}, out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({10, 11, 5}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: 2 old segs compacted into 1") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {3, 10}, {makeReplacement(1, 2, 10, 10)}, out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({10, 3}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: chained compaction, each step reduces segment count") {
+    // R1: 3 segs -> 2 segs, R2: those 2 -> 2 new segs; seg 4 untouched
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {4, 20, 21},
+        {makeReplacement(1, 3, 10, 11), makeReplacement(10, 11, 20, 21)},
+        out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({20, 21, 4}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: chained replacements") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {3, 20, 21},
+        {makeReplacement(1, 2, 10, 11), makeReplacement(10, 11, 20, 21)},
+        out);
+    CHECK(st.ok());
+    CHECK_EQ(out, std::vector<std::uint32_t>({20, 21, 3}));
+}
+
+TEST_CASE("buildActiveSegmentOrder: new range segment missing -> DataCorrupt") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {3, 10}, {makeReplacement(1, 2, 10, 11)}, out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("buildActiveSegmentOrder: old range not in logical chain -> DataCorrupt") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {1, 2, 3}, {makeReplacement(5, 6, 10, 11)}, out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("buildActiveSegmentOrder: oversized new range -> DataCorrupt") {
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {}, {makeReplacement(1, 5000, 6000, 11000)}, out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("buildActiveSegmentOrder: overlapping new ranges produce duplicates -> DataCorrupt") {
+    // R1: 1->10, R2: 2->10 — both map different originals to generation 10,
+    // producing a duplicate in the final chain
+    std::vector<std::uint32_t> out;
+    const auto st = AppendLogStore::buildActiveSegmentOrder(
+        {1, 2, 3, 10},
+        {makeReplacement(1, 1, 10, 10), makeReplacement(2, 2, 10, 10)},
+        out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}

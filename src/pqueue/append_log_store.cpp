@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 #include <sstream>
+#include <unordered_set>
 #include <vector>
 
 namespace pqueue {
@@ -125,6 +126,144 @@ Status AppendLogStore::mount() {
     return Status::success();
 }
 
+Status AppendLogStore::buildActiveSegmentOrder(
+    const std::vector<std::uint32_t>& sortedGenerations,
+    const std::vector<CompactionJournalRecord>& replacements,
+    std::vector<std::uint32_t>& out)
+{
+    if (replacements.empty()) {
+        // No journal: must be consecutive 1..N
+        for (std::size_t i = 0; i < sortedGenerations.size(); ++i) {
+            if (sortedGenerations[i] != static_cast<std::uint32_t>(i + 1)) {
+                return Status::failure(StatusCode::DataCorrupt,
+                    "missing segment: generation sequence is not consecutive from 1");
+            }
+        }
+        out = sortedGenerations;
+        return Status::success();
+    }
+
+    // Conservative upper bound on a single compaction range; can be tied to
+    // config.maxSegments in a future stage.
+    constexpr std::uint32_t kMaxCompactionRangeGenerations = 4096;
+
+    auto validRange = [&](std::uint32_t start, std::uint32_t end) -> bool {
+        // Re-check all invariants even though the parser enforces them —
+        // cheap, and this helper may be called directly without a parsed record.
+        return start != 0
+            && end >= start
+            && (end - start) < kMaxCompactionRangeGenerations;
+    };
+    auto expandRange = [&](std::uint32_t start, std::uint32_t end,
+                           std::vector<std::uint32_t>& vec) -> bool {
+        if (!validRange(start, end)) return false;
+        for (std::uint32_t g = start; g <= end; ++g) vec.push_back(g);
+        return true;
+    };
+    auto insertRange = [&](std::unordered_set<std::uint32_t>& set,
+                           std::uint32_t start, std::uint32_t end) -> bool {
+        if (!validRange(start, end)) return false;
+        for (std::uint32_t g = start; g <= end; ++g) set.insert(g);
+        return true;
+    };
+
+    // Collect all new-range sortedGenerations produced by any replacement
+    std::unordered_set<std::uint32_t> allNewRanges;
+    for (const auto& r : replacements) {
+        if (!insertRange(allNewRanges, r.newStart, r.newEnd)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: invalid new range");
+        }
+    }
+
+    // Build base logical chain:
+    //   - found sortedGenerations not in any new range  (original, still on disk)
+    //   - old-range sortedGenerations not produced by an earlier replacement's new range
+    //     (original sortedGenerations that may have been cleaned up after commit)
+    std::unordered_set<std::uint32_t> baseSet;
+    for (std::uint32_t g : sortedGenerations) {
+        if (!allNewRanges.count(g)) {
+            baseSet.insert(g);
+        }
+    }
+    // Track new ranges produced by records processed so far, to exclude chained old ranges
+    std::unordered_set<std::uint32_t> priorNewRanges;
+    for (const auto& r : replacements) {
+        std::vector<std::uint32_t> oldVec;
+        if (!expandRange(r.oldStart, r.oldEnd, oldVec)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: invalid old range");
+        }
+        for (std::uint32_t g : oldVec) {
+            if (!priorNewRanges.count(g)) {
+                baseSet.insert(g);
+            }
+        }
+        if (!insertRange(priorNewRanges, r.newStart, r.newEnd)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: invalid new range");
+        }
+    }
+
+    std::vector<std::uint32_t> chain(baseSet.begin(), baseSet.end());
+    std::sort(chain.begin(), chain.end());
+
+    // Verify base is consecutive from 1
+    for (std::size_t i = 0; i < chain.size(); ++i) {
+        if (chain[i] != static_cast<std::uint32_t>(i + 1)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "missing segment: base logical chain is not consecutive from 1");
+        }
+    }
+
+    // Apply each replacement in order
+    for (const auto& r : replacements) {
+        std::vector<std::uint32_t> oldRange;
+        if (!expandRange(r.oldStart, r.oldEnd, oldRange)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: invalid old range");
+        }
+
+        auto it = std::search(chain.begin(), chain.end(), oldRange.begin(), oldRange.end());
+        if (it == chain.end()) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: old range not found in logical chain");
+        }
+
+        std::vector<std::uint32_t> newRange;
+        if (!expandRange(r.newStart, r.newEnd, newRange)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: invalid new range");
+        }
+
+        it = chain.erase(it, it + static_cast<std::ptrdiff_t>(oldRange.size()));
+        chain.insert(it, newRange.begin(), newRange.end());
+    }
+
+    // Detect duplicates in final chain (e.g. overlapping journal records)
+    {
+        std::unordered_set<std::uint32_t> seen;
+        seen.reserve(chain.size());
+        for (std::uint32_t g : chain) {
+            if (!seen.insert(g).second) {
+                return Status::failure(StatusCode::DataCorrupt,
+                    "compaction journal: duplicate generation in final active chain");
+            }
+        }
+    }
+
+    // Verify every generation in final chain exists in sortedGenerations
+    for (std::uint32_t g : chain) {
+        if (!std::binary_search(sortedGenerations.begin(), sortedGenerations.end(), g)) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "compaction journal: active segment generation missing from disk");
+        }
+    }
+
+    out = std::move(chain);
+    return Status::success();
+}
+
 Status AppendLogStore::scanSegments() {
     auto f = fs();
 
@@ -132,23 +271,23 @@ Status AppendLogStore::scanSegments() {
     Status st = f->listFiles(files);
     if (!st.ok()) return st;
 
-    std::vector<std::uint32_t> generations;
+    std::vector<std::uint32_t> sortedGenerations;
     for (const auto& name : files) {
         std::uint32_t gen = 0;
         if (isSegmentName(name, gen)) {
-            generations.push_back(gen);
+            sortedGenerations.push_back(gen);
         }
     }
-    std::sort(generations.begin(), generations.end());
+    std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
     // Missing segment: compaction always resets nextGeneration_ to 1, so any first segment
-    // with generation > 1, or any gap between consecutive found generations, means lost events.
-    if (!generations.empty() && generations.front() != 1) {
+    // with generation > 1, or any gap between consecutive found sortedGenerations, means lost events.
+    if (!sortedGenerations.empty() && sortedGenerations.front() != 1) {
         return Status::failure(StatusCode::DataCorrupt,
             "missing segment: first generation is not 1");
     }
-    for (std::size_t i = 1; i < generations.size(); ++i) {
-        if (generations[i] != generations[i - 1] + 1) {
+    for (std::size_t i = 1; i < sortedGenerations.size(); ++i) {
+        if (sortedGenerations[i] != sortedGenerations[i - 1] + 1) {
             return Status::failure(StatusCode::DataCorrupt,
                 "missing segment: gap in generation sequence");
         }
@@ -160,9 +299,9 @@ Status AppendLogStore::scanSegments() {
     nextGeneration_ = 1;
     nextSequence_ = 0;
 
-    for (std::size_t segIdx = 0; segIdx < generations.size(); ++segIdx) {
-        const std::uint32_t gen = generations[segIdx];
-        const bool isLastSegment = (segIdx + 1 == generations.size());
+    for (std::size_t segIdx = 0; segIdx < sortedGenerations.size(); ++segIdx) {
+        const std::uint32_t gen = sortedGenerations[segIdx];
+        const bool isLastSegment = (segIdx + 1 == sortedGenerations.size());
         const std::string name = segmentName(gen);
 
         std::uint64_t fileSize = 0;
@@ -304,7 +443,7 @@ Status AppendLogStore::scanSegments() {
         }
     }
 
-    if (generations.empty()) {
+    if (sortedGenerations.empty()) {
         activeGeneration_ = 0;
         activeSegmentBytes_ = 0;
         nextGeneration_ = 1;
@@ -393,7 +532,7 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
 
 bool AppendLogStore::needsCompaction() const {
     const auto segCount = [this]() -> std::uint32_t {
-        // Count distinct segment generations referenced by live records + active
+        // Count distinct segment sortedGenerations referenced by live records + active
         if (records_.empty()) return 0;
         std::uint32_t min = records_.front().segmentGeneration;
         return (activeGeneration_ >= min) ? (activeGeneration_ - min + 1) : 1;
@@ -663,16 +802,16 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
         return result;
     }
 
-    std::vector<std::uint32_t> generations;
+    std::vector<std::uint32_t> sortedGenerations;
     for (const auto& name : files) {
         std::uint32_t gen = 0;
         if (isSegmentName(name, gen)) {
-            generations.push_back(gen);
+            sortedGenerations.push_back(gen);
         }
     }
-    std::sort(generations.begin(), generations.end());
+    std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
-    for (std::uint32_t gen : generations) {
+    for (std::uint32_t gen : sortedGenerations) {
         if (result.stoppedEarly) break;
         const std::string name = segmentName(gen);
 
