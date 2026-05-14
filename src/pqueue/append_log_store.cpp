@@ -15,8 +15,9 @@ using namespace append_log_detail;
 
 namespace {
 
-constexpr const char* kSegmentPrefix = "pqueue-seg-";
-constexpr const char* kSegmentSuffix = ".bin";
+constexpr const char* kSegmentPrefix       = "pqueue-seg-";
+constexpr const char* kSegmentSuffix       = ".bin";
+constexpr const char* kCompactionJournalFile = "pqueue-compact.bin";
 
 inline std::uint32_t readLE32(const std::string& buf, std::size_t offset) {
     return static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset]))
@@ -280,17 +281,49 @@ Status AppendLogStore::scanSegments() {
     }
     std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
-    // Missing segment: compaction always resets nextGeneration_ to 1, so any first segment
-    // with generation > 1, or any gap between consecutive found sortedGenerations, means lost events.
-    if (!sortedGenerations.empty() && sortedGenerations.front() != 1) {
-        return Status::failure(StatusCode::DataCorrupt,
-            "missing segment: first generation is not 1");
-    }
-    for (std::size_t i = 1; i < sortedGenerations.size(); ++i) {
-        if (sortedGenerations[i] != sortedGenerations[i - 1] + 1) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "missing segment: gap in generation sequence");
+    // Read compaction journal if present.
+    // Presence is determined from the listFiles() result so that a read/stat failure on
+    // an existing journal is a hard mount error, not silently treated as "no journal".
+    std::vector<CompactionJournalRecord> replacements;
+    {
+        const bool journalPresent = [&]() {
+            for (const auto& name : files)
+                if (name == kCompactionJournalFile) return true;
+            return false;
+        }();
+
+        if (journalPresent) {
+            std::string journalBytes;
+            if (!f->readFile(kCompactionJournalFile, journalBytes).ok()) {
+                return Status::failure(StatusCode::DataCorrupt,
+                    "compaction journal: read failed");
+            }
+            if (journalBytes.size() % kCompactionJournalRecordBytes != 0) {
+                return Status::failure(StatusCode::DataCorrupt,
+                    "compaction journal: unexpected file size");
+            }
+            const std::size_t recordCount =
+                journalBytes.size() / kCompactionJournalRecordBytes;
+            for (std::size_t i = 0; i < recordCount; ++i) {
+                const std::string recBytes = journalBytes.substr(
+                    i * kCompactionJournalRecordBytes, kCompactionJournalRecordBytes);
+                CompactionJournalRecord rec;
+                if (!parseCompactionJournalRecord(recBytes, rec)) {
+                    return Status::failure(StatusCode::DataCorrupt,
+                        "compaction journal: corrupt record");
+                }
+                replacements.push_back(rec);
+            }
         }
+    }
+
+    // Compute the logical replay order from disk state + journal.
+    // Without a journal this enforces the legacy consecutive-1..N invariant.
+    // With a journal the helper verifies the journal-backed layout is self-consistent.
+    std::vector<std::uint32_t> logicalOrder;
+    {
+        Status orderSt = buildActiveSegmentOrder(sortedGenerations, replacements, logicalOrder);
+        if (!orderSt.ok()) return orderSt;
     }
 
     records_.clear();
@@ -299,9 +332,15 @@ Status AppendLogStore::scanSegments() {
     nextGeneration_ = 1;
     nextSequence_ = 0;
 
-    for (std::size_t segIdx = 0; segIdx < sortedGenerations.size(); ++segIdx) {
-        const std::uint32_t gen = sortedGenerations[segIdx];
-        const bool isLastSegment = (segIdx + 1 == sortedGenerations.size());
+    // nextGeneration_ must exceed every generation on disk — including compacted-away
+    // segments not in the logical chain — so those numbers are never reused.
+    for (std::uint32_t g : sortedGenerations) {
+        if (g + 1 > nextGeneration_) nextGeneration_ = g + 1;
+    }
+
+    for (std::size_t segIdx = 0; segIdx < logicalOrder.size(); ++segIdx) {
+        const std::uint32_t gen = logicalOrder[segIdx];
+        const bool isLastSegment = (segIdx + 1 == logicalOrder.size());
         const std::string name = segmentName(gen);
 
         std::uint64_t fileSize = 0;
@@ -319,10 +358,6 @@ Status AppendLogStore::scanSegments() {
         }
         if (segHeader.generation != gen) {
             return Status::failure(StatusCode::DataCorrupt, "segment generation mismatch");
-        }
-
-        if (gen >= nextGeneration_) {
-            nextGeneration_ = gen + 1;
         }
 
         bool corrupt = false;
