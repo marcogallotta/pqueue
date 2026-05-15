@@ -98,6 +98,9 @@ private:
     std::uint32_t activeSegmentBytes_ = 0;
     std::uint32_t nextGeneration_ = 1;
 
+    // Logical active segment order (matches replay order from scanSegments)
+    std::vector<std::uint32_t> activeGenerations_;
+
     // In-order live records (front = queue head)
     std::deque<SegmentRecord> records_;
 

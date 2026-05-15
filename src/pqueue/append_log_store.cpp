@@ -323,7 +323,7 @@ Status AppendLogStore::scanSegments() {
         Status orderSt = buildActiveSegmentOrder(sortedGenerations, replacements, logicalOrder);
         if (!orderSt.ok()) return orderSt;
     }
-
+    activeGenerations_ = logicalOrder;
     records_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = kSegmentHeaderBytes;
@@ -491,6 +491,7 @@ Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t bas
     if (!st.ok()) return st;
     activeGeneration_ = generation;
     activeSegmentBytes_ = kSegmentHeaderBytes;
+    activeGenerations_.push_back(generation);
     if (generation >= nextGeneration_) {
         nextGeneration_ = generation + 1;
     }
@@ -598,6 +599,7 @@ Status AppendLogStore::compact() {
         }
     }
     fs()->removeFile(kCompactionJournalFile);
+    activeGenerations_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
@@ -785,6 +787,7 @@ Status AppendLogStore::format() {
     }
     f->removeFile(kCompactionJournalFile);
 
+    activeGenerations_.clear();
     records_.clear();
     hasPendingEnqueue_ = false;
     activeGeneration_ = 0;
@@ -797,6 +800,7 @@ Status AppendLogStore::format() {
 
 Status AppendLogStore::rebuildMetadata() {
     // For append-log, rebuilding means re-scanning all segments from scratch.
+    activeGenerations_.clear();
     records_.clear();
     hasPendingEnqueue_ = false;
     mounted_ = false;
