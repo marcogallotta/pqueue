@@ -1130,6 +1130,183 @@ Target behavior:
 
 Current code does not yet have `compactRange(oldStart, oldEnd)`.
 
+Stage 3 should be split into small diffs rather than implemented as one large change.
+The preferred split is below.
+
+#### Stage 3A — retain logical active segment order in RAM
+
+Purpose: make the Stage 2 logical scan order available to compaction code after mount.
+
+Current `scanSegments()` computes `logicalOrder` locally and then discards it. Real compaction should not infer active layout from numeric generation span alone, because journal-backed layouts can be non-monotonic.
+
+Suggested changes:
+
+- add an internal field such as `activeGenerations_` to `AppendLogStore`;
+- set it from the `logicalOrder` produced by `scanSegments()`;
+- update it when a new segment is created/rotated;
+- clear it on `format()` and empty-store reset paths;
+- keep existing runtime behavior unchanged.
+
+Tests:
+
+- existing Stage 2 tests should continue passing;
+- add a regression for journal-backed remount followed by rotation/enqueue, proving the active logical chain remains coherent.
+
+#### Stage 3B — choose a compactable range, without writing files
+
+Purpose: isolate compaction range selection from the writer.
+
+Suggested helper shape:
+
+```text
+chooseCompactionRange(oldStart, oldEnd)
+```
+
+Initial policy should be conservative:
+
+- do not compact the logical last segment;
+- choose only from `activeGenerations_`, not numeric generation span alone;
+- prefer an old contiguous logical prefix/range;
+- start with a small range of old non-active segments;
+- avoid clever space heuristics until the commit path is proven.
+
+This stage should not create, delete, or rewrite files.
+
+Tests:
+
+- enough rotations create a selectable old range;
+- active/logical last segment is not selected;
+- journal-backed non-monotonic order is handled by logical order, not numeric order.
+
+#### Stage 3C — collect live records from the selected range
+
+Purpose: prove which payloads should be copied before writing any new segments.
+
+Suggested helper shape:
+
+```text
+collectLiveRecordsInRange(oldStart, oldEnd)
+```
+
+Rules:
+
+- inspect current `records_` only;
+- collect records whose current `segmentGeneration` is inside `oldStart..oldEnd`;
+- preserve FIFO/sequence order from `records_`;
+- do not resurrect popped records;
+- do not copy stale rewritten payloads if the live record now points elsewhere.
+
+Tests:
+
+- enqueue several records, pop some, collect from old range: popped records are absent;
+- rewriteFront moves the live pointer, and collection follows the current pointer only;
+- collected records remain in queue order.
+
+#### Stage 3D — write compacted segment files, but do not expose it through `compact()` alone
+
+Purpose: add the low-level compacted segment writer.
+
+Suggested helper shape:
+
+```text
+writeCompactedSegments(liveRecords) -> newStart, newEnd, newLocations
+```
+
+It should:
+
+- allocate fresh generations from `nextGeneration_`;
+- create new segment files with normal segment headers;
+- write ENQUEUE-shaped events preserving the original sequence numbers;
+- split across segment files using normal segment sizing rules;
+- return the new payload locations for each copied live record;
+- leave `records_` unchanged;
+- leave the compaction journal unchanged.
+
+Important caution: new uncommitted normal-looking segment files can poison a later mount if they are left on disk without a journal record or cleanup logic. Therefore this writer should be tested in isolation or wired together with the journal commit before becoming reachable from production `compact()`.
+
+Tests:
+
+- writer creates valid segment files for a known live-record set;
+- failure leaves RAM record locations unchanged;
+- generated segment/event bytes can be parsed by existing append-log parsing logic.
+
+#### Stage 3E — append the compaction journal commit record
+
+Purpose: make the journal append the explicit commit point.
+
+Suggested helper shape:
+
+```text
+appendCompactionJournalRecord(oldStart, oldEnd, newStart, newEnd)
+```
+
+Rules:
+
+- use `serializeCompactionJournalRecord()`;
+- append to `pqueue-compact.bin`;
+- treat successful journal append as the commit point;
+- before this record is durable, old segments remain authoritative;
+- after this record is durable, remount must use the new segment range in place of the old range.
+
+Tests:
+
+- journal file receives one valid record;
+- remount after journal commit replays new segments;
+- old segments still present on disk are ignored after commit.
+
+#### Stage 3F — implement `compactRange(oldStart, oldEnd)`
+
+Purpose: combine collection, writing, journal commit, and RAM update.
+
+Order of operations:
+
+1. collect live records from the old range;
+2. write new compacted segment files;
+3. verify/read back enough of the new files to trust them;
+4. append the compaction journal record;
+5. only after the journal append succeeds, update `records_` to point at the new payload locations;
+6. update `activeGenerations_` by replacing the old range with the new range;
+7. advance generation allocation state;
+8. leave old segment files on disk.
+
+Crash-safety rule: RAM state must not claim new compacted locations unless the journal commit succeeds.
+
+Tests:
+
+- compacted queue preserves FIFO order;
+- compaction preserves `rewriteFront()` result;
+- compaction after POP does not resurrect popped records;
+- old segments remain on disk after Stage 3 compaction;
+- remount uses compacted segments and ignores old replaced ones;
+- new generation allocation after remount skips both old and new segment generations.
+
+#### Stage 3G — wire production `compact()` trigger to `compactRange()`
+
+Purpose: replace the current non-empty compaction no-op with the proven compactRange path.
+
+Suggested changes:
+
+- make `compact()` call range selection;
+- if no useful compactable range exists, return success or allow rotation without pretending to reclaim space;
+- call `compactRange(oldStart, oldEnd)` for selected ranges;
+- update `needsCompaction()` so it depends on logical active segment count/order, not only numeric generation span.
+
+Tests:
+
+- the existing “compaction triggered by segment count” test should be strengthened to assert actual journal/segment compaction;
+- repeated enqueue/pop/rotation eventually produces a journal record and compacted replacement segments;
+- behavior remains correct after remount.
+
+Preferred implementation order:
+
+1. Stage 3A plus tests.
+2. Stage 3B/3C plus tests.
+3. Stage 3D/3E together, or with the writer kept unreachable from production paths until journal commit is wired.
+4. Stage 3F integration tests.
+5. Stage 3G trigger wiring.
+
+Do not start Stage 3 by writing all of `compactRange()` in one large diff.
+
 ### Stage 4 — cleanup/idempotent deletion
 
 Planned after Stage 3.
