@@ -758,11 +758,11 @@ TEST_CASE("append-log mount: corrupt journal record causes mount failure") {
     CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
 }
 
-TEST_CASE("append-log mount: truncated journal (partial record) causes mount failure") {
-    // Both segments present so the only reason mount can fail is the partial size.
-    // If partial tails were incorrectly ignored, the complete first record would succeed
-    // and mount would succeed by replaying gen 2 only (one item, not two events) — this
-    // test catches that regression.
+TEST_CASE("append-log mount: truncated journal final record is ignored as torn tail") {
+    // One complete valid record followed by 4 partial bytes (torn tail).
+    // Policy: partial trailing bytes are silently ignored; the valid prefix is used.
+    // The complete record replaces [1..1] with [2..2]; logical order is [2] so only
+    // gen 2 is replayed and the queue holds one item ("B").
     jClean();
     jWriteSegment(1, 0, {"A"});
     jWriteSegment(2, 1, {"B"});
@@ -775,10 +775,10 @@ TEST_CASE("append-log mount: truncated journal (partial record) causes mount fai
         f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
     }
     pqueue::Queue q(makeJConfig());
+    CHECK_EQ(q.stats().count, 1U);
     std::string out;
-    const auto st = q.peek(out);
-    CHECK_FALSE(st.ok());
-    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    CHECK(q.peek(out).ok());
+    CHECK_EQ(out, "B");
 }
 
 TEST_CASE("append-log mount: journal with missing active generation fails") {
@@ -979,6 +979,48 @@ TEST_CASE("append-log mount: non-consecutive base chain causes DataCorrupt") {
     const auto st = q.peek(out);
     CHECK_FALSE(st.ok());
     CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("append-log: format() removes compaction journal") {
+    // A valid journal-backed layout is mounted, then format() is called.
+    // format() must delete the journal so a subsequent remount sees a clean store.
+    jClean();
+    jWriteSegment(10, 0, {"A"});
+    jWriteSegment(11, 1, {"B"});
+    jWriteSegment(3,  2, {"C"});
+    jWriteJournal({jReplacement(1, 2, 10, 11)});
+
+    pqueue::Queue q(makeJConfig());
+    CHECK_EQ(q.stats().count, 3U);
+    CHECK(q.format().ok());
+    CHECK_FALSE(std::filesystem::exists(jJournalPath()));
+    CHECK_FALSE(std::filesystem::exists(jSegPath(3)));
+    CHECK_FALSE(std::filesystem::exists(jSegPath(10)));
+    CHECK_FALSE(std::filesystem::exists(jSegPath(11)));
+}
+
+TEST_CASE("append-log: format() followed by remount ignores stale journal") {
+    // After format(), a fresh remount must not see any leftover journal artifacts.
+    // Regression guard: if format() left the journal, the remount would read stale
+    // replacement records referencing non-existent generations and fail with DataCorrupt.
+    jClean();
+    jWriteSegment(10, 0, {"A"});
+    jWriteSegment(3,  1, {"B"});
+    jWriteJournal({jReplacement(1, 2, 10, 10)});
+
+    {
+        pqueue::Queue q(makeJConfig());
+        CHECK_EQ(q.stats().count, 2U);
+        CHECK(q.format().ok());
+    }
+    {
+        pqueue::Queue q(makeJConfig());
+        CHECK_EQ(q.stats().count, 0U);
+        CHECK(q.enqueue("fresh").ok());
+        std::string out;
+        CHECK(q.peek(out).ok());
+        CHECK_EQ(out, "fresh");
+    }
 }
 
 TEST_CASE("append-log mount: bad middle complete journal record causes DataCorrupt") {

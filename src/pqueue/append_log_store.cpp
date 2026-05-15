@@ -298,10 +298,8 @@ Status AppendLogStore::scanSegments() {
                 return Status::failure(StatusCode::DataCorrupt,
                     "compaction journal: read failed");
             }
-            if (journalBytes.size() % kCompactionJournalRecordBytes != 0) {
-                return Status::failure(StatusCode::DataCorrupt,
-                    "compaction journal: unexpected file size");
-            }
+            // Truncating division: any partial trailing bytes are a torn tail and are
+            // silently ignored.  A corrupt but complete record is DataCorrupt.
             const std::size_t recordCount =
                 journalBytes.size() / kCompactionJournalRecordBytes;
             for (std::size_t i = 0; i < recordCount; ++i) {
@@ -599,6 +597,7 @@ Status AppendLogStore::compact() {
             }
         }
     }
+    fs()->removeFile(kCompactionJournalFile);
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
@@ -784,6 +783,7 @@ Status AppendLogStore::format() {
             f->removeFile(name);
         }
     }
+    f->removeFile(kCompactionJournalFile);
 
     records_.clear();
     hasPendingEnqueue_ = false;
