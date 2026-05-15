@@ -760,8 +760,9 @@ TEST_CASE("append-log mount: corrupt journal record causes mount failure") {
 
 TEST_CASE("append-log mount: truncated journal (partial record) causes mount failure") {
     // Both segments present so the only reason mount can fail is the partial size.
-    // If partial tails were incorrectly ignored the complete first record would succeed
-    // and mount would succeed by replaying gen 2 only — this test catches that regression.
+    // If partial tails were incorrectly ignored, the complete first record would succeed
+    // and mount would succeed by replaying gen 2 only (one item, not two events) — this
+    // test catches that regression.
     jClean();
     jWriteSegment(1, 0, {"A"});
     jWriteSegment(2, 1, {"B"});
@@ -932,6 +933,124 @@ TEST_CASE("append-log mount: multi-record journal applies all records in order")
     CHECK(q.peek(out).ok()); CHECK_EQ(out, "C"); CHECK(q.pop().ok());
     CHECK(q.peek(out).ok()); CHECK_EQ(out, "D"); CHECK(q.pop().ok());
     CHECK(q.peek(out).ok()); CHECK_EQ(out, "E");
+}
+
+TEST_CASE("append-log mount: no journal, physical gap [1,3] causes DataCorrupt") {
+    // Without a journal, segments must be consecutive from gen 1.
+    // {1, 3} with gen 2 absent is a gap — DataCorrupt.
+    jClean();
+    jWriteSegment(1, 0, {"A"});
+    jWriteSegment(3, 1, {"B"});
+    pqueue::Queue q(makeJConfig());
+    std::string out;
+    const auto st = q.peek(out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("append-log mount: empty store no journal mounts successfully") {
+    jClean();
+    pqueue::Queue q(makeJConfig());
+    CHECK_EQ(q.stats().count, 0U);
+    std::string out;
+    CHECK_FALSE(q.peek(out).ok());
+}
+
+TEST_CASE("append-log mount: journal present but no segments on disk causes DataCorrupt") {
+    // Journal refers to active gens 10..11 that are absent from disk.
+    jClean();
+    jWriteJournal({jReplacement(1, 2, 10, 11)});
+    pqueue::Queue q(makeJConfig());
+    std::string out;
+    const auto st = q.peek(out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("append-log mount: non-consecutive base chain causes DataCorrupt") {
+    // Journal replaces [1..2] with gen 10; disk has {4,10}.
+    // Base chain reconstructs as [1,2,4] — gen 3 is missing — DataCorrupt.
+    jClean();
+    jWriteSegment(4,  0, {"X"});
+    jWriteSegment(10, 0, {"Y"});
+    jWriteJournal({jReplacement(1, 2, 10, 10)});
+    pqueue::Queue q(makeJConfig());
+    std::string out;
+    const auto st = q.peek(out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("append-log mount: bad middle complete journal record causes DataCorrupt") {
+    // Three complete journal records; index 1 (middle) has a corrupted CRC.
+    // Disk has exactly the active gens needed by r1 + r3: if the parser wrongly skipped
+    // r2, r1+r3 would yield logical order [10,11] and mount would succeed.  Correct
+    // fail-closed code must reject r2 and return DataCorrupt before reaching that point.
+    //
+    //   r1 valid  : [1..2] -> [10]   (new seg 10 present on disk)
+    //   r2 corrupt: complete-sized, bad CRC
+    //   r3 valid  : [3..4] -> [11]   (new seg 11 present on disk)
+    jClean();
+    jWriteSegment(10, 0, {"A", "B"});
+    jWriteSegment(11, 2, {"C", "D"});
+    {
+        using namespace pqueue::append_log_detail;
+        std::filesystem::create_directories(kJSpoolDir);
+        auto r1 = serializeCompactionJournalRecord(jReplacement(1, 2, 10, 10));
+        auto r2 = serializeCompactionJournalRecord(jReplacement(3, 4, 11, 11));
+        r2[28] ^= 0xFF; // corrupt CRC field at offset 28
+        auto r3 = serializeCompactionJournalRecord(jReplacement(3, 4, 11, 11));
+        const std::string bytes = r1 + r2 + r3;
+        std::ofstream f(jJournalPath(), std::ios::binary | std::ios::trunc);
+        f.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    }
+    pqueue::Queue q(makeJConfig());
+    std::string out;
+    const auto st = q.peek(out);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+}
+
+TEST_CASE("append-log mount: new generation skips all disk gens including old compacted-away") {
+    // Disk: {1,2,3,10,11}; journal replaces [1..2] with [10..11]; logical order [10,11,3].
+    // Max disk gen = 11 even though logical-last gen = 3;
+    // nextGeneration_ must be 12, not 4.
+    // maxSegmentBytes is set to seg 3's exact on-disk size so that the next enqueue
+    // overflows it and forces rotation to a new generation.
+    jClean();
+    jWriteSegment(1,  0, {"old-A"});
+    jWriteSegment(2,  1, {"old-B"});
+    jWriteSegment(10, 0, {"A", "B"});
+    jWriteSegment(11, 2, {"C"});
+    jWriteSegment(3,  3, {"D"});
+    jWriteJournal({jReplacement(1, 2, 10, 11)});
+
+    auto cfg = makeJConfig();
+    {
+        using namespace pqueue::append_log_detail;
+        // Seg 3 holds exactly one 1-byte event; set limit to that size so the next
+        // enqueue triggers rotation rather than appending in-place.
+        cfg.maxSegmentBytes = kSegmentHeaderBytes + kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
+    }
+
+    pqueue::Queue q(cfg);
+    CHECK_EQ(q.stats().count, 4U);
+
+    CHECK(q.enqueue("E").ok());
+    CHECK_EQ(q.stats().count, 5U);
+
+    // FIFO order must be A,B,C,D,E
+    std::string out;
+    CHECK(q.peek(out).ok()); CHECK_EQ(out, "A"); CHECK(q.pop().ok());
+    CHECK(q.peek(out).ok()); CHECK_EQ(out, "B"); CHECK(q.pop().ok());
+    CHECK(q.peek(out).ok()); CHECK_EQ(out, "C"); CHECK(q.pop().ok());
+    CHECK(q.peek(out).ok()); CHECK_EQ(out, "D"); CHECK(q.pop().ok());
+    CHECK(q.peek(out).ok()); CHECK_EQ(out, "E"); CHECK(q.pop().ok());
+    CHECK_EQ(q.stats().count, 0U);
+
+    // Rotation must have created gen 12 (max disk gen 11 + 1), not gen 4.
+    CHECK(std::filesystem::exists(jSegPath(12)));
+    CHECK_FALSE(std::filesystem::exists(jSegPath(4)));
 }
 
 #endif // !ARDUINO
