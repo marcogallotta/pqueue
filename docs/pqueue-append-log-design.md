@@ -23,6 +23,19 @@ This document describes the append-log storage backend that replaces the fixed-s
 3. Space reclaim must be incremental; never a full sweep that stalls the queue.
 4. Old data stays valid until the new layout is durably committed.
 
+## Invariants
+
+These hold at all times. Violation is a bug, not a recoverable condition.
+
+1. Only manifest-referenced segments are authoritative. Files on disk not named in the manifest are garbage.
+2. Exactly one tail segment exists in the manifest at any time.
+3. Full segments are immutable — never written to after rollover.
+4. Manifest publish is the sole layout commit point. No layout change is visible to mount until a manifest is successfully written.
+5. A segment generation number is never reused.
+6. Tail truncation (discarding a torn write) is only legal on the manifest tail segment.
+7. Corruption in a full segment is fatal — return DataCorrupt, do not attempt recovery.
+8. Dangling segments are never scanned during normal mount.
+
 ## Storage model
 
 The queue stores data in two file types: a dual-copy manifest and a set of segment files.
@@ -169,7 +182,7 @@ For 492 B records (516 B per event with overhead), effective average enqueue cos
 
 ## Incremental compaction design
 
-A full compaction pass risks multi-second latency spikes, excess flash wear, copying mostly-live data unnecessarily, and user-visible stalls. Compaction is therefore incremental by default — one full segment per call.
+A full compaction pass risks multi-second latency spikes, excess flash wear, copying mostly-live data unnecessarily, and user-visible stalls. Compaction is therefore incremental by default — one full segment per call. The design goal is predictable bounded compaction, not globally optimal space reclaim.
 
 Two APIs are provided:
 
