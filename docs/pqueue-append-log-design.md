@@ -75,7 +75,7 @@ fixed overhead: 30 B
 room for ranges: 34 B → 4 ranges max
 ```
 
-`tailGeneration` is encoded separately, not as a range entry. 4 ranges is sufficient for normal operation — if a layout ever exceeds 4 ranges, that is a compaction policy or configuration constraint, not a format error.
+`tailGeneration` is encoded separately, not as a range entry. After each compaction publish, contiguous ranges are merged (e.g. `[10], [11], [12]` → `[10..12]`). With merging, 4 ranges is sufficient for normal operation — the range count only grows when compaction produces non-contiguous output, which is bounded by oldest-first selection. If a layout ever exceeds 4 ranges despite merging, publish is refused and a compaction pass must run first.
 
 ### Dual manifest slots
 
@@ -260,6 +260,10 @@ When compacting multiple consecutive segments, their live records may fit into f
 - whether this warrants a separate API or is handled internally by `compactFull`;
 - what the actual throughput gain is.
 
+### Lazy tail segment creation
+
+Rollover currently pre-creates the next tail segment before manifest publish, guaranteeing a referenced segment always exists on disk. An alternative is to create the tail lazily on first append, saving the flush of an empty segment. This requires mount to handle a missing tail segment without returning DataCorrupt — added complexity for a speculative gain. Worth benchmarking before considering further.
+
 ### RAM write buffer
 
 All operations currently write directly to flash. A RAM buffer sitting in front of disk ops would allow enqueue/pop/rewrite to return without a flush, batching writes and reducing per-operation flash cost. Needs design: buffer sizing, flush policy, crash-safety implications, and interaction with the existing durability guarantees.
@@ -283,6 +287,7 @@ Normal mount is strict and simple — it does not salvage aggressively. A repair
 | Manifest size target | **<= 64 B.** LittleFS inline file threshold — stays below it saves ~7 ms per rollover. |
 | Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful — dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
 | Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behavior wins. |
+| Event frame format | Shared frame with a type field (ENQUEUE/POP/REWRITE). Exact layout is an implementation detail. |
 
 ## Appendix B: LittleFS measurements (ESP32-S3)
 
