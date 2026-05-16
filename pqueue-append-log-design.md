@@ -173,9 +173,7 @@ old 1,2 are ignored
 
 A fully authoritative root requires a root update when the active layout changes, and rotation changes the active layout. So naive full-root publishes one small root write per rotation.
 
-This is only painful if rotation is frequent. With reasonable segment sizes (say 8–16 KB on LittleFS) and typical event sizes, rotation is rare enough that one small root write per rotation amortizes invisibly into the workload. The rotation cost should be measured, not feared.
-
-The default model is therefore: **publish the root on rotation**. A self-describing tail chain is kept as a fallback if measurement shows rotation cost is genuinely unacceptable, not as a co-equal design path.
+This is only painful if rotation is frequent. The rotation cost has been measured on ESP32-S3 with LittleFS (see measurements below). The default model is therefore: **publish the root on rotation**. A self-describing tail chain is kept as a fallback if measurement shows rotation cost is genuinely unacceptable, not as a co-equal design path.
 
 ## Default design: full root, updated on rotation
 
@@ -212,11 +210,29 @@ publish root replacing old active range with new range
 - One extra root write per segment rotation.
 - If segments are small, this may be too expensive.
 
-### Segment sizing
+### Segment sizing — RESOLVED: 4 KB default
 
-Rotation cost is controlled by segment size. Larger segments mean fewer rotations and fewer root writes, at the cost of higher per-rotation flush work and larger per-segment buffers.
+Measured on ESP32-S3 with LittleFS (see measurements section). The flush cost curve has a hard cliff at the LittleFS block size boundary:
 
-The right segment size is the one that, given the workload, makes rotation rare enough that root-publish-on-rotation is invisible. Target range to investigate: 4–16 KB, tuned to LittleFS block/page behavior. This must be measured on target hardware, not guessed.
+```
+4 KB segment flush:   ~45 ms
+8 KB segment flush:   ~78 ms   (+73%)
+16 KB segment flush:  ~74 ms
+```
+
+The 4→8 KB jump is structural: LittleFS allocates blocks of 4096 B. A 4 KB file fits in one block; an 8 KB file needs two, which doubles the metadata tree work per flush. This ratio is device-independent — the absolute times scale with flash speed, but the block size boundary stays at 4 KB on all standard LittleFS configurations.
+
+For 492 B records (516 B per event with overhead), effective average enqueue cost:
+
+| Segment | Flush/enq | Recs/seg | Amort rotation | Effective avg |
+|---------|-----------|----------|----------------|---------------|
+| 4 KB    | ~45 ms    | 7        | ~6 ms          | **~51 ms**    |
+| 8 KB    | ~78 ms    | 15       | ~3 ms          | ~81 ms        |
+| 16 KB   | ~74 ms    | 31       | ~2 ms          | ~76 ms        |
+
+**4 KB segments win.** Larger segments reduce rotation frequency but cost far more per flush. The rotation overhead at 4 KB is ~6–7 ms amortized per enqueue (~13% of the 45 ms flush cost), which is acceptable. The self-describing tail chain fallback is not needed.
+
+`maxSegmentBytes` must remain a config knob. Devices with slower flash or different block sizes will have different optimal values, but 4 KB is the right default.
 
 ### Why this is the default
 
@@ -501,68 +517,120 @@ pick highest epoch
 
 This avoids depending on overwrite atomicity.
 
+## LittleFS measurements (ESP32-S3)
+
+Measured with the on-device profiler (`pqueue_profiling_main.cpp`). These are the authoritative numbers for design decisions. Other devices will scale proportionally — the ratios and the 4 KB block-size cliff hold across LittleFS targets.
+
+### Flush cost curve (128 B write, open/flush/close per iter)
+
+| File size | Open (µs) | Flush (µs) | Total (µs) | Flush w/ persistent handle |
+|-----------|-----------|------------|------------|---------------------------|
+| 512 B     | 10,604    | 13,150     | 23,849     | 9,361                     |
+| 1 KB      | 17,547    | 35,823     | 53,465     | 31,736                    |
+| 2 KB      | 14,174    | 41,725     | 55,993     | 36,077                    |
+| 4 KB      | 14,395    | 46,904     | 61,393     | 45,175                    |
+| 8 KB      | 9,004     | 78,672     | 87,772     | 77,632                    |
+| 16 KB     | 13,780    | 74,009     | 87,884     | 75,836                    |
+| 32 KB     | 12,824    | 75,073     | 87,992     | 76,551                    |
+
+The cliff between 4 KB and 8 KB is the LittleFS block size boundary. It is structural, not tunable.
+
+### writeAt breakdown (512 B file, open/write/flush/close)
+
+| Phase | Cost (µs) |
+|-------|-----------|
+| open  | 10,844    |
+| write | 60        |
+| flush | 13,529    |
+| close | 95        |
+| total | 24,528    |
+
+The write itself is trivially fast. Open and flush dominate.
+
+### writeAt on 18,688 B spool file (fixed-slot reference)
+
+Flush: 133,685 µs. Total: 147,610 µs per writeAt. Fixed-slot enqueue does 2 writeAts → ~295 ms from writes alone, explaining the ~424 ms observed enqueue average.
+
+### readAt breakdown (512 B file)
+
+| Phase | Cost (µs) |
+|-------|-----------|
+| open  | 4,628     |
+| read  | 32        |
+| close | 71        |
+| total | 4,732     |
+
+### Rotation cost (20 B segment header + root publish, dual-root A/B)
+
+| Root size | Seg create (µs) | Root pub (µs) | Rotation total (µs) |
+|-----------|-----------------|---------------|---------------------|
+| 64 B      | 19,358          | 25,732        | 45,090              |
+| 128 B     | 19,358          | 32,625        | 51,983              |
+| 256 B     | 19,358          | 31,940        | 51,298              |
+
+The 64 B → 128 B cost jump (~7 ms) is the LittleFS inline file threshold (`LFS_INLINE_MAX`, default 64 B). Files ≤ 64 B are stored inline in the directory entry with no separate data block allocation. **Design the root to fit in 64 B** to stay below this threshold.
+
+### Amortized rotation overhead per enqueue (128 B root)
+
+| Segment size | Records/seg | Amortized (µs/enq) |
+|--------------|-------------|--------------------|
+| 4 KB         | 7           | 7,426              |
+| 8 KB         | 15          | 3,465              |
+| 16 KB        | 31          | 1,676              |
+| 32 KB        | 63          | 825                |
+
+At 4 KB segments with a 64 B root (rotation = 45 ms), amortized overhead = 45,090 / 7 ≈ 6,441 µs/enq — about 14% of the 45 ms flush cost. Acceptable.
+
 ## Performance analysis framework
 
-The next design chat should estimate write costs by operation.
+Measured costs for each operation under the new design.
 
 ### Enqueue, no rotation
 
-Expected writes:
-
 ```text
-1 append/write to current segment
+1 writeAt to current segment (~45 ms at 4 KB segment)
 ```
 
-No root update.
-
-If current implementation flushes every append, this remains the main hot-path cost.
+No root update. This is the hot-path cost. At 4 KB segments the active file stays within one LittleFS block, keeping flush cost at ~45 ms.
 
 ### Pop
 
-Expected writes:
-
 ```text
-1 append/write POP event to current segment
+1 writeAt POP event to current segment (~45 ms)
 ```
 
-No root update.
+No root update. Same cost as enqueue.
 
 ### Rewrite front
 
-Expected writes:
-
 ```text
-1 append/write REWRITE event to current segment
+1 writeAt REWRITE event to current segment (~45 ms)
 ```
 
 No root update.
 
 ### Rotation
 
-Default model:
-
 ```text
-1 write new segment header
-1 root publish
+1 writeFile new segment header (20 B) — ~19 ms
+1 root publish (≤64 B)            — ~26 ms
+total                              — ~45 ms
 ```
 
-Cost is amortized across all events written into the new segment. Tune segment size so this amortizes to invisibility.
+Amortized over 7 records at 4 KB default = ~6.4 ms per enqueue overhead (~14% of normal enqueue cost).
 
 ### Compaction step
 
-Target writes:
-
 ```text
-N full compacted segment writes
-1 root publish
+N full compacted segment writes (~45 ms each at 4 KB)
+1 root publish (≤64 B)            — ~26 ms
+0 per-record flushes
 0 old deletes
 ```
 
-N should usually be small, often 1.
+N is typically 1. Write budget per compaction step: ~71 ms for a single output segment.
 
 ### Cleanup
-
-Target writes/deletes:
 
 ```text
 delete one or few unreferenced files
@@ -596,21 +664,35 @@ Prefer:
 
 ### Open problem 1: rotation durability — RESOLVED
 
-Decision: root publish on rotation, with segment size tuned so rotation is rare enough that the cost is invisible. The self-describing tail chain is kept as a fallback only if measured rotation cost on target hardware proves unacceptable.
+Decision: root publish on rotation with 4 KB segments. Measured rotation cost ~45 ms (64 B root), amortized to ~6.4 ms per enqueue at 4 KB segments. Self-describing tail chain fallback is not needed.
 
-Outstanding work: measure rotation cost on target hardware, pick the segment size that makes it invisible.
+### Open problem 2: root format — PARTIALLY RESOLVED
 
-### Open problem 2: root format
+**Size constraint:** root must fit in ≤ 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
 
-Need to decide whether root stores:
+**Content resolved:** root stores layout only — no queue head/tail/count (those come from replay). Must include: magic, version, epoch, nextGeneration, active ranges, tail generation, CRC.
 
-- full ordered list of active segments;
-- ordered ranges;
-- sealed layout plus open tail;
-- queue head/tail/count;
-- nextGeneration;
-- cleanup watermark;
-- epoch.
+**Still open:** exact binary layout. Sketch fitting in 64 B:
+
+```
+magic         4 B
+version       2 B
+headerBytes   2 B
+epoch         4 B
+nextGeneration 4 B
+rangeCount    2 B
+ranges        N × 8 B  (startGen u32, endGen u32)
+tailGeneration 4 B
+crc           4 B
+footer        4 B
+─────────────────
+fixed overhead: 30 B
+room for ranges: 34 B → 4 ranges max
+```
+
+4 active ranges is sufficient for normal operation (sealed compacted ranges + open tail). If a layout ever exceeds 4 ranges, a larger root is needed — this should be treated as a configuration or compaction policy constraint, not a format error.
+
+**Still open:** whether tailGeneration is encoded separately or as part of ranges; whether a sealed marker is needed in the root or implied by not being tailGeneration.
 
 ### Open problem 3: open tail framing
 
@@ -673,26 +755,29 @@ Resolved:
 
 - Rotation publishes the root. Self-describing tail chain is fallback only.
 - Root stores layout only; queue head/tail/count come from replay.
+- Target segment size: **4 KB**. Measured flush cost cliff at 4→8 KB makes 4 KB the clear winner.
+- Root size target: **≤ 64 B**. LittleFS inline threshold saves ~7 ms per rotation.
 
 Still open, in order:
 
-1. Target segment size given measured LittleFS rotation cost on target hardware.
-2. RAM budget for the compaction output buffer (does 4 KB fit on ESP32 alongside everything else).
-3. Open-tail framing: header, per-event CRC, truncation rule, sealed marker.
+1. Open-tail framing: segment header format, per-event CRC, truncation rule, sealed marker.
+2. Exact root binary layout fitting in 64 B (see open problem 2 sketch).
+3. RAM budget for the compaction output buffer (does 4 KB fit on ESP32 alongside everything else).
 4. Should compaction operate only on sealed segments? (Strong default: yes.)
 5. Should cleanup run automatically or only under explicit maintenance / free-space pressure?
 6. Is dual-root mandatory, or can LittleFS atomic rename be trusted after a targeted crash test?
 
 ## Recommended next step
 
-Do not implement compaction yet.
+Segment size (4 KB) and root size target (≤ 64 B) are resolved by measurement.
 
-First nail down the open-tail framing and measure rotation cost on target hardware. Minimal next task:
+Next task: specify the open-tail framing.
 
 ```text
-Specify segment framing (header, per-event CRC, truncation rule, sealed marker).
-Measure root-publish-on-rotation cost on target hardware at candidate segment sizes.
-Pick segment size.
+Define segment header format (magic, generation, baseSequence, header CRC).
+Define per-event framing (length prefix or fixed header, payload, per-event CRC, footer).
+Define truncation rule: on first bad event in the open tail segment, truncate to last good offset.
+Decide: sealed marker written at rotation time, or sealedness implied by not being tailGeneration in root?
 ```
 
 Then prototype enqueue / pop / rotation / recovery without compaction and validate crash behavior. Only after that, implement compaction.
