@@ -258,6 +258,10 @@ Compaction step cost is ~71 ms when the selected segment has live records (one o
 
 ## Open problems
 
+### Range limit dead-end
+
+If the manifest is at 4 ranges and `publishManifest` refuses to proceed, compaction must reduce the range count before the next rollover can be committed. But if the oldest full range is entirely live and its live bytes exceed `maxSegmentBytes`, `compactOneSegment` returns no-op. The two failure modes combine into a dead-end: rollover cannot publish, compaction cannot help, and the queue is stuck. The design has no defined exit for this case. Possible directions: allow multi-segment compaction output (so an oversized live range can be split and merged with adjacent ranges), force-compact regardless of the dead-byte threshold when under range pressure, or accept queue-full when genuinely stuck. Needs a resolution before shipping.
+
 ### Compaction no-op loop
 
 With oldest-first selection and a dead-byte threshold, `compactFull` terminates cleanly — it bails as soon as the oldest segment doesn't qualify. No loop issue for the common case.

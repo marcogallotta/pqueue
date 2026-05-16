@@ -1,8 +1,10 @@
 # pqueue append-log working notes
 
-**Status of this document:** working design document for the pqueue append-log backend. It is a code-reading accelerator and Stage 3 design-control document, not a substitute for inspecting the current code.
+**Status of this document:** ABANDONED DESIGN. This document describes a compaction-journal approach (`pqueue-compact.bin`) that has been superseded by the dual-manifest design in `pqueue-append-log-design.md`. Do not use this as a guide for new implementation work.
 
-**Current project phase:** Stage 2 is done and Stage 3 is starting. Stage 2 means the compaction journal record format, logical active segment ordering, and journal-aware remount/replay are wired into `AppendLogStore::scanSegments()`. Stage 3 is planned work around `compactRange(oldStart, oldEnd)`: copy live records out of an old segment range into new compacted segments, durably commit the replacement by appending a compaction journal record, update RAM state, and leave old segment deletion for a later cleanup stage.
+**Current implementation notes:** see `pqueue-append-log-impl.md` for what transfers from this design, what is abandoned, and what needs to be built.
+
+**Historical note:** Stages 1–3A of the compaction-journal approach were implemented. Stage 3A (`activeGenerations_` field in `AppendLogStore`) is present in the current code and transfers to the new design. Everything from Stage 3B onward in this document refers to the abandoned compaction-journal path and should be ignored.
 
 **Stage 3 human-review target:** review only the boxed decisions in section 10A unless changing the storage model. The rest of Stage 3 should be implementable by code inspection and tests.
 
