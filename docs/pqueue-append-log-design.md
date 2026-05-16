@@ -35,6 +35,7 @@ These hold at all times. Violation is a bug, not a recoverable condition.
 6. Tail truncation (discarding a torn write) is only legal on the manifest tail segment.
 7. Corruption in a full segment is fatal — return DataCorrupt, do not attempt recovery.
 8. Dangling segments are never scanned during normal mount.
+9. The tail segment appears after all full ranges in logical replay order. No full range may be inserted after the tail.
 
 ## Storage model
 
@@ -70,19 +71,19 @@ The manifest is only written on rollover and compaction. Normal enqueue, pop, an
 
 **Size constraint:** the manifest must fit in <= 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
 
-**Binary layout** (exact field ordering, padding, and endianness are implementation details):
+**Binary layout** — all fields little-endian, packed (no padding), CRC32 using the IEEE polynomial (0xEDB88320). A reader encountering an unknown version returns DataCorrupt.
 
 ```
-magic          4 B
-version        2 B
-headerBytes    2 B
-epoch          4 B
-nextGeneration 4 B
-rangeCount     2 B
+magic          4 B   — fixed sentinel
+version        2 B   — format version; current = 1
+headerBytes    2 B   — total manifest size in bytes
+epoch          4 B   — u32, incremented on each publish
+nextGeneration 4 B   — u32, next generation number to allocate
+rangeCount     2 B   — number of full segment ranges
 ranges         N × 8 B  (startGen u32, endGen u32)
-tailGeneration 4 B
-crc            4 B
-footer         4 B
+tailGeneration 4 B   — u32
+crc            4 B   — CRC32 over all preceding bytes
+footer         4 B   — fixed sentinel
 -----------------
 fixed overhead: 30 B
 room for ranges: 34 B → 4 ranges max
