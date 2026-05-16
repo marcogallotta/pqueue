@@ -48,9 +48,18 @@ TEST_SRC := \
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
 
-.PHONY: all test tests run-tests repair-tool profiling clean
+DOCS_DIR := docs
+DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
+DOCS_PDF := $(DOCS_MD:.md=.pdf)
+
+.PHONY: all test tests run-tests repair-tool profiling docs clean
 
 all: test
+
+docs: $(DOCS_PDF)
+
+$(DOCS_DIR)/%.pdf: $(DOCS_DIR)/%.md
+	pandoc $< -o $@ --pdf-engine=xelatex
 
 test: run-tests
 
