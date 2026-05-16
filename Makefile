@@ -52,14 +52,14 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool profiling docs clean
+.PHONY: all test tests run-tests repair-tool profiling docs clean .FORCE
 
 all: test
 
 docs: $(DOCS_PDF)
 
-$(DOCS_DIR)/%.pdf: $(DOCS_DIR)/%.md
-	pandoc $< -o $@ --pdf-engine=xelatex
+$(DOCS_DIR)/%.pdf: $(DOCS_DIR)/%.md .FORCE
+	pandoc $< -o $@ --pdf-engine=xelatex -V monofont="DejaVu Sans Mono"
 
 test: run-tests
 
