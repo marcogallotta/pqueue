@@ -150,23 +150,54 @@ After each successful manifest publish, a cleanup pass may run. Cleanup lists al
 
 ## Implementation order
 
+Before starting any stage, read these files to ground yourself in the current code:
+
+- `src/pqueue/append_log_common.h` / `.cpp` — binary format, serialisers, parsers
+- `src/pqueue/append_log_store.h` / `.cpp` — main implementation
+- `tests/posix/pqueue_append_log.cpp` — primary test file
+
+Do not infer code structure from this document alone. The code is the source of truth for what currently exists.
+
+After completing each stage, update this document: remove anything that is no longer accurate (stale line numbers, old function names, references to code that has been deleted), and note any decisions made during implementation that deviate from or refine the spec. This document should reflect the current state of the design at all times, not the state it was in when implementation began.
+
+---
+
 Tests are not optional at any stage. Each stage must be fully tested before the next begins — later stages build on earlier ones and will silently inherit any bugs left untested. The most dangerous bugs in this design are ordering bugs (RAM updated before manifest, manifest updated before segment file) and election bugs (wrong slot wins on mount). These cannot be caught by inspection alone; they require tests that simulate crash points and remount. Every stage below calls out its critical tests — the ones where a missing test is most likely to let a real bug through.
 
 ### Stage 0 — Code cleanup
 
-Remove all compaction-journal artifacts and apply the naming changes from the appendix. After this stage the code compiles with no dead code and all file/field names match the design spec. See the appendix for the exact list of what to remove and what to rename. **Critical test:** all existing compaction-journal-era crash/mount tests (journal-aware mount, logical ordering, torn-tail classification) must continue to pass unchanged — this stage must not alter behaviour.
+Remove all compaction-journal artifacts and apply the naming changes from the appendix. After this stage the code compiles with no dead code and all file/field names match the design spec. See the appendix for the exact list of what to remove and what to rename. The journal-reading block to remove is at lines 365–476 of `append_log_store.cpp` (the `buildActiveSegmentOrder()` call and everything above the per-segment scan loop). **Critical test:** all existing compaction-journal-era crash/mount tests (journal-aware mount, logical ordering, torn-tail classification) must continue to pass unchanged — this stage must not alter behaviour. **After Stage 0 is complete, remove the appendix from this document — it describes the old code state and is no longer relevant.**
 
 ### Stage 1 — Manifest binary format
 
-Add `ManifestData`, `serialiseManifest()`, `parseManifest()` to `append_log_common.*`. Unit-test binary layout, CRC, and all `parseManifest()` rejection cases. **Critical test:** a valid manifest with one byte of the CRC corrupted must be rejected — this is the entire basis of crash-safety on mount.
+Add `ManifestData`, `serialiseManifest()`, `parseManifest()` to `append_log_common.*`:
+
+```cpp
+void serialiseManifest(const ManifestData& manifest, std::vector<uint8_t>& out);
+bool parseManifest(const uint8_t* data, size_t size, ManifestData& out);
+```
+
+Unit-test binary layout, CRC, and all `parseManifest()` rejection cases. **Critical test:** a valid manifest with one byte of the CRC corrupted must be rejected — this is the entire basis of crash-safety on mount.
 
 ### Stage 2 — Manifest publish
 
-Add `publishManifest()` to `AppendLogStore`. Test round-trip: publish → read both slots → correct slot wins for all four slot-selection cases including equal epoch and one-missing. **Critical test:** publish twice, then corrupt slot B — slot A must win on the next read. This confirms the inactive-slot-first write order is correct.
+Add `publishManifest()` to `AppendLogStore`:
+
+```cpp
+Status publishManifest(const ManifestData& manifest);
+```
+
+Test round-trip: publish → read both slots → correct slot wins for all four slot-selection cases including equal epoch and one-missing. **Critical test:** publish twice, then corrupt slot B — slot A must win on the next read. This confirms the inactive-slot-first write order is correct.
 
 ### Stage 3a — Manifest read helper
 
-Add a standalone `readManifest()` helper that reads both slot files, validates each independently (CRC + footer), applies slot election, and returns the winning `ManifestData` (or signals no valid slot). No changes to `scanSegments()` yet. Test: all four slot-election cases, equal epoch tiebreaker, corrupt slot discarded, both missing returns no-winner. **Critical test:** slot with higher epoch but corrupt CRC must lose to a valid slot with lower epoch — a partially written higher-epoch slot must never win.
+Add a standalone `readManifest()` helper that reads both slot files, validates each independently (CRC + footer), applies slot election, and returns the winning `ManifestData` (or signals no valid slot). No changes to `scanSegments()` yet:
+
+```cpp
+bool readManifest(ManifestData& out);  // returns false if no valid slot exists
+```
+
+Test: all four slot-election cases, equal epoch tiebreaker, corrupt slot discarded, both missing returns no-winner. **Critical test:** slot with higher epoch but corrupt CRC must lose to a valid slot with lower epoch — a partially written higher-epoch slot must never win.
 
 ### Stage 3b — Wire manifest into mount
 
@@ -178,19 +209,38 @@ Wire `publishManifest()` into `rotateSegment()`. Test rollover persists across r
 
 ### Stage 5a — Range selection
 
-Add `chooseCompactionRange()`: select the oldest full range from `activeGenerations_` that does not include the tail. Return nullopt when nothing qualifies (fewer than two active generations, or only the tail is eligible). No file writes, no RAM mutation. Test: no range when only tail exists; oldest non-tail range selected; nullopt is not an error. **Critical test:** a store with only a tail segment must return nullopt — selecting the tail for compaction would violate the torn-tail invariant.
+Add `chooseCompactionRange()`:
+
+```cpp
+struct CompactionRange { uint32_t startGen; uint32_t endGen; };
+std::optional<CompactionRange> chooseCompactionRange() const;
+```
+
+Select the oldest full range from `activeGenerations_` that does not include the tail. Return nullopt when nothing qualifies (fewer than two active generations, or only the tail is eligible). No file writes, no RAM mutation. Test: no range when only tail exists; oldest non-tail range selected; nullopt is not an error. **Critical test:** a store with only a tail segment must return nullopt — selecting the tail for compaction would violate the torn-tail invariant.
 
 ### Stage 5b — Live record collection
 
-Add `collectLiveRecords()`: iterate `records_`, extract those whose `segmentGeneration` falls within the selected range, read current payloads, return in FIFO order. No file writes, no RAM mutation. Test: live records collected in order; popped records absent; rewritten records return current payload; empty result is success/no-op. **Critical test:** enqueue a record, rewrite it, then collect — the collected payload must be the rewritten value, not the original. A bug here would silently compact stale data.
+Add `collectLiveRecords()`:
+
+```cpp
+Status collectLiveRecords(const CompactionRange& range,
+                          std::vector<CompactionLiveRecord>& out) const;
+```
+
+Iterate `records_`, extract those whose `segmentGeneration` falls within the selected range, read current payloads, return in FIFO order. No file writes, no RAM mutation. Test: live records collected in order; popped records absent; rewritten records return current payload; empty result is success/no-op. **Critical test:** enqueue a record, rewrite it, then collect — the collected payload must be the rewritten value, not the original. A bug here would silently compact stale data.
 
 ### Stage 5c — compactOneSegment() v1
+
+```cpp
+Status compactOneSegment();
+Status compactFull();
+```
 
 Wire range selection, live record collection, segment write, manifest publish, and RAM update into `compactOneSegment()`. Enforce step ordering: write segment file before publishing manifest, publish manifest before updating `records_` and `activeGenerations_`. Test: fully dead range removed; live records preserved in FIFO order; `rewriteFront()` result preserved; no-op when live bytes exceed `maxSegmentBytes`; manifest published only after new file written; `records_` updated only after manifest success; old segment files remain on disk; remount after compaction uses new segment. **Critical test:** simulate manifest publish failure after the new segment file is written — on remount the old segment must still be active, the new segment must be dangling, and all records must be intact. This is the core crash-safety guarantee of the whole compaction design.
 
 ### Stage 6 — Compaction trigger
 
-Wire compaction into `writeRecord()`. Test: repeated enqueue/rotate eventually triggers compaction; queue behaviour correct before and after remount. **Critical test:** trigger compaction with a live queue, then remount — every record enqueued before compaction must still be peekable and poppable in the original FIFO order.
+Wire compaction into `writeRecord()`. Update `needsCompaction()` to use `activeGenerations_.size() > config_.maxSegments` as the segment-count trigger, replacing the current numeric generation span. Free-space pressure (`freeBytes() < config_.minFreeBytes`) remains a secondary trigger. Test: repeated enqueue/rotate eventually triggers compaction; queue behaviour correct before and after remount. **Critical test:** trigger compaction with a live queue, then remount — every record enqueued before compaction must still be peekable and poppable in the original FIFO order.
 
 ### Stage 7 — Cleanup
 
@@ -233,7 +283,7 @@ The following fields are correct and transfer:
 
 #### Event replay loop in `scanSegments()`
 
-The per-segment scanning loop (lines 365–476 in `append_log_store.cpp`) transfers. The exact rules it implements are documented above under **Scan and torn-tail rules**, because they must be preserved verbatim.
+The per-segment scanning loop in `scanSegments()` transfers. The exact rules it implements are documented above under **Scan and torn-tail rules**, because they must be preserved verbatim.
 
 ### What is abandoned
 
