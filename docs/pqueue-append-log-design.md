@@ -256,27 +256,11 @@ Rotation cost is amortized over 7 records at 4 KB default — ~6.4 ms per enqueu
 
 Compaction step cost is ~71 ms when the selected segment has live records (one output segment write + one manifest publish), or ~26 ms for a fully dead segment (manifest publish only).
 
-## Open problems
-
-### Range limit dead-end
-
-If the manifest is at 4 ranges and `publishManifest` refuses to proceed, compaction must reduce the range count before the next rollover can be committed. But if the oldest full range is entirely live and its live bytes exceed `maxSegmentBytes`, `compactOneSegment` returns no-op. The two failure modes combine into a dead-end: rollover cannot publish, compaction cannot help, and the queue is stuck. The design has no defined exit for this case. Possible directions: allow multi-segment compaction output (so an oversized live range can be split and merged with adjacent ranges), force-compact regardless of the dead-byte threshold when under range pressure, or accept queue-full when genuinely stuck. Needs a resolution before shipping.
-
-### Compaction no-op loop
-
-With oldest-first selection and a dead-byte threshold, `compactFull` terminates cleanly — it bails as soon as the oldest segment doesn't qualify. No loop issue for the common case.
-
-Open question: after compaction, a consolidated segment may become sparse over time while the next-oldest pre-compaction segment is still mostly live. Oldest-first would skip the live segment correctly, but may also skip the now-sparse compacted segment if it sits behind a live one in logical order. Whether this is a real problem depends on usage patterns and how often compacted segments become sparse before the segments ahead of them are drained.
-
 ## Future work
 
-### Multi-segment compaction pass
+### Range-limit dead-end and multi-segment compaction output *(required before stable release)*
 
-When compacting multiple consecutive segments, their live records may fit into fewer output segments than inputs — reducing manifest publishes and output file writes compared to looping `compactOneSegment`. Needs design and profiling before implementation:
-
-- how many input segments can be merged in one pass before the RAM buffer is exhausted;
-- whether this warrants a separate API or is handled internally by `compactFull`;
-- what the actual throughput gain is.
+v1 compaction writes a single output segment per call and returns no-op if live bytes exceed `maxSegmentBytes`. This is a known v1 limitation. Once multi-input compaction exists, it can produce ranges spanning multiple segments; if such a range later becomes the oldest and its live bytes exceed `maxSegmentBytes`, compaction noops permanently. Meanwhile rollovers keep adding ranges until the manifest hits its 4-range limit and the queue deadlocks. A stable release must define an escape from this dead-end. The preferred fix is multi-segment compaction output, which eliminates the noop by allowing compaction to always make progress on any range regardless of size. Alternatives include returning a `QueueFull` or `NeedsMaintenance` error, or an emergency repair mode — but these defer the problem rather than solving it.
 
 ### Lazy tail segment creation
 
