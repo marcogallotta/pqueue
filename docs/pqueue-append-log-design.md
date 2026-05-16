@@ -193,7 +193,7 @@ Compacting mostly-live data just to make the log look clean is not useful.
 
 1. Choose the oldest full segment. Skip if its dead bytes are below a configurable threshold (a config knob alongside `maxSegmentBytes`).
 2. Collect live records from that segment.
-3. Build one compacted output segment buffer in RAM, sized to `maxSegmentBytes`. Validate during implementation that this headroom is available alongside the live firmware footprint.
+3. Build one compacted output segment buffer in RAM, sized to `maxSegmentBytes`. The buffer should be statically allocated — a dynamic allocation at compaction time may fail if the heap is fragmented by Wi-Fi, BLE, or TLS stacks. Validate during implementation that the static reservation fits alongside the live firmware footprint.
 4. Write and verify the output segment file.
 5. Publish new manifest replacing old segment/range with new segment/range.
 6. Update RAM to match manifest.
