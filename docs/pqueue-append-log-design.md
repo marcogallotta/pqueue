@@ -99,8 +99,6 @@ A segment file is a sequential data blob:
 +--------------------------------------------+
 | ...                                        |
 +--------------------------------------------+
-| full marker     (optional, on rollover)    |
-+--------------------------------------------+
 ```
 
 - **generation** — the segment's unique number, matching its filename (e.g. `seg-0000000c.bin` has generation 12).
@@ -195,12 +193,11 @@ Compacting mostly-live data just to make the log look clean is not useful.
 
 1. Choose the oldest full segment. Skip if its dead bytes are below a configurable threshold (a config knob alongside `maxSegmentBytes`).
 2. Collect live records from that segment.
-3. If not useful, return no-op (see open problem: compaction no-op loop).
-4. Build one compacted output segment buffer in RAM, sized to `maxSegmentBytes`. Validate during implementation that this headroom is available alongside the live firmware footprint.
-5. Write and verify output segment file(s).
-6. Publish new manifest replacing old segment/range with new segment/range.
-7. Update RAM to match manifest.
-8. Leave old files on disk — cleanup is separate.
+3. Build one compacted output segment buffer in RAM, sized to `maxSegmentBytes`. Validate during implementation that this headroom is available alongside the live firmware footprint.
+4. Write and verify the output segment file.
+5. Publish new manifest replacing old segment/range with new segment/range.
+6. Update RAM to match manifest.
+7. Leave old files on disk — cleanup is separate.
 
 ## Mount model
 
@@ -287,7 +284,7 @@ Normal mount is strict and simple — it does not salvage aggressively. A repair
 | Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful — dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
 | Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behavior wins. |
 
-## Appendix B: LittleFS measurements (new device — ESP32-S3)
+## Appendix B: LittleFS measurements (ESP32-S3)
 
 Measured with the on-device profiler (`pqueue_profiling_main.cpp`). These are the authoritative numbers for design decisions on the ESP32-S3. Other devices will scale proportionally — the ratios and the 4 KB block-size cliff hold across LittleFS targets.
 
