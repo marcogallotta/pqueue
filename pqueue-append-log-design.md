@@ -258,7 +258,7 @@ Write budget per step:
 
 ```text
 N full segment writes (~45 ms each at 4 KB)
-+ 1 root publish (~26 ms for ≤64 B root)
++ 1 root publish (~26 ms for <=64 B root)
 + 0 per-record flushes
 + 0 old deletes
 ```
@@ -348,7 +348,7 @@ Flush: 133,685 µs. Total: 147,610 µs per writeAt. Fixed-slot enqueue does 2 wr
 | 128 B     | 19,358          | 32,625        | 51,983              |
 | 256 B     | 19,358          | 31,940        | 51,298              |
 
-The 64 B → 128 B cost jump (~7 ms) is the LittleFS inline file threshold (`LFS_INLINE_MAX`, default 64 B). Files ≤ 64 B are stored inline in the directory entry with no separate data block allocation. **Design the root to fit in 64 B** to stay below this threshold.
+The 64 B → 128 B cost jump (~7 ms) is the LittleFS inline file threshold (`LFS_INLINE_MAX`, default 64 B). Files <= 64 B are stored inline in the directory entry with no separate data block allocation. **Design the root to fit in 64 B** to stay below this threshold.
 
 ### Amortized rotation overhead per enqueue (128 B root)
 
@@ -359,7 +359,7 @@ The 64 B → 128 B cost jump (~7 ms) is the LittleFS inline file threshold (`LFS
 | 16 KB        | 31          | 1,676              |
 | 32 KB        | 63          | 825                |
 
-At 4 KB segments with a 64 B root (rotation = 45 ms), amortized overhead = 45,090 / 7 ≈ 6,441 µs/enq — about 14% of the 45 ms flush cost. Acceptable.
+At 4 KB segments with a 64 B root (rotation = 45 ms), amortized overhead = 45,090 / 7 ~ 6,441 µs/enq — about 14% of the 45 ms flush cost. Acceptable.
 
 ## Performance analysis framework
 
@@ -393,7 +393,7 @@ No root update.
 
 ```text
 1 writeFile new segment header (20 B) — ~19 ms
-1 root publish (≤64 B)            — ~26 ms
+1 root publish (<=64 B)            — ~26 ms
 total                              — ~45 ms
 ```
 
@@ -403,7 +403,7 @@ Amortized over 7 records at 4 KB default = ~6.4 ms per enqueue overhead (~14% of
 
 ```text
 N full compacted segment writes (~45 ms each at 4 KB)
-1 root publish (≤64 B)            — ~26 ms
+1 root publish (<=64 B)            — ~26 ms
 0 per-record flushes
 0 old deletes
 ```
@@ -444,7 +444,7 @@ Prefer:
 
 ### Root format — partially resolved
 
-**Size constraint:** root must fit in ≤ 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
+**Size constraint:** root must fit in <= 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
 
 **Content resolved:** root stores layout only — no queue head/tail/count (those come from replay). Must include: magic, version, epoch, nextGeneration, active ranges, tail generation, CRC.
 
@@ -461,7 +461,7 @@ ranges        N × 8 B  (startGen u32, endGen u32)
 tailGeneration 4 B
 crc           4 B
 footer        4 B
-─────────────────
+-----------------
 fixed overhead: 30 B
 room for ranges: 34 B → 4 ranges max
 ```
@@ -530,7 +530,7 @@ But normal mount should be strict and simple.
 | Root publish on rotation vs self-describing tail chain | Root publish on rotation. Tail chain complexity not justified by measured cost. |
 | Root stores queue head/tail/count | No. Layout only. Head/tail/count come from replay. |
 | Target segment size | **4 KB.** Measured flush cost cliff at 4→8 KB makes this the clear winner. |
-| Root size target | **≤ 64 B.** LittleFS inline file threshold — stays below it saves ~7 ms per rotation. |
+| Root size target | **<= 64 B.** LittleFS inline file threshold — stays below it saves ~7 ms per rotation. |
 
 Open, in priority order:
 
@@ -543,7 +543,7 @@ Open, in priority order:
 
 ## Recommended next step
 
-Segment size (4 KB) and root size target (≤ 64 B) are resolved by measurement.
+Segment size (4 KB) and root size target (<= 64 B) are resolved by measurement.
 
 Next task: specify the open-tail framing.
 
