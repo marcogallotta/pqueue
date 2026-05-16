@@ -2,16 +2,13 @@
 
 ## Purpose
 
-The original storage used for pqueue was a fixed-sized ring buffer. We 
+The original pqueue storage backend used a fixed-size ring buffer: one spool file containing a checkpoint region, a journal region, and fixed-size record slots. Every enqueue writes the record payload into its slot and commits the new index into the journal — two `writeAt` calls per enqueue, both flushing the same large file.
 
+On ESP32/LittleFS this is a dead end. LittleFS uses a copy-on-write B-tree, and flush cost grows with file size because each flush must propagate changes through the metadata tree. A spool file sized for 20 records of 492 B is 18,688 B. Flushing it costs ~134 ms. Two flushes per enqueue puts the floor above 300 ms before accounting for open, mount, or read overhead — and measurements confirm ~424 ms average.
 
-This is a fresh design handoff for pqueue append-log compaction and layout management.
+There is no tuning path out of this. Shrinking the spool file means shrinking queue capacity. The flush cost is a property of LittleFS and the file size, not of the write size. The write itself takes 60 µs.
 
-It intentionally steps back from the current working design/doc and asks:
-
-> If the goal is a very efficient, crash-safe append-log queue on ESP32/LittleFS, how should the storage model be designed?
-
-This document includes my proposed design ideas, clearly marked as such, plus alternatives and open problems. It should be used as a starting point for a new design track, not as a final implementation spec.
+This document describes the append-log storage design that replaces the fixed-slot backend.
 
 ## Core constraints and objectives
 
@@ -26,34 +23,12 @@ This document includes my proposed design ideas, clearly marked as such, plus al
 9. Old data must remain valid until the new layout is durably published.
 10. Minimize flash wear while preserving clear fail-safe recovery semantics.
 
-## The key design correction
+## Storage model
 
-The current generated design direction drifted toward a replacement journal model:
-
-```text
-oldStart..oldEnd -> newStart..newEnd
-```
-
-That model can work, but it is not the cleanest expression of the intended design.
-
-The intended design is closer to this:
+The design is:
 
 ```text
-The authoritative layout/root decides which segment files are active.
-Segment files are just data blobs.
-Any segment file not referenced by the layout/root is dangling garbage.
-Compaction writes new dangling segment files first.
-Then one authoritative layout/root publish makes them active.
-```
-
-This means recovery should not treat every `pqueue-seg-XXXXXXXX.bin` file as active merely because it exists.
-
-## My recommended top-level model
-
-My recommended model is:
-
-```text
-dual-copy authoritative layout/root
+dual-copy authoritative root
 + append-only data segment files
 + incremental compaction
 + lazy/idempotent cleanup
@@ -61,67 +36,37 @@ dual-copy authoritative layout/root
 
 ### Files
 
-Possible file classes:
-
 ```text
 pqueue-root-a.bin
 pqueue-root-b.bin
 pqueue-seg-XXXXXXXX.bin
 ```
 
-I would avoid temp or pending files unless the root/commit model genuinely cannot handle a crash window.
+No temp or pending files. The root/commit model handles crash safety without them.
 
-### Root/layout file
+### Root
 
-The root/layout file is the authority.
+The root is the authority on which segment files are active. Recovery reads the root first and scans only the segments it references. A segment file not referenced by the root is unreferenced garbage — it is never treated as active merely because it exists on disk.
 
-It should include at least:
-
-```text
-magic
-version
-headerBytes
-epoch / generation
-active sealed layout
-open tail information
-next segment generation
-queue head/tail summary if useful
-crc
-footer
-```
-
-The root may encode active segments as ordered ranges instead of listing every segment individually.
-
-Example logical layout:
+The root encodes active segments as ordered ranges:
 
 ```text
-sealed active ranges:
-  [10..11]
-  [5..6]
-  [3..4]
-
-open tail:
-  generation 12
+sealed active ranges: [10..11], [5..6], [3..4]
+open tail: generation 12
 ```
 
-This is still a full logical active layout, but compact on disk.
+The root does not store queue head/tail/count. Those come from replaying the referenced segments. Storing them in the root would create two sources of truth that can disagree after a crash.
 
 ### Dual root
 
-Unless LittleFS atomic replace/rename is proven safe enough for power loss, I recommend dual root files:
+LittleFS atomic rename under power loss is not verified. The root uses two slots:
 
 ```text
 pqueue-root-a.bin
 pqueue-root-b.bin
 ```
 
-On publish:
-
-1. Write the inactive root slot with a higher epoch.
-2. Flush/close.
-3. Recovery later picks the highest valid root by epoch + CRC + footer.
-
-This costs one small root write per root publish, but avoids relying on uncertain overwrite semantics.
+On publish: write the inactive slot with a higher epoch, flush, close. Recovery reads both, validates CRC and footer, picks the highest valid epoch. This avoids depending on overwrite atomicity.
 
 ## Segment model
 
@@ -169,46 +114,25 @@ recovery scans 10,11,3
 old 1,2 are ignored
 ```
 
-## Rotation cost
+## Rotation
 
-A fully authoritative root requires a root update when the active layout changes, and rotation changes the active layout. So naive full-root publishes one small root write per rotation.
-
-This is only painful if rotation is frequent. The rotation cost has been measured on ESP32-S3 with LittleFS (see measurements below). The default model is therefore: **publish the root on rotation**. A self-describing tail chain is kept as a fallback if measurement shows rotation cost is genuinely unacceptable, not as a co-equal design path.
-
-## Default design: full root, updated on rotation
-
-### Shape
-
-Every time a new segment becomes active, update the root.
-
-Normal operation:
+Rotation happens when the active segment is full. On rotation:
 
 ```text
-append to current segment
-if segment full:
-  create next segment
-  publish root with new active tail
+create next segment (write 20 B header, flush, close)
+publish root with new active tail
 ```
 
-Compaction:
+On compaction:
 
 ```text
 write compacted output segments
 publish root replacing old active range with new range
 ```
 
-### Pros
+The root is not updated on every enqueue — only on rotation and compaction. Normal append operations write only to the active segment.
 
-- Simple.
-- Recovery is straightforward.
-- No directory inference.
-- Dangling files are always safe.
-- One authority.
-
-### Cons
-
-- One extra root write per segment rotation.
-- If segments are small, this may be too expensive.
+Rotation cost has been measured (see measurements section). At 4 KB segments the rotation overhead is ~6 ms amortized per enqueue, which is acceptable.
 
 ### Segment sizing — RESOLVED: 4 KB default
 
@@ -234,73 +158,13 @@ For 492 B records (516 B per event with overhead), effective average enqueue cos
 
 `maxSegmentBytes` must remain a config knob. Devices with slower flash or different block sizes will have different optimal values, but 4 KB is the right default.
 
-### Why this is the default
-
-It is the cleanest model, recovery is trivial, and the rotation cost is controlled by a single knob (segment size). Any alternative must beat it on measured cost, not on intuition.
-
-## Fallback design: root + self-describing tail chain
-
-Only consider this if measurement on target hardware shows the default's root-publish-on-rotation cost is genuinely unacceptable and segment sizing cannot bring it into budget.
-
-### Shape
-
-The root records:
-
-```text
-sealed active ranges
-current tail generation
-tail epoch / chain id
-```
-
-Normal append writes to current tail.
-
-When rotating from tail N to N+1, the new segment contains enough linkage to be discovered from the previous tail or root.
-
-Possible segment header fields:
-
-```text
-generation
-previousGeneration
-chainEpoch
-baseSequence
-state/open/sealed maybe
-crc
-```
-
-Recovery starts from root and follows a tail chain.
-
-### Trade-offs
-
-Avoids root write on every rotation. In exchange:
-
-- Recovery is significantly more complex.
-- Must define how to distinguish a fully committed rotated tail from a partially created one.
-- Needs a footer/commit marker in segment header or first event.
-- Tail chain corruption rules become subtle.
-- Requires careful crash tests.
-
-The complexity is real and the bugs that come from it are the kind that show up months later in the field. Do not adopt this without a measured cost that justifies it.
-
 ## Rejected directions
 
-The following directions were considered and discarded.
+**Replacement journal over discovered segment files.** An earlier implementation used a compaction journal mapping `oldStart..oldEnd -> newStart..newEnd`, with recovery scanning segment files on disk and applying journal replacements. Rejected: the existence of a normal segment file becomes meaningful, so dangling compacted outputs can poison recovery without a separate pending-intent mechanism. Recovery becomes a mix of directory inference and journal interpretation, and the "unreferenced files are garbage" invariant is lost.
 
-**Replacement journal over discovered segment files.** Scan segment files, read compaction journal records, apply replacements. This is the earlier generated design. It is rejected because the existence of a normal segment file becomes meaningful, so dangling compacted outputs can poison recovery unless special rules are added. Recovery becomes a mix of directory inference and journal interpretation, drifting away from the "unreferenced files are garbage" invariant. Not worth the ambiguity.
+**Self-describing tail chain.** Rotation avoids a root write by embedding chain linkage in each segment header. Rejected for this design: measurement shows rotation cost at 4 KB segments is ~6 ms amortized per enqueue, which is acceptable. The added recovery complexity is not justified.
 
-**Page/block preallocation.** Preallocate segment regions or files and write aligned full blocks. LittleFS is COW with dynamic block allocation, so preallocation does not deliver the flash-behavior wins it promises. Discarded.
-
-## Recommended design direction
-
-The design path is:
-
-1. Adopt an authoritative root/layout model.
-2. Treat all unreferenced segment files as garbage.
-3. Use dual-root files with epoch + CRC unless LittleFS atomic replace is proven.
-4. Do not use pending-intent files unless a specific crash window remains unsolved.
-5. Make compaction incremental and budgeted.
-6. Make the compaction writer build full segment buffers in RAM and write each new segment once.
-7. Publish the root on rotation. Tune segment size so rotation is rare enough that this cost is invisible.
-8. Hold the self-describing tail chain in reserve as a fallback only if measurement on target hardware proves rotation cost unacceptable.
+**Page/block preallocation.** Preallocate segment regions to write aligned full blocks. LittleFS is COW with dynamic block allocation, so preallocation does not deliver the expected flash-behavior wins.
 
 ## Incremental compaction design
 
@@ -375,9 +239,7 @@ flush
 
 That would recreate the LittleFS problem.
 
-## Proposed compaction step
-
-Assuming an authoritative root exists:
+## Compaction step
 
 ```text
 compactStep():
@@ -386,27 +248,19 @@ compactStep():
   if not useful: return no-op
   build one or more compacted output segment buffers in RAM
   write output segment file(s)
-  verify written segment file(s) cheaply
-  publish new root/layout replacing old segment/range with new segment/range
+  verify written segment file(s)
+  publish new root replacing old segment/range with new segment/range
   update RAM to match root
-  leave old files on disk
+  leave old files on disk (cleanup is separate)
 ```
 
-Write budget:
+Write budget per step:
 
 ```text
-N full segment writes
-+ 1 small root publish
-+ 0 per-record writes
-+ 0 pending-intent writes unless unavoidable
-+ 0 old deletes in compaction path
-```
-
-Cleanup:
-
-```text
-later:
-  delete unreferenced files gradually
+N full segment writes (~45 ms each at 4 KB)
++ 1 root publish (~26 ms for ≤64 B root)
++ 0 per-record flushes
++ 0 old deletes
 ```
 
 ## Recovery model
@@ -442,80 +296,6 @@ Cleanup must be idempotent:
 - if deletion fails, try later;
 - if crash happens during deletion, recovery still uses root and ignores missing unreferenced files;
 - never delete referenced active files.
-
-## Root format sketch
-
-This is only a sketch.
-
-```text
-RootHeader:
-  magic
-  version
-  headerBytes
-  epoch
-  rootBytes
-  flags
-  nextGeneration
-  layoutCrc
-  footer
-
-Layout:
-  active range count
-  repeated ordered active ranges:
-    startGeneration
-    endGeneration
-  tail info:
-    tailGeneration
-    tailMode / chainEpoch / maybe previous pointer
-  queue summary:
-    headSequence
-    tailSequence
-    maybe count
-```
-
-Question: should the root store queue head/tail/count?
-
-Decision: **no**. Replay of referenced segments is the single source of truth for queue head/tail/count. Storing them in the root creates two sources of truth that can disagree after a crash (root committed but a tail event did not, or vice versa). The root carries layout only. If a debug/observability summary is useful later, it can be added as advisory data with an explicit "not authoritative" flag, but not in the first version.
-
-## Atomicity model
-
-### If LittleFS atomic rename/replace is trusted
-
-Root publish could be:
-
-```text
-write pqueue-root-new.bin
-rename over pqueue-root.bin
-```
-
-But power-loss atomicity must be verified, not assumed.
-
-### Safer model
-
-Dual-root:
-
-```text
-pqueue-root-a.bin
-pqueue-root-b.bin
-```
-
-Publish:
-
-```text
-choose older/inactive root slot
-write complete new root with epoch+crc+footer
-flush/close
-```
-
-Recovery:
-
-```text
-read both
-validate crc/footer
-pick highest epoch
-```
-
-This avoids depending on overwrite atomicity.
 
 ## LittleFS measurements (ESP32-S3)
 
@@ -660,13 +440,9 @@ Prefer:
 - wear spread naturally by fresh generations;
 - budgeted maintenance.
 
-## Important open problems
+## Open problems
 
-### Open problem 1: rotation durability — RESOLVED
-
-Decision: root publish on rotation with 4 KB segments. Measured rotation cost ~45 ms (64 B root), amortized to ~6.4 ms per enqueue at 4 KB segments. Self-describing tail chain fallback is not needed.
-
-### Open problem 2: root format — PARTIALLY RESOLVED
+### Root format — partially resolved
 
 **Size constraint:** root must fit in ≤ 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
 
@@ -694,7 +470,7 @@ room for ranges: 34 B → 4 ranges max
 
 **Still open:** whether tailGeneration is encoded separately or as part of ranges; whether a sealed marker is needed in the root or implied by not being tailGeneration.
 
-### Open problem 3: open tail framing
+### Open tail framing
 
 Under the default model (root publish on rotation), the segment that is currently being appended to is "open" between rotations. Recovery must handle a torn write at the end of that segment. Need to define:
 
@@ -705,7 +481,7 @@ Under the default model (root publish on rotation), the segment that is currentl
 
 This is the actual hard problem behind rotation, and it must be specified before code.
 
-### Open problem 4: compaction selection policy
+### Compaction selection policy
 
 Need a first simple policy:
 
@@ -715,18 +491,16 @@ Need a first simple policy:
 - skip mostly-live segments;
 - budget by bytes/time/files.
 
-### Open problem 5: memory budget
+### Memory budget for compaction
 
-Full-buffer writes require RAM.
-
-Need decide:
+Full-buffer writes require RAM. Still to decide:
 
 - max compaction output buffer size;
-- whether 4KB is acceptable on ESP32;
-- whether to stream into one segment buffer;
-- fallback behavior if RAM unavailable.
+- whether 4 KB fits on ESP32 alongside everything else;
+- whether to stream into one segment buffer or allow multi-segment output;
+- fallback behavior if RAM is unavailable.
 
-### Open problem 6: cleanup under low free space
+### Cleanup under low free space
 
 If cleanup is lazy, what happens when free space is low?
 
@@ -736,7 +510,7 @@ Possible answer:
 - but it must delete only unreferenced files;
 - if no garbage exists, enqueue may fail.
 
-### Open problem 7: validation/repair
+### Validation and repair
 
 Normal mount should not salvage aggressively.
 
@@ -749,22 +523,22 @@ Repair tool may later:
 
 But normal mount should be strict and simple.
 
-## Questions for next design session
+## Decisions log
 
-Resolved:
+| Decision | Outcome |
+|----------|---------|
+| Root publish on rotation vs self-describing tail chain | Root publish on rotation. Tail chain complexity not justified by measured cost. |
+| Root stores queue head/tail/count | No. Layout only. Head/tail/count come from replay. |
+| Target segment size | **4 KB.** Measured flush cost cliff at 4→8 KB makes this the clear winner. |
+| Root size target | **≤ 64 B.** LittleFS inline file threshold — stays below it saves ~7 ms per rotation. |
 
-- Rotation publishes the root. Self-describing tail chain is fallback only.
-- Root stores layout only; queue head/tail/count come from replay.
-- Target segment size: **4 KB**. Measured flush cost cliff at 4→8 KB makes 4 KB the clear winner.
-- Root size target: **≤ 64 B**. LittleFS inline threshold saves ~7 ms per rotation.
-
-Still open, in order:
+Open, in priority order:
 
 1. Open-tail framing: segment header format, per-event CRC, truncation rule, sealed marker.
-2. Exact root binary layout fitting in 64 B (see open problem 2 sketch).
-3. RAM budget for the compaction output buffer (does 4 KB fit on ESP32 alongside everything else).
-4. Should compaction operate only on sealed segments? (Strong default: yes.)
-5. Should cleanup run automatically or only under explicit maintenance / free-space pressure?
+2. Exact root binary layout fitting in 64 B (see root format section).
+3. RAM budget for the compaction output buffer.
+4. Compaction operates only on sealed segments? (Strong default: yes.)
+5. Cleanup runs automatically or only under explicit maintenance / free-space pressure?
 6. Is dual-root mandatory, or can LittleFS atomic rename be trusted after a targeted crash test?
 
 ## Recommended next step
@@ -798,18 +572,3 @@ Can it be avoided by recovery semantics?
 
 If a write does not serve as data write, root commit, or necessary cleanup, it is suspect.
 
-## Short handoff summary
-
-Model:
-
-```text
-authoritative dual root (layout only, no head/tail/count)
-segments as dumb blobs
-unreferenced files ignored
-normal appends avoid root writes
-rotation publishes root; segment size tuned so this is invisible
-compaction incremental, full-buffer writes, one root publish per step
-old deletion deferred to lazy cleanup
-```
-
-Next work is specifying the open-tail framing and measuring rotation cost. Compaction comes after.
