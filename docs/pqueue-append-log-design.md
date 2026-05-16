@@ -55,6 +55,28 @@ It does not store queue head, tail position, or count — those are derived by r
 
 The manifest is only written on rollover and compaction. Normal enqueue, pop, and rewrite operations write only to the tail segment file.
 
+**Size constraint:** the manifest must fit in <= 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
+
+**Binary layout** (exact field ordering, padding, and endianness are implementation details):
+
+```
+magic          4 B
+version        2 B
+headerBytes    2 B
+epoch          4 B
+nextGeneration 4 B
+rangeCount     2 B
+ranges         N × 8 B  (startGen u32, endGen u32)
+tailGeneration 4 B
+crc            4 B
+footer         4 B
+-----------------
+fixed overhead: 30 B
+room for ranges: 34 B → 4 ranges max
+```
+
+`tailGeneration` is encoded separately, not as a range entry. 4 ranges is sufficient for normal operation — if a layout ever exceeds 4 ranges, that is a compaction policy or configuration constraint, not a format error.
+
 ### Dual manifest slots
 
 The manifest exists in two copies (slots A and B). Each carries an epoch counter. On publish, the inactive slot is overwritten with the new layout and a higher epoch — the active slot is never touched until the write is complete. On mount, each slot is validated independently by CRC and footer; only fully valid slots are considered. The valid slot with the higher epoch wins.
@@ -83,7 +105,6 @@ A segment file is a sequential data blob:
 
 - **generation** — the segment's unique number, matching its filename (e.g. `seg-0000000c.bin` has generation 12).
 - **startSeq** — the sequence number of the first event in this segment, allowing events to be positioned in the queue without scanning prior segments.
-- **full marker** — an optional footer written at rollover to indicate the segment is complete. Whether this is required or whether the manifest alone implies it is an open design decision (see open problem: manifest format).
 
 Segment files are not authoritative by existence. Mount asks what the manifest says is active, not which files happen to exist on disk.
 
@@ -172,10 +193,10 @@ Compacting mostly-live data just to make the log look clean is not useful.
 
 `compactOneSegment()`:
 
-1. Choose the oldest full segment (see open problem: compaction selection policy).
+1. Choose the oldest full segment. Skip if its dead bytes are below a configurable threshold (a config knob alongside `maxSegmentBytes`).
 2. Collect live records from that segment.
 3. If not useful, return no-op (see open problem: compaction no-op loop).
-4. Build one or more compacted output segment buffers in RAM (see open problem: memory budget for compaction).
+4. Build one compacted output segment buffer in RAM, sized to `maxSegmentBytes`. Validate during implementation that this headroom is available alongside the live firmware footprint.
 5. Write and verify output segment file(s).
 6. Publish new manifest replacing old segment/range with new segment/range.
 7. Update RAM to match manifest.
@@ -201,7 +222,9 @@ This avoids the “do random files on disk imply active data?” ambiguity.
 
 After a successful manifest publish, superseded segment files become dangling — not referenced by the manifest and safe to delete.
 
-Cleanup is not part of the compaction commit path. It runs incrementally outside the hot path: one file per idle window, one per startup, or one per explicit maintenance call (see open problem: cleanup under low free space).
+Cleanup is not part of the compaction commit path. It runs incrementally outside the hot path: one file per idle window, one per startup, or one per explicit maintenance call.
+
+Under low free space, cleanup runs eagerly before compaction or enqueue. It deletes only unreferenced files. If no garbage exists, enqueue fails.
 
 Cleanup is idempotent: deletion failures are retried later, a crash during deletion leaves mount unaffected (unreferenced files are simply ignored), and referenced files are never deleted.
 
@@ -224,86 +247,33 @@ Compaction step cost is ~71 ms when the selected segment has live records (one o
 
 ## Open problems
 
-### Memory budget for compaction
-
-Full-buffer writes require RAM. Still to decide:
-
-- max compaction output buffer size;
-- whether 4 KB fits on ESP32 alongside everything else;
-- whether to stream into one segment buffer or allow multi-segment output;
-- fallback behavior if RAM is unavailable.
-
-### Compaction selection policy
-
-Need a first simple policy:
-
-- one oldest full segment with enough dead bytes;
-- or oldest safe range;
-- never logical last segment;
-- skip mostly-live segments;
-- budget by bytes/time/files.
-
 ### Compaction no-op loop
 
-If step 1 always picks the oldest full segment unconditionally and step 3 returns no-op when it is mostly-live, `compactFull` will loop forever selecting the same segment. If instead step 1 scans all full segments to find one with enough dead bytes, the scan cost is O(segments × records) on every call — also undesirable.
+With oldest-first selection and a dead-byte threshold, `compactFull` terminates cleanly — it bails as soon as the oldest segment doesn't qualify. No loop issue for the common case.
 
-Needs a resolution: either a per-segment dead-byte counter in RAM to make selection O(segments), or a clear rule for how `compactFull` advances past a mostly-live segment without reprocessing it.
+Open question: after compaction, a consolidated segment may become sparse over time while the next-oldest pre-compaction segment is still mostly live. Oldest-first would skip the live segment correctly, but may also skip the now-sparse compacted segment if it sits behind a live one in logical order. Whether this is a real problem depends on usage patterns and how often compacted segments become sparse before the segments ahead of them are drained.
 
-### Manifest format — partially resolved
-
-**Size constraint:** manifest must fit in <= 64 B to stay within the LittleFS inline file threshold and avoid the ~7 ms penalty of a separate block allocation. This is a hard constraint, not a preference.
-
-**Content resolved:** manifest stores layout only — no queue head/tail/count (those come from replay). Must include: magic, version, epoch, nextGeneration, segment ranges, tail generation, CRC.
-
-**Still open:** exact binary layout. Sketch fitting in 64 B:
-
-```
-magic         4 B
-version       2 B
-headerBytes   2 B
-epoch         4 B
-nextGeneration 4 B
-rangeCount    2 B
-ranges        N × 8 B  (startGen u32, endGen u32)
-tailGeneration 4 B
-crc           4 B
-footer        4 B
------------------
-fixed overhead: 30 B
-room for ranges: 34 B → 4 ranges max
-```
-
-4 segment ranges is sufficient for normal operation (full segments + tail segment). If a layout ever exceeds 4 ranges, a larger manifest is needed — this is a configuration or compaction policy constraint, not a format error.
-
-**Still open:** whether tailGeneration is encoded separately or as part of ranges; whether a full marker is needed in the manifest or implied by not being the tail segment.
+## Future work
 
 ### Multi-segment compaction pass
 
-When compacting multiple consecutive segments, their live records may fit into fewer output segments than inputs — reducing manifest publishes and output file writes compared to looping `compactOneSegment`. Still to decide:
+When compacting multiple consecutive segments, their live records may fit into fewer output segments than inputs — reducing manifest publishes and output file writes compared to looping `compactOneSegment`. Needs design and profiling before implementation:
 
-- how many input segments can be merged in one pass before RAM is exhausted;
+- how many input segments can be merged in one pass before the RAM buffer is exhausted;
 - whether this warrants a separate API or is handled internally by `compactFull`;
-- what the actual throughput gain is — needs profiling.
+- what the actual throughput gain is.
 
-### Cleanup under low free space
+### RAM write buffer
 
-If cleanup is lazy, what happens when free space is low?
-
-Possible answer:
-
-- cleanup can run before compaction/enqueue when necessary;
-- but it must delete only unreferenced files;
-- if no garbage exists, enqueue may fail.
+All operations currently write directly to flash. A RAM buffer sitting in front of disk ops would allow enqueue/pop/rewrite to return without a flush, batching writes and reducing per-operation flash cost. Needs design: buffer sizing, flush policy, crash-safety implications, and interaction with the existing durability guarantees.
 
 ### Validation and repair
 
-Normal mount does not salvage aggressively — it is strict and simple.
-
-A repair tool may separately:
+Normal mount is strict and simple — it does not salvage aggressively. A repair tool is a separate future concern:
 
 - scan dangling files;
 - recover from manifest corruption;
-- inspect segment chains;
+- inspect segment contents;
 - rebuild manifest if possible.
 
 ## Appendix A: Decisions log
