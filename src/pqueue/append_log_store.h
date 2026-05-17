@@ -51,12 +51,6 @@ public:
     Status rebuildMetadata() override;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) override;
 
-    // Test-visible helper for Stage 2A; not public API.
-    static Status buildActiveSegmentOrder(
-        const std::vector<std::uint32_t>& sortedGenerations,
-        const std::vector<append_log_detail::CompactionJournalRecord>& replacements,
-        std::vector<std::uint32_t>& out);
-
 private:
     struct SegmentRecord {
         std::uint32_t sequence         = 0;
@@ -74,7 +68,7 @@ private:
     std::string segmentName(std::uint32_t generation) const;
     bool isSegmentName(const std::string& name, std::uint32_t& generationOut) const;
 
-    Status createSegment(std::uint32_t generation, std::uint32_t baseSequence);
+    Status createSegment(std::uint32_t generation, std::uint32_t startSeq);
     Status rotateSegment();
     Status ensureActiveSegment(std::uint32_t baseSeq);
     Status appendEnqueueEventBytes(const std::string& eventBytes);

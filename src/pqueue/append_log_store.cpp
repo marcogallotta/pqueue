@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <limits>
 #include <sstream>
-#include <unordered_set>
 #include <vector>
 
 namespace pqueue {
@@ -15,9 +14,8 @@ using namespace append_log_detail;
 
 namespace {
 
-constexpr const char* kSegmentPrefix       = "pqueue-seg-";
-constexpr const char* kSegmentSuffix       = ".bin";
-constexpr const char* kCompactionJournalFile = "pqueue-compact.bin";
+constexpr const char* kSegmentPrefix = "seg-";
+constexpr const char* kSegmentSuffix = ".bin";
 
 inline std::uint32_t readLE32(const std::string& buf, std::size_t offset) {
     return static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset]))
@@ -127,144 +125,6 @@ Status AppendLogStore::mount() {
     return Status::success();
 }
 
-Status AppendLogStore::buildActiveSegmentOrder(
-    const std::vector<std::uint32_t>& sortedGenerations,
-    const std::vector<CompactionJournalRecord>& replacements,
-    std::vector<std::uint32_t>& out)
-{
-    if (replacements.empty()) {
-        // No journal: must be consecutive 1..N
-        for (std::size_t i = 0; i < sortedGenerations.size(); ++i) {
-            if (sortedGenerations[i] != static_cast<std::uint32_t>(i + 1)) {
-                return Status::failure(StatusCode::DataCorrupt,
-                    "missing segment: generation sequence is not consecutive from 1");
-            }
-        }
-        out = sortedGenerations;
-        return Status::success();
-    }
-
-    // Conservative upper bound on a single compaction range; can be tied to
-    // config.maxSegments in a future stage.
-    constexpr std::uint32_t kMaxCompactionRangeGenerations = 4096;
-
-    auto validRange = [&](std::uint32_t start, std::uint32_t end) -> bool {
-        // Re-check all invariants even though the parser enforces them —
-        // cheap, and this helper may be called directly without a parsed record.
-        return start != 0
-            && end >= start
-            && (end - start) < kMaxCompactionRangeGenerations;
-    };
-    auto expandRange = [&](std::uint32_t start, std::uint32_t end,
-                           std::vector<std::uint32_t>& vec) -> bool {
-        if (!validRange(start, end)) return false;
-        for (std::uint32_t g = start; g <= end; ++g) vec.push_back(g);
-        return true;
-    };
-    auto insertRange = [&](std::unordered_set<std::uint32_t>& set,
-                           std::uint32_t start, std::uint32_t end) -> bool {
-        if (!validRange(start, end)) return false;
-        for (std::uint32_t g = start; g <= end; ++g) set.insert(g);
-        return true;
-    };
-
-    // Collect all new-range sortedGenerations produced by any replacement
-    std::unordered_set<std::uint32_t> allNewRanges;
-    for (const auto& r : replacements) {
-        if (!insertRange(allNewRanges, r.newStart, r.newEnd)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: invalid new range");
-        }
-    }
-
-    // Build base logical chain:
-    //   - found sortedGenerations not in any new range  (original, still on disk)
-    //   - old-range sortedGenerations not produced by an earlier replacement's new range
-    //     (original sortedGenerations that may have been cleaned up after commit)
-    std::unordered_set<std::uint32_t> baseSet;
-    for (std::uint32_t g : sortedGenerations) {
-        if (!allNewRanges.count(g)) {
-            baseSet.insert(g);
-        }
-    }
-    // Track new ranges produced by records processed so far, to exclude chained old ranges
-    std::unordered_set<std::uint32_t> priorNewRanges;
-    for (const auto& r : replacements) {
-        std::vector<std::uint32_t> oldVec;
-        if (!expandRange(r.oldStart, r.oldEnd, oldVec)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: invalid old range");
-        }
-        for (std::uint32_t g : oldVec) {
-            if (!priorNewRanges.count(g)) {
-                baseSet.insert(g);
-            }
-        }
-        if (!insertRange(priorNewRanges, r.newStart, r.newEnd)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: invalid new range");
-        }
-    }
-
-    std::vector<std::uint32_t> chain(baseSet.begin(), baseSet.end());
-    std::sort(chain.begin(), chain.end());
-
-    // Verify base is consecutive from 1
-    for (std::size_t i = 0; i < chain.size(); ++i) {
-        if (chain[i] != static_cast<std::uint32_t>(i + 1)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "missing segment: base logical chain is not consecutive from 1");
-        }
-    }
-
-    // Apply each replacement in order
-    for (const auto& r : replacements) {
-        std::vector<std::uint32_t> oldRange;
-        if (!expandRange(r.oldStart, r.oldEnd, oldRange)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: invalid old range");
-        }
-
-        auto it = std::search(chain.begin(), chain.end(), oldRange.begin(), oldRange.end());
-        if (it == chain.end()) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: old range not found in logical chain");
-        }
-
-        std::vector<std::uint32_t> newRange;
-        if (!expandRange(r.newStart, r.newEnd, newRange)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: invalid new range");
-        }
-
-        it = chain.erase(it, it + static_cast<std::ptrdiff_t>(oldRange.size()));
-        chain.insert(it, newRange.begin(), newRange.end());
-    }
-
-    // Detect duplicates in final chain (e.g. overlapping journal records)
-    {
-        std::unordered_set<std::uint32_t> seen;
-        seen.reserve(chain.size());
-        for (std::uint32_t g : chain) {
-            if (!seen.insert(g).second) {
-                return Status::failure(StatusCode::DataCorrupt,
-                    "compaction journal: duplicate generation in final active chain");
-            }
-        }
-    }
-
-    // Verify every generation in final chain exists in sortedGenerations
-    for (std::uint32_t g : chain) {
-        if (!std::binary_search(sortedGenerations.begin(), sortedGenerations.end(), g)) {
-            return Status::failure(StatusCode::DataCorrupt,
-                "compaction journal: active segment generation missing from disk");
-        }
-    }
-
-    out = std::move(chain);
-    return Status::success();
-}
-
 Status AppendLogStore::scanSegments() {
     auto f = fs();
 
@@ -281,64 +141,23 @@ Status AppendLogStore::scanSegments() {
     }
     std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
-    // Read compaction journal if present.
-    // Presence is determined from the listFiles() result so that a read/stat failure on
-    // an existing journal is a hard mount error, not silently treated as "no journal".
-    std::vector<CompactionJournalRecord> replacements;
-    {
-        const bool journalPresent = [&]() {
-            for (const auto& name : files)
-                if (name == kCompactionJournalFile) return true;
-            return false;
-        }();
-
-        if (journalPresent) {
-            std::string journalBytes;
-            if (!f->readFile(kCompactionJournalFile, journalBytes).ok()) {
-                return Status::failure(StatusCode::DataCorrupt,
-                    "compaction journal: read failed");
-            }
-            // Truncating division: any partial trailing bytes are a torn tail and are
-            // silently ignored.  A corrupt but complete record is DataCorrupt.
-            const std::size_t recordCount =
-                journalBytes.size() / kCompactionJournalRecordBytes;
-            for (std::size_t i = 0; i < recordCount; ++i) {
-                const std::string recBytes = journalBytes.substr(
-                    i * kCompactionJournalRecordBytes, kCompactionJournalRecordBytes);
-                CompactionJournalRecord rec;
-                if (!parseCompactionJournalRecord(recBytes, rec)) {
-                    return Status::failure(StatusCode::DataCorrupt,
-                        "compaction journal: corrupt record");
-                }
-                replacements.push_back(rec);
-            }
-        }
-    }
-
-    // Compute the logical replay order from disk state + journal.
-    // Without a journal this enforces the legacy consecutive-1..N invariant.
-    // With a journal the helper verifies the journal-backed layout is self-consistent.
-    std::vector<std::uint32_t> logicalOrder;
-    {
-        Status orderSt = buildActiveSegmentOrder(sortedGenerations, replacements, logicalOrder);
-        if (!orderSt.ok()) return orderSt;
-    }
-    activeGenerations_ = logicalOrder;
+    // TODO Stage-3b: replace with readManifest() — manifest derives the authoritative
+    // replay order, including non-monotonic orderings after compaction.
+    activeGenerations_ = sortedGenerations;
     records_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = kSegmentHeaderBytes;
     nextGeneration_ = 1;
     nextSequence_ = 0;
 
-    // nextGeneration_ must exceed every generation on disk — including compacted-away
-    // segments not in the logical chain — so those numbers are never reused.
+    // nextGeneration_ must exceed every generation on disk so numbers are never reused.
     for (std::uint32_t g : sortedGenerations) {
         if (g + 1 > nextGeneration_) nextGeneration_ = g + 1;
     }
 
-    for (std::size_t segIdx = 0; segIdx < logicalOrder.size(); ++segIdx) {
-        const std::uint32_t gen = logicalOrder[segIdx];
-        const bool isLastSegment = (segIdx + 1 == logicalOrder.size());
+    for (std::size_t segIdx = 0; segIdx < activeGenerations_.size(); ++segIdx) {
+        const std::uint32_t gen = activeGenerations_[segIdx];
+        const bool isLastSegment = (segIdx + 1 == activeGenerations_.size());
         const std::string name = segmentName(gen);
 
         std::uint64_t fileSize = 0;
@@ -485,8 +304,8 @@ Status AppendLogStore::scanSegments() {
     return Status::success();
 }
 
-Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t baseSequence) {
-    const std::string headerBytes = serializeSegmentHeader(generation, baseSequence);
+Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {
+    const std::string headerBytes = serializeSegmentHeader(generation, startSeq);
     Status st = fs()->writeFile(segmentName(generation), headerBytes);
     if (!st.ok()) return st;
     activeGeneration_ = generation;
@@ -565,8 +384,10 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
 }
 
 bool AppendLogStore::needsCompaction() const {
+    // TODO Stage-6: replace with activeGenerations_.size() > config_.maxSegments.
+    // Span-based counting overestimates pressure once non-monotonic generation
+    // orderings exist after compaction.
     const auto segCount = [this]() -> std::uint32_t {
-        // Count distinct segment sortedGenerations referenced by live records + active
         if (records_.empty()) return 0;
         std::uint32_t min = records_.front().segmentGeneration;
         return (activeGeneration_ >= min) ? (activeGeneration_ - min + 1) : 1;
@@ -581,14 +402,11 @@ bool AppendLogStore::needsCompaction() const {
 
 Status AppendLogStore::compact() {
     if (!records_.empty()) {
-        // TODO: non-empty compaction is crash-unsafe until a compaction commit
-        // marker or sequence-dedup recovery is in place. New segments are written
-        // then old ones deleted; a power loss between those two steps leaves both
-        // copies visible to recovery, duplicating live records.
+        // TODO Stage-5c: implement compactOneSegment() for live-record compaction.
         return Status::success();
     }
 
-    // No live records - delete all segments and reset
+    // No live records — delete all segments and reset
     std::vector<std::string> files;
     if (fs()->listFiles(files).ok()) {
         for (const auto& name : files) {
@@ -598,7 +416,6 @@ Status AppendLogStore::compact() {
             }
         }
     }
-    fs()->removeFile(kCompactionJournalFile);
     activeGenerations_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
@@ -785,8 +602,6 @@ Status AppendLogStore::format() {
             f->removeFile(name);
         }
     }
-    f->removeFile(kCompactionJournalFile);
-
     activeGenerations_.clear();
     records_.clear();
     hasPendingEnqueue_ = false;

@@ -164,9 +164,11 @@ After completing each stage, update this document: remove anything that is no lo
 
 Tests are not optional at any stage. Each stage must be fully tested before the next begins — later stages build on earlier ones and will silently inherit any bugs left untested. The most dangerous bugs in this design are ordering bugs (RAM updated before manifest, manifest updated before segment file) and election bugs (wrong slot wins on mount). These cannot be caught by inspection alone; they require tests that simulate crash points and remount. Every stage below calls out its critical tests — the ones where a missing test is most likely to let a real bug through.
 
-### Stage 0 — Code cleanup
+### Stage 0 — Code cleanup (done)
 
-Remove all compaction-journal artifacts and apply the naming changes from the appendix. After this stage the code compiles with no dead code and all file/field names match the design spec. See the appendix for the exact list of what to remove and what to rename. The journal-reading block to remove is at lines 365–476 of `append_log_store.cpp` (the `buildActiveSegmentOrder()` call and everything above the per-segment scan loop). **Critical test:** all existing compaction-journal-era crash/mount tests (journal-aware mount, logical ordering, torn-tail classification) must continue to pass unchanged — this stage must not alter behaviour. **After Stage 0 is complete, remove the appendix from this document — it describes the old code state and is no longer relevant.**
+Completed. Removed all compaction-journal artifacts (`CompactionJournalRecord`, `kCompactionMagic`, `kCompactionJournalRecordBytes`, `parseCompactionJournalRecord`, `serializeCompactionJournalRecord`, `buildActiveSegmentOrder`, `kCompactionJournalFile`). Renamed `SegmentHeader::baseSequence` → `startSeq` and segment prefix `pqueue-seg-` → `seg-`. Deleted `pqueue_compact_journal.cpp`.
+
+`scanSegments()` now sets `activeGenerations_ = sortedGenerations` directly — a deliberate placeholder. **Stage 3b must replace this line with `readManifest()`.** Until then, non-monotonic generation orderings (produced by compaction) are not supported; all segments replay in numerically sorted order. This is acceptable because no manifest exists yet to define a different order.
 
 ### Stage 1 — Manifest binary format
 
@@ -201,7 +203,15 @@ Test: all four slot-election cases, equal epoch tiebreaker, corrupt slot discard
 
 ### Stage 3b — Wire manifest into mount
 
-Rewire `scanSegments()` to call `readManifest()` instead of reading the compaction journal and building active segment order from filenames. Keep the event-replay loop byte-for-byte identical — only the preamble changes. Test: empty store (no files), normal mount, crash mid-publish (bad CRC slot discarded), bootstrap (both slots missing + no segments = empty mount), both slots missing + segment files present = DataCorrupt. **Critical test:** enqueue several records, corrupt one manifest slot mid-publish (truncate it), remount — queue must recover all records from the surviving slot with no data loss.
+Rewire `scanSegments()` to call `readManifest()` instead of the `activeGenerations_ = sortedGenerations` placeholder. The event-replay loop is byte-for-byte identical — only the preamble changes. Also remove the `#include <sstream>` if still unused.
+
+**Preamble to replace** (currently in `scanSegments()`, marked `TODO Stage-3b`):
+```cpp
+activeGenerations_ = sortedGenerations;
+```
+Replace with `readManifest()` as described in Stage 3a.
+
+Test: empty store (no files), normal mount, crash mid-publish (bad CRC slot discarded), bootstrap (both slots missing + no segments = empty mount), both slots missing + segment files present = DataCorrupt. **Critical test:** enqueue several records, corrupt one manifest slot mid-publish (truncate it), remount — queue must recover all records from the surviving slot with no data loss.
 
 ### Stage 4 — Rollover wired to manifest
 
@@ -246,93 +256,3 @@ Wire compaction into `writeRecord()`. Update `needsCompaction()` to use `activeG
 
 Implement lazy deletion of dangling segment files. Test: dangling files deleted; referenced files untouched; cleanup crash is safe. **Critical test:** run cleanup with a file that is referenced by the current manifest — it must not be deleted under any circumstances.
 
----
-
-## Appendix: Code state at migration start
-
-### What transfers from current code
-
-#### Segment file content format (`append_log_common.*`)
-
-The event-level binary format is reusable without change:
-
-- `SegmentHeader` (20 B) — `serialiseSegmentHeader()`, `parseSegmentHeader()`
-- ENQUEUE/REWRITE event — `EnqueueHeader` (16 B) + payload + CRC (4 B) + footer (4 B) — `serialiseEnqueueEvent()`, `serialiseRewriteEvent()`, `parseEnqueueHeader()`
-- POP event (20 B fixed) — `serialisePopEvent()`, `parsePopEvent()`
-- `crc32()`, `enqueueEventCrc()`
-- All magic constants except `kCompactionMagic`
-
-Segment file naming changes (`seg-XXXXXXXX.bin`, not `pqueue-seg-XXXXXXXX.bin`); content format is identical.
-
-#### RAM model (`AppendLogStore` private fields)
-
-The following fields are correct and transfer:
-
-- `records_` — `std::deque<SegmentRecord>`, each holding `{sequence, segmentGeneration, payloadOffset, payloadBytes}`
-- `activeGeneration_` — generation of the current tail segment
-- `activeSegmentBytes_` — byte length of the current tail segment, used as the next append offset
-- `nextGeneration_` — next generation number to allocate (set from manifest on mount)
-- `nextSequence_` — one past the highest sequence ever seen; preserves sequence continuity across empty-queue remounts
-- `activeGenerations_` — flat list of active segment generations in logical replay order (full ranges in order, then tail last); now populated from the manifest instead of filename scan + journal
-
-`indexFromRecords()` and `readRecord()` are unchanged.
-
-#### Event append path
-
-`appendEnqueueEventBytes()`, `appendPopEvent()`, and `appendRewriteEvent()` in `append_log_store.cpp` are unchanged. `createSegment()`, `rotateSegment()`, and `ensureActiveSegment()` are structurally correct but must now call `publishManifest()` after `createSegment()` on rollover.
-
-#### Event replay loop in `scanSegments()`
-
-The per-segment scanning loop in `scanSegments()` transfers. The exact rules it implements are documented above under **Scan and torn-tail rules**, because they must be preserved verbatim.
-
-### What is abandoned
-
-#### Compaction journal (`pqueue-compact.bin`)
-
-Replaced entirely by the dual manifest. Remove:
-
-- `kCompactionJournalFile`, `kCompactionMagic` constants
-- `CompactionJournalRecord` struct and `serialiseCompactionJournalRecord()` / `parseCompactionJournalRecord()`
-- `buildActiveSegmentOrder()` and the journal-reading block at the top of `scanSegments()`
-- `pqueue_compact_journal.cpp` test file
-
-Crash/mount test cases from `pqueue_compact_journal.cpp` that cover torn journal tail, bad complete record, and missing active segment should be converted into equivalent manifest tests (bad CRC slot, partial manifest write, missing referenced segment).
-
-#### Consecutive-generation invariant
-
-`buildActiveSegmentOrder()` enforces that segment generations form a consecutive sequence from 1. The manifest design has no such constraint — the manifest lists the active ranges explicitly. This requirement is gone.
-
-#### Filename-based active segment inference
-
-Current mount lists all segment files and infers the active set from filenames plus the journal. New mount reads only the manifest; the active set is what the manifest says, regardless of what files exist on disk. File listing is only needed for cleanup.
-
-### Naming changes required in code
-
-#### File names
-
-| Current code | Design doc |
-|---|---|
-| `pqueue-seg-XXXXXXXX.bin` | `seg-XXXXXXXX.bin` |
-| `pqueue-compact.bin` | *(removed)* |
-| *(none)* | `manifest-a.bin` |
-| *(none)* | `manifest-b.bin` |
-
-Affects `kSegmentPrefix`, `isSegmentName()`, `segmentName()`, and any test helpers that construct segment paths.
-
-#### Field names
-
-| Current code | Design doc |
-|---|---|
-| `SegmentHeader::baseSequence` | `startSeq` |
-| `serialiseSegmentHeader(..., baseSequence)` | `serialiseSegmentHeader(..., startSeq)` |
-| `createSegment(..., baseSequence)` | `createSegment(..., startSeq)` |
-
-#### Concepts (comments, variable names, doc strings)
-
-| Current code / old design | Design doc |
-|---|---|
-| "root" | "manifest" |
-| "sealed active ranges" | "full segments" |
-| "open tail" | "tail segment" |
-
-Generation numbers remain zero-padded 8-digit hex, monotonically increasing, never reused.

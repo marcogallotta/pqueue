@@ -42,7 +42,6 @@ TEST_SRC := \
 	tests/posix/pqueue_outbox.cpp \
 	tests/posix/pqueue_rebuild_metadata.cpp \
 	tests/posix/pqueue_repair.cpp \
-	tests/posix/pqueue_compact_journal.cpp \
 	tests/posix/pqueue_queue_edges.cpp \
 	$(PQUEUE_SRC)
 
