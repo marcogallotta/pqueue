@@ -10,6 +10,8 @@ Before designing a replacement strategy, we need data. The space of possible com
 
 ## Simulator
 
+Implementation: `tools/pqueue_compaction_sim.cpp`. Build with `make -j12 sim`, run as `./build/pqueue-compaction-sim`. The simulator uses the real AppendLogStore API via a CountingFileSystem wrapper (in `tools/counting_file_system.h`) that tracks bytes written for flash wear measurement.
+
 A Posix-backed workload simulator that drives the queue through configurable enqueue/pop patterns and observes compaction behavior. Runs on desktop, no device required. Fast enough to sweep a large parameter space.
 
 ### Workload parameters
@@ -109,16 +111,36 @@ This confirms that usefulness-gating -- skipping compaction when there is nothin
 
 Under any workload with range pressure, oldest-first repeatedly compacts ranges with no dead data. This is pure write amplification with no benefit, and it directly causes the deadlock scenario (range limit hit while compacting live data for no gain). It is retained in the simulator as a baseline only.
 
-### DeferUntilPressure wins for wrong reasons
+### DeferUntilPressure avoids deadlocks because ranges never multiply without compaction
 
-DeferUntilPressure avoided deadlocks in all runs by never compacting at all -- its pressure threshold was never triggered by the workload parameters used. This is coincidental, not a genuine strategy win. A workload that sustains higher range pressure would expose it.
+DeferUntilPressure showed MaxRange=1 and zero deadlocks across all workloads. This is explained by a structural property of the store: rotateSegment() merges contiguous generation numbers into the same manifest range. Without compaction, all segment rotations extend a single range's endGen, so range count stays at 1 indefinitely. Compaction is what creates non-contiguous output generations, producing new ranges. DeferUntilPressure therefore never encounters range pressure in practice -- its threshold is never triggered. This is not a strategy win; it is a degenerate case where the strategy never acts and the store never accumulates range pressure to force action.
+
+### v1 single-output limit makes strategy evaluation impossible under pressure
+
+In all workloads with enqueueProb >= 0.55, strategies that compact (all except DeferUntilPressure) produced 4900+ deadlocks out of 5000 operations. The root cause is not strategy choice -- it is the v1 hard limit: if live bytes in the chosen range exceed maxSegmentBytes, compactRange() returns noOp(). Under sustained enqueue load, live bytes in a range routinely exceed one segment. Once range count hits 4 and no range fits in a single output segment, the queue deadlocks permanently regardless of strategy.
+
+All ratio-based strategies (HighestDeadRatio, CostBenefit, AgeWeighted, MinLiveBytesCopied, LookaheadHeuristic) deadlocked identically. They cannot be differentiated by the simulator until multi-segment compaction output is implemented, because they are all blocked by the same v1 constraint.
 
 ### Key conclusions
 
-1. The compaction trigger must be state-based, not operation-count-based. The trigger condition should be: dead bytes in some range exceed a threshold, OR range count approaches the manifest limit. This collapses the no-op rate and makes strategy choice meaningful.
+1. The compaction trigger must be state-based, not operation-count-based. A rising-edge trigger -- fire on segment rotation or when range count approaches the limit -- collapses the no-op rate and is implemented in the current simulator.
 
-2. Any viable strategy must gate on usefulness: refuse to compact a range whose dead-byte ratio is below a minimum threshold, except when range count pressure forces action.
+2. Any viable strategy must gate on usefulness: refuse to compact a range whose dead-byte ratio is below a minimum threshold, except when range count pressure forces action. Oldest-first fails this test catastrophically (2000x+ write amplification vs 2.7x for ratio-based strategies).
 
-3. Ratio-based strategies (HighestDeadRatio, CostBenefit, AgeWeighted) are directionally correct. Further runs with a usefulness-gated trigger are needed to distinguish between them.
+3. Strategy evaluation is blocked by the v1 single-output compaction limit. Multi-segment output (allowing compactRange to write multiple output segments when live data exceeds one segment) is a prerequisite for meaningful simulator differentiation under realistic load.
 
-4. The scheduler design is a separate concern from the scoring heuristic, and must be resolved before strategy evaluation is meaningful.
+4. Once multi-segment output exists, the simulator workloads and trigger logic are sound. Ratio-based strategies are the correct direction; the simulator is ready to distinguish between them once the v1 bottleneck is removed.
+
+## Next steps
+
+### Step 1: Implement multi-segment compaction output (required before further simulation)
+
+Modify `AppendLogStore::compactRange()` in `src/pqueue/append_log_store.cpp`. Currently, if `liveBytes > maxSegmentBytes`, the function returns `Status::noOp()`. The fix: partition the live records across as many output segments as needed (each within `maxSegmentBytes`), write each segment, then publish a manifest where the old range is replaced by a new range spanning all output segment generations. The range count after compaction must not exceed `kManifestMaxRanges`.
+
+The manifest's contiguous-merge logic in `rotateSegment()` (merging adjacent generation numbers into one range) means that if the output segments have consecutive generation numbers, they will form a single range -- so multi-segment output typically does not increase range count at all.
+
+After implementing, re-run the simulator. The deadlock counts should collapse to near zero for all ratio-based strategies, and meaningful differentiation between them should become visible.
+
+### Step 2: Re-run simulator and record findings
+
+With multi-segment output in place, re-run the full workload sweep and add a findings section here covering: which strategies minimise write amplification, which minimise flash wear, and whether any show unsafe range pressure under heavy load. Update `docs/pqueue-append-log-design.md` future work section to reflect what is still outstanding.

@@ -21,12 +21,13 @@
 // ---------------------------------------------------------------------------
 
 struct WorkloadParams {
-    std::uint32_t numOps           = 5000;
-    double        enqueueProb      = 0.6;  // probability of enqueue vs pop
-    std::uint32_t recordSize       = 64;   // bytes per record
-    std::uint32_t maxSegmentBytes  = 512;
-    std::uint8_t  maxSegments      = 4;
-    std::uint32_t compactInterval  = 8;    // call strategy every N enqueues
+    std::uint32_t numOps              = 5000;
+    double        enqueueProb         = 0.6;    // probability of enqueue vs pop
+    std::uint32_t recordSize          = 64;     // bytes per record
+    std::uint32_t maxSegmentBytes     = 512;
+    std::uint8_t  maxSegments         = 200;    // high: disables internal auto-compact
+    float         deadRatioTrigger    = 0.25f;  // compact if any range >= this fraction dead
+    std::uint32_t rangePressureTrigger = 3;     // compact if range count >= this (out of kManifestMaxRanges=4)
 };
 
 // ---------------------------------------------------------------------------
@@ -355,7 +356,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
     SimMetrics metrics;
     std::uint32_t nextSeq = 1;
     std::uint32_t queueSize = 0;
-    std::uint32_t enqueuesSinceCompact = 0;
+    std::uint32_t prevRangeCount = 0;
 
     // Simple LCG for reproducible pseudo-random sequence.
     std::uint32_t rng = 0xdeadbeef;
@@ -401,6 +402,27 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
         }
     };
 
+    // Rising-edge trigger: fire when a new full range is added (rotation), or
+    // when range count hits the emergency pressure threshold.
+    auto checkAndCompact = [&]() {
+        const std::uint32_t currentRangeCount =
+            static_cast<std::uint32_t>(store.manifestRanges().size());
+
+        const bool newRangeAdded = currentRangeCount > prevRangeCount;
+        const bool emergencyPressure = currentRangeCount >= wp.rangePressureTrigger;
+
+        if (newRangeAdded || emergencyPressure) {
+            bool anyUseful = emergencyPressure;
+            if (!anyUseful) {
+                for (const auto& rs : buildRangeStats(store)) {
+                    if (rs.deadRatio() >= wp.deadRatioTrigger) { anyUseful = true; break; }
+                }
+            }
+            if (anyUseful) tryCompact();
+        }
+        prevRangeCount = currentRangeCount;
+    };
+
     const std::string payload(wp.recordSize, 'x');
 
     for (std::uint32_t op = 0; op < wp.numOps; ++op) {
@@ -422,11 +444,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
             metrics.maxRangeCount = std::max(metrics.maxRangeCount,
                 static_cast<std::uint32_t>(store.manifestRanges().size()));
 
-            ++enqueuesSinceCompact;
-            if (enqueuesSinceCompact >= wp.compactInterval) {
-                enqueuesSinceCompact = 0;
-                tryCompact();
-            }
+            checkAndCompact();
         } else {
             counting->resetCounters();
             pqueue::FileStoreIndex idx;
@@ -438,6 +456,9 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
                 --queueSize;
                 metrics.flashWearBytes += counting->counters().bytesWritten;
             }
+            metrics.maxRangeCount = std::max(metrics.maxRangeCount,
+                static_cast<std::uint32_t>(store.manifestRanges().size()));
+            checkAndCompact();
         }
     }
 
@@ -492,22 +513,23 @@ int main() {
 
     // maxSegments=200 disables internal auto-compaction so the external strategy
     // is solely responsible for keeping range count in check.
+    // Trigger thresholds sweep: loose (30% dead or range>=3) vs tight (15% dead or range>=3).
     const std::vector<WorkloadDef> workloads = {
-        // light: queue drains quickly, compaction rarely urgent
-        { "enqP=0.55 compact=6",  { 5000, 0.55, 64, 512, 200, 6  } },
-        { "enqP=0.55 compact=15", { 5000, 0.55, 64, 512, 200, 15 } },
-        // balanced: queue oscillates around steady state
-        { "enqP=0.65 compact=6",  { 5000, 0.65, 64, 512, 200, 6  } },
-        { "enqP=0.65 compact=15", { 5000, 0.65, 64, 512, 200, 15 } },
-        // heavy: queue fills fast, range pressure builds quickly
-        { "enqP=0.80 compact=6",  { 5000, 0.80, 64, 512, 200, 6  } },
-        { "enqP=0.80 compact=15", { 5000, 0.80, 64, 512, 200, 15 } },
+        // light: queue drains quickly
+        { "enqP=0.55 dead=25%", { 5000, 0.55, 64, 512, 200, 0.25f, 3 } },
+        { "enqP=0.55 dead=15%", { 5000, 0.55, 64, 512, 200, 0.15f, 3 } },
+        // balanced: queue oscillates
+        { "enqP=0.65 dead=25%", { 5000, 0.65, 64, 512, 200, 0.25f, 3 } },
+        { "enqP=0.65 dead=15%", { 5000, 0.65, 64, 512, 200, 0.15f, 3 } },
+        // heavy: queue fills fast
+        { "enqP=0.80 dead=25%", { 5000, 0.80, 64, 512, 200, 0.25f, 3 } },
+        { "enqP=0.80 dead=15%", { 5000, 0.80, 64, 512, 200, 0.15f, 3 } },
     };
 
     for (const auto& wl : workloads) {
-        std::printf("\nWorkload: %s  ops=%u  maxSeg=%uB  maxSegs=%u\n",
-            wl.label, wl.params.numOps,
-            wl.params.maxSegmentBytes, wl.params.maxSegments);
+        std::printf("\nWorkload: %s  ops=%u  maxSeg=%uB  deadTrig=%.0f%%  rangeTrig=%u\n",
+            wl.label, wl.params.numOps, wl.params.maxSegmentBytes,
+            wl.params.deadRatioTrigger * 100.0f, wl.params.rangePressureTrigger);
         printHeader();
         for (auto& strat : strategies) {
             SimMetrics m = runSimulation(wl.params, *strat);
