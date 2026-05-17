@@ -40,6 +40,8 @@ public:
     Status readRecord(std::uint32_t sequence, std::string& out) override;
     Status removeRecord(std::uint32_t sequence) override;
 
+    Status publishManifest(const append_log_detail::ManifestData& manifest);
+
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;
     Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override;
@@ -79,6 +81,12 @@ private:
     Status compact();
 
     bool needsCompaction() const;
+
+    // Applies manifest fields to RAM state (activeGenerations_, nextGeneration_).
+    // Called by publishManifest() after a successful write, and by scanSegments()
+    // in Stage 3b after readManifest() returns the winning slot. One path avoids
+    // divergence between publish and mount reconstruction.
+    void applyManifestToRam(const append_log_detail::ManifestData& manifest);
 
     FileStoreIndex indexFromRecords() const;
 

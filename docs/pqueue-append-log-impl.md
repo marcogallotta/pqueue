@@ -178,15 +178,17 @@ Added `ManifestRange`, `ManifestData`, `serialiseManifest()`, `parseManifest()` 
 
 Tests added: round-trip empty store, round-trip with two ranges, binary layout field offsets, corrupted CRC rejected, wrong magic rejected, wrong version rejected, wrong headerBytes rejected, wrong footer rejected, rangeCount > 4 rejected, tailGen==0 with non-zero rangeCount rejected, buffer too small rejected.
 
-### Stage 2 — Manifest publish
+### Stage 2 — Manifest publish (done)
 
-Add `publishManifest()` to `AppendLogStore`:
+Added `publishManifest(const ManifestData& manifest)` to `AppendLogStore` (public for testability). Slot files are `manifest-a.bin` and `manifest-b.bin` in `basePath`. Constants `kManifestSlotA`/`kManifestSlotB` in the anonymous namespace of `append_log_store.cpp`.
 
-```cpp
-Status publishManifest(const ManifestData& manifest);
-```
+Slot election for writing: both missing → A; A missing → A; B missing → B; both valid, lower epoch → lower slot; equal epoch → B (tiebreaker). New epoch = `winningEpoch + 1`. RAM update (`activeGenerations_`, `nextGeneration_`) happens only after a successful write.
 
-Test round-trip: publish → read both slots → correct slot wins for all four slot-selection cases including equal epoch and one-missing. **Critical test:** publish twice, then corrupt slot B — slot A must win on the next read. This confirms the inactive-slot-first write order is correct.
+Tests added: first publish writes A, second publish writes B (A valid / B missing), A missing / B valid writes A, both valid lower-epoch wins, equal-epoch tiebreaker writes B, critical corrupt-slot-B test confirms A survives intact.
+
+`applyManifestToRam(const ManifestData&)` extracted as a shared helper (public for testability; called by `publishManifest()` now). **Stage 3b must replace the `publishManifest()` call to `applyManifestToRam()` with: `readManifest()` → `applyManifestToRam()`** — so mount-path and publish-path RAM reconstruction stay in sync via one code path.
+
+**Durability note:** `writeFile()` on Posix is truncate-then-write with no fsync (not atomic). On LittleFS it flushes and closes, and LittleFS block writes are atomic via its journal. Both are safe for manifests because `publishManifest()` only writes to the inactive slot — a partial write leaves that slot invalid (fails CRC), and the previously-active slot always survives as the mount-election winner.
 
 ### Stage 3a — Manifest read helper
 

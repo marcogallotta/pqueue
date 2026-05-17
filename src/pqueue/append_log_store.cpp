@@ -14,8 +14,10 @@ using namespace append_log_detail;
 
 namespace {
 
-constexpr const char* kSegmentPrefix = "seg-";
-constexpr const char* kSegmentSuffix = ".bin";
+constexpr const char* kSegmentPrefix  = "seg-";
+constexpr const char* kSegmentSuffix  = ".bin";
+constexpr const char* kManifestSlotA  = "manifest-a.bin";
+constexpr const char* kManifestSlotB  = "manifest-b.bin";
 
 inline std::uint32_t readLE32(const std::string& buf, std::size_t offset) {
     return static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset]))
@@ -302,6 +304,89 @@ Status AppendLogStore::scanSegments() {
     }
 
     return Status::success();
+}
+
+Status AppendLogStore::publishManifest(const ManifestData& manifest) {
+    auto f = fs();
+    if (!f) return Status::failure(StatusCode::BackendUnavailable, "no file system");
+
+    // Check existence and validity of each slot independently.
+    auto fileExists = [&](const char* name) -> bool {
+        std::uint64_t dummy;
+        return f->fileSize(name, dummy).ok();
+    };
+    auto tryReadEpoch = [&](const char* name, std::uint32_t& epochOut) -> bool {
+        std::string data;
+        if (!f->readFile(name, data).ok()) return false;
+        ManifestData md;
+        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md)
+            && (epochOut = md.epoch, true);
+    };
+
+    const bool existsA = fileExists(kManifestSlotA);
+    const bool existsB = fileExists(kManifestSlotB);
+    std::uint32_t epochA = 0, epochB = 0;
+    const bool validA = existsA && tryReadEpoch(kManifestSlotA, epochA);
+    const bool validB = existsB && tryReadEpoch(kManifestSlotB, epochB);
+
+    // Winning epoch determines the new epoch written to the inactive slot.
+    std::uint32_t winningEpoch = 0;
+    if (validA && epochA > winningEpoch) winningEpoch = epochA;
+    if (validB && epochB > winningEpoch) winningEpoch = epochB;
+
+    // Slot selection. Fail-closed: the only path that writes without a valid
+    // existing slot is when both files are genuinely absent (fresh store). Any
+    // slot file existing is evidence of a previously committed layout — if no
+    // valid slot remains, surface the corruption rather than silently overwriting.
+    const char* writeSlot;
+    if (!existsA && !existsB) {
+        writeSlot = kManifestSlotA; // fresh store
+    } else if (!validA && !validB) {
+        return Status::failure(StatusCode::DataCorrupt, "manifest slot(s) exist but none are valid");
+    } else if (!validA) {
+        writeSlot = kManifestSlotA;
+    } else if (!validB) {
+        writeSlot = kManifestSlotB;
+    } else if (epochB <= epochA) {
+        writeSlot = kManifestSlotB;
+    } else {
+        writeSlot = kManifestSlotA;
+    }
+
+    ManifestData toWrite = manifest;
+    // Epoch overflow (0xFFFFFFFF → 0) is not handled. At realistic ESP32 write
+    // rates this takes decades; no mitigation is planned.
+    toWrite.epoch = winningEpoch + 1;
+
+    std::vector<std::uint8_t> bytes;
+    serialiseManifest(toWrite, bytes);
+    const std::string data(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+    // Write to the inactive slot. Durability note: writeFile() is not an atomic
+    // replace on Posix (truncate-then-write, no fsync), but that is safe here
+    // because we only write to the INACTIVE slot. A partial write leaves that
+    // slot empty or corrupt; it fails CRC on next parse and is treated as
+    // missing/invalid, so the previously-active slot remains the winner on
+    // remount. LittleFS flushes and closes explicitly, and its journal makes
+    // block writes atomic, so the guarantee is stronger there.
+    Status st = f->writeFile(writeSlot, data);
+    if (!st.ok()) return st;
+
+    applyManifestToRam(toWrite);
+    return Status::success();
+}
+
+void AppendLogStore::applyManifestToRam(const ManifestData& md) {
+    activeGenerations_.clear();
+    for (const auto& r : md.ranges) {
+        for (std::uint32_t g = r.startGen; g <= r.endGen; ++g) {
+            activeGenerations_.push_back(g);
+        }
+    }
+    if (md.tailGeneration != 0) {
+        activeGenerations_.push_back(md.tailGeneration);
+    }
+    nextGeneration_ = md.nextGeneration;
 }
 
 Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {

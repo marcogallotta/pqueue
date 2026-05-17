@@ -17,6 +17,40 @@ namespace {
 #ifndef ARDUINO
 const std::filesystem::path kSpoolDir = "build/pqueue-spools/pqueue_append_log_spool";
 
+std::filesystem::path manifestSlotPath(char slot) {
+    return kSpoolDir / (std::string("manifest-") + slot + ".bin");
+}
+
+bool readManifestSlot(char slot, pqueue::append_log_detail::ManifestData& out) {
+    using namespace pqueue::append_log_detail;
+    std::ifstream f(manifestSlotPath(slot), std::ios::binary);
+    if (!f) return false;
+    std::vector<std::uint8_t> bytes(
+        (std::istreambuf_iterator<char>(f)),
+        std::istreambuf_iterator<char>()
+    );
+    return parseManifest(bytes.data(), bytes.size(), out);
+}
+
+void writeManifestSlotDirect(char slot, uint32_t epoch) {
+    using namespace pqueue::append_log_detail;
+    ManifestData md;
+    md.epoch = epoch;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    std::vector<std::uint8_t> bytes;
+    serialiseManifest(md, bytes);
+    std::ofstream f(manifestSlotPath(slot), std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+pqueue::AppendLogConfig makeStoreConfig() {
+    pqueue::AppendLogConfig cfg;
+    cfg.basePath = kSpoolDir.string();
+    cfg.maxSegmentBytes = 1024;
+    return cfg;
+}
+
 std::filesystem::path segmentPath(std::uint32_t gen) {
     char buf[9];
     std::snprintf(buf, sizeof(buf), "%08x", gen);
@@ -919,6 +953,244 @@ TEST_CASE("manifest: endGen < startGen in range is rejected") {
 
     ManifestData out;
     CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+// --- Manifest publish tests ---
+
+TEST_CASE("manifest-publish: first publish writes slot A with epoch 1") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    CHECK(store.publishManifest(md).ok());
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 1U);
+    CHECK_FALSE(readManifestSlot('b', slotB)); // slot B not written yet
+#endif
+}
+
+TEST_CASE("manifest-publish: second publish writes slot B; A valid B missing") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    REQUIRE(store.publishManifest(md).ok()); // writes A, epoch=1
+    REQUIRE(store.publishManifest(md).ok()); // B missing → writes B, epoch=2
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 1U); // A untouched
+    CHECK(readManifestSlot('b', slotB));
+    CHECK_EQ(slotB.epoch, 2U);
+#endif
+}
+
+TEST_CASE("manifest-publish: A missing B valid writes slot A") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    // Plant slot B (epoch 5) directly; slot A absent.
+    writeManifestSlotDirect('b', 5);
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    CHECK(store.publishManifest(md).ok()); // A missing → writes A, epoch=6
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 6U);
+    CHECK(readManifestSlot('b', slotB));
+    CHECK_EQ(slotB.epoch, 5U); // B untouched
+#endif
+}
+
+TEST_CASE("manifest-publish: both valid writes lower-epoch slot") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    // A has epoch 7, B has epoch 3 — B is lower → overwrite B.
+    writeManifestSlotDirect('a', 7);
+    writeManifestSlotDirect('b', 3);
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    CHECK(store.publishManifest(md).ok());
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 7U); // A untouched
+    CHECK(readManifestSlot('b', slotB));
+    CHECK_EQ(slotB.epoch, 8U); // B overwritten with epoch = max(7,3)+1
+#endif
+}
+
+TEST_CASE("manifest-publish: equal epochs writes slot B (tiebreaker)") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('a', 4);
+    writeManifestSlotDirect('b', 4);
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    CHECK(store.publishManifest(md).ok());
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 4U); // A untouched
+    CHECK(readManifestSlot('b', slotB));
+    CHECK_EQ(slotB.epoch, 5U); // B overwritten
+#endif
+}
+
+TEST_CASE("manifest-publish: corrupt A, absent B returns DataCorrupt") {
+    // Slot A exists but is corrupt; slot B absent. The existing file is evidence
+    // of a committed layout — this is not a fresh store. Must fail loudly.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    {
+        std::ofstream fa(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        fa.write("GARBAGE", 7);
+    }
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    const auto st = store.publishManifest(md);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+#endif
+}
+
+TEST_CASE("manifest-publish: absent A, corrupt B returns DataCorrupt") {
+    // Slot B exists but is corrupt; slot A absent. Same argument as above.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    {
+        std::ofstream fb(manifestSlotPath('b'), std::ios::binary | std::ios::trunc);
+        fb.write("GARBAGE", 7);
+    }
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    const auto st = store.publishManifest(md);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+#endif
+}
+
+TEST_CASE("manifest-publish: both slots corrupt returns DataCorrupt") {
+    // Both slot files exist but fail CRC. Fail loudly — do not overwrite.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    {
+        std::ofstream fa(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        fa.write("GARBAGE_A", 9);
+        std::ofstream fb(manifestSlotPath('b'), std::ios::binary | std::ios::trunc);
+        fb.write("GARBAGE_B", 9);
+    }
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    const auto st = store.publishManifest(md);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+#endif
+}
+
+TEST_CASE("manifest-publish: corrupt slot A is treated as missing; slot B wins election") {
+    // Slot A corrupt (fails CRC), slot B valid with epoch 7.
+    // Publish must treat A as invalid/missing and overwrite it with epoch 8.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('b', 7);
+    {
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write("GARBAGE", 7);
+    }
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    CHECK(store.publishManifest(md).ok()); // A invalid → writes A, epoch = 7+1 = 8
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 8U);
+    CHECK(readManifestSlot('b', slotB));
+    CHECK_EQ(slotB.epoch, 7U); // B untouched
+#endif
+}
+
+TEST_CASE("manifest-publish: corrupt slot B leaves slot A as the valid winner") {
+    // Critical: first publish writes A (inactive = A when both missing).
+    // Second publish writes B. After corrupting B, A (lower epoch) must be
+    // the only valid slot — confirming inactive-slot-first write order.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    ManifestData md;
+    md.nextGeneration = 1;
+    md.tailGeneration = 0;
+    REQUIRE(store.publishManifest(md).ok()); // writes A, epoch=1
+    REQUIRE(store.publishManifest(md).ok()); // writes B, epoch=2
+
+    // Corrupt slot B
+    {
+        std::ofstream f(manifestSlotPath('b'), std::ios::binary | std::ios::trunc);
+        f.write("GARBAGE", 7);
+    }
+
+    ManifestData slotA, slotB;
+    CHECK(readManifestSlot('a', slotA));
+    CHECK_EQ(slotA.epoch, 1U);       // A intact with epoch 1
+    CHECK_FALSE(readManifestSlot('b', slotB)); // B corrupt — rejected by parseManifest
 #endif
 }
 
