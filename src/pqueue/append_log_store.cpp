@@ -524,6 +524,23 @@ std::optional<AppendLogStore::CompactionRange> AppendLogStore::chooseCompactionR
     return CompactionRange{manifestRanges_[0].startGen, manifestRanges_[0].endGen};
 }
 
+Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
+                                          std::vector<CompactionLiveRecord>& out) const {
+    out.clear();
+    for (const SegmentRecord& sr : records_) {
+        if (sr.segmentGeneration < range.startGen || sr.segmentGeneration > range.endGen) {
+            continue;
+        }
+        CompactionLiveRecord lr;
+        lr.sequence = sr.sequence;
+        Status st = fs_->readAt(segmentName(sr.segmentGeneration),
+                                sr.payloadOffset, sr.payloadBytes, lr.payload);
+        if (!st.ok()) return st;
+        out.push_back(std::move(lr));
+    }
+    return Status::success();
+}
+
 bool AppendLogStore::needsCompaction() const {
     // TODO Stage-6: replace with activeGenerations_.size() > config_.maxSegments.
     // Span-based counting overestimates pressure once non-monotonic generation

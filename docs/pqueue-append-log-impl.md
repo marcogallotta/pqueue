@@ -4,7 +4,7 @@
 
 **Design target:** `pqueue-append-log-design.pdf` — dual-manifest, segment-file backend.
 
-**Current code state:** Stages 0–4 and 5a complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Range selection for compaction is implemented. Live record collection and compaction write are not yet wired.
+**Current code state:** Stages 0–4, 5a, and 5b complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Range selection and live record collection for compaction are implemented. Compaction write and RAM update are not yet wired.
 
 ---
 
@@ -232,6 +232,17 @@ Crash between steps 4 and 6: new segment file is dangling. On remount, old manif
 - Returns nullopt if no full ranges exist (empty store or tail-only store).
 - The tail generation is never eligible — it is excluded by design since only `manifestRanges_` (full ranges) is consulted; the tail lives in `activeGeneration_` separately.
 
+### Compaction helpers (Stage 5b)
+
+`CompactionLiveRecord { sequence, payload }` — public struct on `AppendLogStore`.
+
+`collectLiveRecords(const CompactionRange& range, std::vector<CompactionLiveRecord>& out) const -> Status`:
+- Iterates `records_` in deque order (FIFO). For each `SegmentRecord` whose `segmentGeneration` falls within `[range.startGen, range.endGen]`, reads the payload from disk via `fs_->readAt(segmentName(sr.segmentGeneration), sr.payloadOffset, sr.payloadBytes, ...)` and appends to `out`.
+- Popped records are absent from `records_` and therefore absent from the result.
+- Rewritten records: after `appendRewriteEvent`, the matching `SegmentRecord` has its `segmentGeneration`, `payloadOffset`, and `payloadBytes` updated to point at the REWRITE event. If the REWRITE landed in the same segment as the original ENQUEUE (i.e., within the compaction range), `collectLiveRecords` reads from the REWRITE offset and returns the new payload. If the REWRITE landed in a later segment (i.e., outside the range), the record's `segmentGeneration` will not match and it will be excluded from the result — it is not lost, just not in this range.
+- Uses `fs_` directly (mutable field) rather than `fs()` so the method can be `const`.
+- Returns any I/O error immediately; `out` may be partially filled on error.
+
 **Invariant: `manifestRanges_` is always ordered oldest→newest.** `chooseCompactionRange()` relies on this — `[0]` is correct only if manifest order equals logical age. This is true by construction today: rollover always appends the promoted tail to the end, and `applyManifestToRam()` preserves manifest order. Stage 5c must maintain it when rebuilding the range list after compaction: replace `[oldStart, oldEnd]` in-place, then merge adjacent entries without resorting.
 
 ### Known temporary limitations
@@ -243,17 +254,6 @@ Crash between steps 4 and 6: new segment file is dangling. On remount, old manif
 
 ## Implementation order
 
-### Stage 5b — Live record collection
-
-Add `collectLiveRecords()`:
-
-```cpp
-Status collectLiveRecords(const CompactionRange& range,
-                          std::vector<CompactionLiveRecord>& out) const;
-```
-
-Iterate `records_`, extract those whose `segmentGeneration` falls within the selected range, read current payloads, return in FIFO order. No file writes, no RAM mutation. Test: live records collected in order; popped records absent; rewritten records return current payload; empty result is success/no-op. **Critical test:** enqueue a record, rewrite it, then collect — the collected payload must be the rewritten value, not the original. A bug here would silently compact stale data.
-
 ### Stage 5c — compactOneSegment() v1
 
 ```cpp
@@ -261,7 +261,11 @@ Status compactOneSegment();
 Status compactFull();
 ```
 
-Wire range selection, live record collection, segment write, manifest publish, and RAM update into `compactOneSegment()`. Enforce step ordering: write segment file before publishing manifest, publish manifest before updating `records_` and `activeGenerations_`. Test: fully dead range removed; live records preserved in FIFO order; `rewriteFront()` result preserved; no-op when live bytes exceed `maxSegmentBytes`; manifest published only after new file written; `records_` updated only after manifest success; old segment files remain on disk; remount after compaction uses new segment. **Critical test:** simulate manifest publish failure after the new segment file is written — on remount the old segment must still be active, the new segment must be dangling, and all records must be intact. This is the core crash-safety guarantee of the whole compaction design.
+Wire range selection, live record collection, segment write, manifest publish, and RAM update into `compactOneSegment()`. Enforce step ordering: write segment file before publishing manifest, publish manifest before updating `records_` and `activeGenerations_`.
+
+**RAM update scope (step 10):** after a successful publish, update every `SegmentRecord` in `records_` whose `segmentGeneration` fell within the compacted range — set `segmentGeneration`, `payloadOffset`, and `payloadBytes` to the values computed for the new compacted segment. Also update `activeGenerations_` to drop the old range and add the new generation. This must be a single atomic swap in RAM: compute the full replacement state first (all affected records + new generation list), then apply it only after `publishManifest` returns success. Partial application (e.g., updating only some records before publish) would leave `records_` inconsistent with the manifest on a crash.
+
+Test: fully dead range removed; live records preserved in FIFO order; `rewriteFront()` result preserved; no-op when live bytes exceed `maxSegmentBytes`; manifest published only after new file written; `records_` updated only after manifest success; old segment files remain on disk; remount after compaction uses new segment. **Critical test:** simulate manifest publish failure after the new segment file is written — on remount the old segment must still be active, the new segment must be dangling, and all records must be intact. This is the core crash-safety guarantee of the whole compaction design.
 
 ### Stage 6 — Compaction trigger
 

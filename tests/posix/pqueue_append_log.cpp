@@ -1843,4 +1843,128 @@ TEST_CASE("compaction: chooseCompactionRange selects oldest full range") {
     CHECK_EQ(range->endGen,   1u);
 }
 
+// Helpers shared by collectLiveRecords tests.
+// enqueue/pop use the raw AppendLogStore interface so tests can inspect
+// internal state (e.g. collectLiveRecords) without going through Queue.
+namespace {
+
+void storeEnqueue(pqueue::AppendLogStore& store, std::uint32_t seq, const std::string& payload) {
+    CHECK(store.writeRecord(seq, payload).ok());
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    CHECK(store.writeIndex(idx).ok());
+}
+
+void storePop(pqueue::AppendLogStore& store) {
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    idx.head++;
+    CHECK(store.writeIndex(idx).ok());
+}
+
+} // namespace
+
+TEST_CASE("compaction: collectLiveRecords returns empty for range with no records") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    std::vector<pqueue::AppendLogStore::CompactionLiveRecord> live;
+    CHECK(store.collectLiveRecords({1, 1}, live).ok());
+    CHECK(live.empty());
+}
+
+TEST_CASE("compaction: collectLiveRecords returns records in FIFO order; out-of-range excluded") {
+    // seq=1,2 land in gen=1 (full range after rotation); seq=3 lands in gen=2 (tail).
+    // Collecting {1,1} must return seq=1 then seq=2 only.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+    using namespace pqueue::append_log_detail;
+
+    // One 1-byte record costs kEnqueueHeaderBytes(16) + 1 + kEventTrailerBytes(8) = 25 bytes.
+    // Header = 20. Two records fill 20+25+25 = 70 bytes exactly; third triggers rotation.
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // triggers rotation: gen=1 becomes full range, gen=2 = tail
+
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+    CHECK_EQ(range->startGen, 1u);
+
+    std::vector<pqueue::AppendLogStore::CompactionLiveRecord> live;
+    CHECK(store.collectLiveRecords(*range, live).ok());
+    REQUIRE_EQ(live.size(), 2u);
+    CHECK_EQ(live[0].sequence, 1u);
+    CHECK_EQ(live[0].payload,  "a");
+    CHECK_EQ(live[1].sequence, 2u);
+    CHECK_EQ(live[1].payload,  "b");
+}
+
+TEST_CASE("compaction: collectLiveRecords excludes popped records") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // same sizing as above: 2 records per segment
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // rotation: gen=1 full, gen=2 tail
+
+    storePop(store); // pop seq=1
+
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+
+    std::vector<pqueue::AppendLogStore::CompactionLiveRecord> live;
+    CHECK(store.collectLiveRecords(*range, live).ok());
+    REQUIRE_EQ(live.size(), 1u);
+    CHECK_EQ(live[0].sequence, 2u);
+    CHECK_EQ(live[0].payload,  "b");
+}
+
+TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not original (critical)") {
+    // If a record was rewritten before compaction, the collected payload must be
+    // the rewritten value. Returning the original would silently compact stale data.
+    //
+    // Layout: enqueue seq=1 "original", enqueue seq=2 "second", rewrite seq=1 to
+    // "rewritten" — the REWRITE event fits in gen=1. Then enqueue seq=3 to trigger
+    // rotation so gen=1 becomes a full range. seq=1's SegmentRecord now points to
+    // the REWRITE event offset inside gen=1.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // Three events (2 ENQUEUEs + 1 REWRITE) of 1-byte payloads each = 25 bytes.
+    // Header = 20. Total = 95. maxSegmentBytes = 100 fits all three; fourth event
+    // (seq=3 enqueue, 25 bytes) pushes to 120 > 100 and triggers rotation.
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 100;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "x");
+    storeEnqueue(store, 2, "y");
+    CHECK(store.rewriteRecord(1, "z").ok()); // REWRITE event stays in gen=1
+    storeEnqueue(store, 3, "w");             // rotation: gen=1 -> full range, gen=2 = tail
+
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+    CHECK_EQ(range->startGen, 1u);
+
+    std::vector<pqueue::AppendLogStore::CompactionLiveRecord> live;
+    CHECK(store.collectLiveRecords(*range, live).ok());
+    REQUIRE_EQ(live.size(), 2u);
+    CHECK_EQ(live[0].sequence, 1u);
+    CHECK_EQ(live[0].payload,  "z"); // rewritten value, not "x"
+    CHECK_EQ(live[1].sequence, 2u);
+    CHECK_EQ(live[1].payload,  "y");
+}
+
 #endif // !ARDUINO

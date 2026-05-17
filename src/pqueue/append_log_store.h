@@ -50,6 +50,13 @@ public:
     };
     std::optional<CompactionRange> chooseCompactionRange() const;
 
+    struct CompactionLiveRecord {
+        std::uint32_t sequence = 0;
+        std::string   payload;
+    };
+    Status collectLiveRecords(const CompactionRange& range,
+                              std::vector<CompactionLiveRecord>& out) const;
+
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;
     Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override;
