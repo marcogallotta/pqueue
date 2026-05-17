@@ -4,7 +4,7 @@
 
 **Design target:** `pqueue-append-log-design.pdf` — dual-manifest, segment-file backend.
 
-**Current code state:** Stages 0–5c complete. Manifest-backed mount, slot election, rollover, and compaction are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. `compactOneSegment()` and `compactFull()` are wired; `writeRecord` calls `compactFull()` directly. Compaction trigger heuristic and cleanup are not yet wired (Stages 6–7).
+**Current code state:** Stages 0–6 complete. Manifest-backed mount, slot election, rollover, and compaction are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. `compactOneSegment()` and `compactFull()` are wired; `writeRecord` calls `compactOneSegment()` when `needsCompaction()` is true. `needsCompaction()` uses `activeGenerations_.size() > config_.maxSegments` as the segment-count trigger. Cleanup (Stage 7) is not yet implemented.
 
 ---
 
@@ -190,14 +190,10 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 
 **Key invariants.** `manifestRanges_` is always ordered oldest→newest; `chooseCompactionRange` and `compactOneSegment` both depend on `[0]` being the oldest. Pop events carry the same rotation check as rewrite events — a sequence of pops can trigger a rotation and promote the current tail to a full range. Any test that pops records before calling `compactOneSegment` must account for this.
 
-**Current limitations.** `needsCompaction()` uses a generation-span heuristic instead of `activeGenerations_.size()` (Stage 6 TODO in code) and overestimates segment pressure. Cleanup (Stage 7) is not implemented: dangling segment files from failed rotations or compactions accumulate on disk.
+**Current limitations.** Cleanup (Stage 7) is not implemented: dangling segment files from failed rotations or compactions accumulate on disk.
 
 
 ## Implementation order
-
-### Stage 6 — Compaction trigger
-
-Wire compaction into `writeRecord()`. Update `needsCompaction()` to use `activeGenerations_.size() > config_.maxSegments` as the segment-count trigger, replacing the current numeric generation span. Free-space pressure (`freeBytes() < config_.minFreeBytes`) remains a secondary trigger. Test: repeated enqueue/rotate eventually triggers compaction; queue behaviour correct before and after remount. **Critical test:** trigger compaction with a live queue, then remount — every record enqueued before compaction must still be peekable and poppable in the original FIFO order.
 
 ### Stage 7 — Cleanup
 

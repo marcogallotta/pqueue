@@ -632,15 +632,7 @@ Status AppendLogStore::compactFull() {
 }
 
 bool AppendLogStore::needsCompaction() const {
-    // TODO Stage-6: replace with activeGenerations_.size() > config_.maxSegments.
-    // Span-based counting overestimates pressure once non-monotonic generation
-    // orderings exist after compaction.
-    const auto segCount = [this]() -> std::uint32_t {
-        if (records_.empty()) return 0;
-        std::uint32_t min = records_.front().segmentGeneration;
-        return (activeGeneration_ >= min) ? (activeGeneration_ - min + 1) : 1;
-    }();
-    if (segCount > config_.maxSegments) return true;
+    if (activeGenerations_.size() > config_.maxSegments) return true;
 
     const std::uint64_t free = fs_ ? fs_->freeBytes() : 0;
     if (free < config_.minFreeBytes) return true;

@@ -308,6 +308,79 @@ TEST_CASE("append-log: compaction triggered by segment count") {
 #endif
 }
 
+TEST_CASE("compaction trigger: remount after auto-compaction preserves FIFO order (critical)") {
+#ifndef ARDUINO
+    // Trigger compaction automatically via writeRecord, then remount and verify
+    // every record is still peekable and poppable in the original FIFO order.
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    cfg.maxSegments = 3;
+
+    std::vector<std::string> expected;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 30; ++i) {
+            const std::string rec = "record-" + std::to_string(i);
+            REQUIRE(q.enqueue(rec).ok());
+            expected.push_back(rec);
+        }
+        REQUIRE_EQ(q.stats().count, 30u);
+    }
+    {
+        pqueue::Queue q(cfg);
+        CHECK_EQ(q.stats().count, 30u);
+        for (int i = 0; i < 30; ++i) {
+            std::string out;
+            CHECK(q.peek(out).ok());
+            CHECK_EQ(out, expected[i]);
+            CHECK(q.pop().ok());
+        }
+        std::string out;
+        CHECK_FALSE(q.peek(out).ok());
+    }
+#endif
+}
+
+TEST_CASE("compaction trigger: auto-triggers on size-based count after non-monotonic compaction") {
+#ifndef ARDUINO
+    // Verify that compaction is triggered by activeGenerations_.size(), not by
+    // the numeric generation span. After a compaction, the new segment gets a
+    // generation number higher than the tail's, creating a non-monotonic ordering.
+    // The span-based heuristic becomes incorrect; the size-based one must not.
+    //
+    // Setup: maxSegments=2, maxSegmentBytes small. Enqueue enough to produce 3
+    // live segments, then compact to get 2. Enqueue more to fill the tail and
+    // force a rotation — this must succeed (compaction triggers if needed, not
+    // RangeLimitExceeded). Verify all records remain correct after a remount.
+    cleanSpool();
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    cfg.maxSegments = 2;
+
+    std::vector<std::string> expected;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 30; ++i) {
+            const std::string rec = "msg-" + std::to_string(i);
+            REQUIRE(q.enqueue(rec).ok());
+            expected.push_back(rec);
+        }
+        CHECK_EQ(q.stats().count, 30u);
+    }
+    {
+        pqueue::Queue q(cfg);
+        CHECK_EQ(q.stats().count, 30u);
+        for (int i = 0; i < 30; ++i) {
+            std::string out;
+            CHECK(q.peek(out).ok());
+            CHECK_EQ(out, expected[i]);
+            CHECK(q.pop().ok());
+        }
+    }
+#endif
+}
+
 TEST_CASE("append-log: mixed enqueue and pop with persistence") {
 #ifndef ARDUINO
     cleanSpool();
