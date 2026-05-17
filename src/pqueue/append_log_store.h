@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,12 @@ public:
 
     Status publishManifest(const append_log_detail::ManifestData& manifest);
     bool readManifest(append_log_detail::ManifestData& out);
+
+    struct CompactionRange {
+        std::uint32_t startGen = 0;
+        std::uint32_t endGen   = 0;
+    };
+    std::optional<CompactionRange> chooseCompactionRange() const;
 
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;

@@ -4,7 +4,7 @@
 
 **Design target:** `pqueue-append-log-design.pdf` — dual-manifest, segment-file backend.
 
-**Current code state:** Stages 0–4 complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Compaction and cleanup are not yet wired.
+**Current code state:** Stages 0–4 and 5a complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Range selection for compaction is implemented. Live record collection and compaction write are not yet wired.
 
 ---
 
@@ -223,6 +223,17 @@ Replay loop iterates `activeGenerations_` in manifest order (not numeric order).
 
 Crash between steps 4 and 6: new segment file is dangling. On remount, old manifest wins; dangling file advances `nextGeneration_` (preventing reuse) but is not replayed. Stage 7 cleanup removes it.
 
+### Compaction helpers (Stage 5a)
+
+`CompactionRange { startGen, endGen }` — public struct on `AppendLogStore`.
+
+`chooseCompactionRange() const -> std::optional<CompactionRange>`:
+- Returns `manifestRanges_[0]` as a `CompactionRange` if `manifestRanges_` is non-empty.
+- Returns nullopt if no full ranges exist (empty store or tail-only store).
+- The tail generation is never eligible — it is excluded by design since only `manifestRanges_` (full ranges) is consulted; the tail lives in `activeGeneration_` separately.
+
+**Invariant: `manifestRanges_` is always ordered oldest→newest.** `chooseCompactionRange()` relies on this — `[0]` is correct only if manifest order equals logical age. This is true by construction today: rollover always appends the promoted tail to the end, and `applyManifestToRam()` preserves manifest order. Stage 5c must maintain it when rebuilding the range list after compaction: replace `[oldStart, oldEnd]` in-place, then merge adjacent entries without resorting.
+
 ### Known temporary limitations
 
 - **`needsCompaction()` uses a generation-span heuristic** instead of `activeGenerations_.size()` (Stage 6 TODO comment in code). Overestimates segment pressure before compaction is wired.
@@ -231,17 +242,6 @@ Crash between steps 4 and 6: new segment file is dangling. On remount, old manif
 
 
 ## Implementation order
-
-### Stage 5a — Range selection
-
-Add `chooseCompactionRange()`:
-
-```cpp
-struct CompactionRange { uint32_t startGen; uint32_t endGen; };
-std::optional<CompactionRange> chooseCompactionRange() const;
-```
-
-Select the oldest full range from `activeGenerations_` that does not include the tail. Return nullopt when nothing qualifies (fewer than two active generations, or only the tail is eligible). No file writes, no RAM mutation. Test: no range when only tail exists; oldest non-tail range selected; nullopt is not an error. **Critical test:** a store with only a tail segment must return nullopt — selecting the tail for compaction would violate the torn-tail invariant.
 
 ### Stage 5b — Live record collection
 

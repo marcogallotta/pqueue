@@ -1745,4 +1745,102 @@ TEST_CASE("rollover: manifest slot alternates correctly across rotations") {
     }
 }
 
+TEST_CASE("compaction: chooseCompactionRange returns nullopt for empty store") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    CHECK_FALSE(store.chooseCompactionRange().has_value());
+}
+
+TEST_CASE("compaction: chooseCompactionRange returns nullopt with only tail (critical)") {
+    // A store with only a tail segment and no full ranges must not offer the
+    // tail for compaction — selecting it would violate the torn-tail invariant.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.tailGeneration = 1;
+        md.nextGeneration = 2;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        const std::string hdr = serializeSegmentHeader(1, 0);
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    CHECK_FALSE(store.chooseCompactionRange().has_value());
+}
+
+TEST_CASE("compaction: chooseCompactionRange returns single full range") {
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 3;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    for (std::uint32_t gen : {1u, 2u}) {
+        const std::string hdr = serializeSegmentHeader(gen, 0);
+        std::ofstream f(segmentPath(gen), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+    CHECK_EQ(range->startGen, 1u);
+    CHECK_EQ(range->endGen,   1u);
+}
+
+TEST_CASE("compaction: chooseCompactionRange selects oldest full range") {
+    // Two non-contiguous full ranges {1,1} and {3,3} with tail=5.
+    // The oldest (first in manifest order) must be selected.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}, {3, 3}};
+        md.tailGeneration = 5;
+        md.nextGeneration = 6;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    for (std::uint32_t gen : {1u, 3u, 5u}) {
+        const std::string hdr = serializeSegmentHeader(gen, 0);
+        std::ofstream f(segmentPath(gen), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+    CHECK_EQ(range->startGen, 1u);
+    CHECK_EQ(range->endGen,   1u);
+}
+
 #endif // !ARDUINO

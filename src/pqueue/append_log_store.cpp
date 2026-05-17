@@ -519,6 +519,11 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     return Status::success();
 }
 
+std::optional<AppendLogStore::CompactionRange> AppendLogStore::chooseCompactionRange() const {
+    if (manifestRanges_.empty()) return std::nullopt;
+    return CompactionRange{manifestRanges_[0].startGen, manifestRanges_[0].endGen};
+}
+
 bool AppendLogStore::needsCompaction() const {
     // TODO Stage-6: replace with activeGenerations_.size() > config_.maxSegments.
     // Span-based counting overestimates pressure once non-monotonic generation
