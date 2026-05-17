@@ -1372,4 +1372,126 @@ TEST_CASE("manifest-read: higher-epoch slot with corrupt CRC loses to valid lowe
 #endif
 }
 
+// --- Stage 3b: manifest wired into mount ---
+
+TEST_CASE("manifest-mount: referenced segment missing returns DataCorrupt") {
+    // If the manifest names a segment that does not exist on disk, mount must fail.
+    // The manifest is now authoritative metadata; a missing referenced file is true corruption.
+    cleanSpool();
+    auto storeCfg = makeStoreConfig();
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        REQUIRE(store.mount().ok());
+
+        pqueue::FileStoreIndex dummy{};
+        REQUIRE(store.writeRecord(0, "A").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+
+        pqueue::append_log_detail::ManifestData md;
+        md.tailGeneration = 1;
+        md.nextGeneration = 2;
+        REQUIRE(store.publishManifest(md).ok()); // manifest references seg-00000001.bin
+    }
+    // Delete the referenced segment — manifest is now pointing at a ghost
+    std::filesystem::remove(segmentPath(1));
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        const auto st = store.mount();
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+}
+
+TEST_CASE("manifest-mount: segment files without manifest return DataCorrupt") {
+    // A store cannot have segments without a manifest after Stage 3b.
+    // Note: tests that write segments via Queue without publishing a manifest will
+    // also fail with DataCorrupt until Stage 4 wires publishManifest into rotateSegment.
+    cleanSpool();
+    auto cfg = makeConfig();
+    {
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("A").ok()); // creates seg-00000001.bin; no manifest published
+    }
+    {
+        pqueue::Queue q(cfg);
+        std::string out;
+        const auto st = q.peek(out);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
+}
+
+TEST_CASE("manifest-mount: normal mount with manifest recovers records") {
+    // Write records to a segment, publish a manifest, remount — all records readable.
+    cleanSpool();
+    auto storeCfg = makeStoreConfig();
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        REQUIRE(store.mount().ok());
+
+        pqueue::FileStoreIndex dummy{};
+        REQUIRE(store.writeRecord(0, "alpha").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.writeRecord(1, "beta").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.writeRecord(2, "gamma").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+
+        pqueue::append_log_detail::ManifestData md;
+        md.tailGeneration = 1;
+        md.nextGeneration = 2;
+        REQUIRE(store.publishManifest(md).ok());
+    }
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        REQUIRE(store.mount().ok());
+        pqueue::FileStoreIndex idx;
+        REQUIRE(store.readIndex(idx).ok());
+        CHECK_EQ(idx.count, 3U);
+        std::string out;
+        REQUIRE(store.readRecord(0, out).ok()); CHECK_EQ(out, "alpha");
+        REQUIRE(store.readRecord(1, out).ok()); CHECK_EQ(out, "beta");
+        REQUIRE(store.readRecord(2, out).ok()); CHECK_EQ(out, "gamma");
+    }
+}
+
+TEST_CASE("manifest-mount: corrupt inactive slot does not affect mount (critical)") {
+    // Critical crash-safety test. After two publishes (A then B), truncate B to
+    // simulate a crash mid-write. Remount must recover all records via slot A.
+    cleanSpool();
+    auto storeCfg = makeStoreConfig();
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        REQUIRE(store.mount().ok());
+
+        pqueue::FileStoreIndex dummy{};
+        REQUIRE(store.writeRecord(0, "one").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.writeRecord(1, "two").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.writeRecord(2, "three").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+
+        pqueue::append_log_detail::ManifestData md;
+        md.tailGeneration = 1;
+        md.nextGeneration = 2;
+        REQUIRE(store.publishManifest(md).ok()); // slot A, epoch 1
+        REQUIRE(store.publishManifest(md).ok()); // slot B, epoch 2
+
+        // Simulate crash mid-write to slot B
+        std::filesystem::resize_file(manifestSlotPath('b'), 5);
+    }
+    {
+        pqueue::AppendLogStore store(storeCfg);
+        REQUIRE(store.mount().ok()); // slot A (epoch 1) is the surviving slot
+        pqueue::FileStoreIndex idx;
+        REQUIRE(store.readIndex(idx).ok());
+        CHECK_EQ(idx.count, 3U);
+        std::string out;
+        REQUIRE(store.readRecord(0, out).ok()); CHECK_EQ(out, "one");
+        REQUIRE(store.readRecord(1, out).ok()); CHECK_EQ(out, "two");
+        REQUIRE(store.readRecord(2, out).ok()); CHECK_EQ(out, "three");
+    }
+}
+
 #endif // !ARDUINO

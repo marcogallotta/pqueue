@@ -5,7 +5,6 @@
 #include <cctype>
 #include <cstdio>
 #include <limits>
-#include <sstream>
 #include <vector>
 
 namespace pqueue {
@@ -143,16 +142,23 @@ Status AppendLogStore::scanSegments() {
     }
     std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
-    // TODO Stage-3b: replace with readManifest() — manifest derives the authoritative
-    // replay order, including non-monotonic orderings after compaction.
-    activeGenerations_ = sortedGenerations;
     records_.clear();
+    activeGenerations_.clear();
     activeGeneration_ = 0;
-    activeSegmentBytes_ = kSegmentHeaderBytes;
+    activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
     nextSequence_ = 0;
 
-    // nextGeneration_ must exceed every generation on disk so numbers are never reused.
+    ManifestData manifest;
+    if (readManifest(manifest)) {
+        applyManifestToRam(manifest);
+    } else if (!sortedGenerations.empty()) {
+        return Status::failure(StatusCode::DataCorrupt,
+            "segment files exist without a valid manifest");
+    }
+
+    // Advance nextGeneration_ past every segment file on disk, including dangling ones,
+    // to prevent generation reuse after partial operations.
     for (std::uint32_t g : sortedGenerations) {
         if (g + 1 > nextGeneration_) nextGeneration_ = g + 1;
     }
@@ -295,12 +301,6 @@ Status AppendLogStore::scanSegments() {
         } else {
             activeSegmentBytes_ = offset;
         }
-    }
-
-    if (sortedGenerations.empty()) {
-        activeGeneration_ = 0;
-        activeSegmentBytes_ = 0;
-        nextGeneration_ = 1;
     }
 
     return Status::success();
