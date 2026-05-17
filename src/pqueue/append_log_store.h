@@ -57,6 +57,9 @@ public:
     Status collectLiveRecords(const CompactionRange& range,
                               std::vector<CompactionLiveRecord>& out) const;
 
+    Status compactOneSegment();
+    Status compactFull();
+
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;
     Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override;
@@ -93,7 +96,6 @@ private:
     Status appendRewriteEvent(std::uint32_t sequence, const std::string& record);
 
     Status scanSegments();
-    Status compact();
 
     bool needsCompaction() const;
 

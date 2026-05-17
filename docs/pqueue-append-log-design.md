@@ -262,6 +262,14 @@ Compaction step cost is ~71 ms when the selected segment has live records (one o
 
 v1 compaction writes a single output segment per call and returns no-op if live bytes exceed `maxSegmentBytes`. This is a known v1 limitation. Once multi-input compaction exists, it can produce ranges spanning multiple segments; if such a range later becomes the oldest and its live bytes exceed `maxSegmentBytes`, compaction noops permanently. Meanwhile rollovers keep adding ranges until the manifest hits its 4-range limit and the queue deadlocks. A stable release must define an escape from this dead-end. The preferred fix is multi-segment compaction output, which eliminates the noop by allowing compaction to always make progress on any range regardless of size. Alternatives include returning a `QueueFull` or `NeedsMaintenance` error, or an emergency repair mode — but these defer the problem rather than solving it.
 
+### Global compaction strategy *(required before stable release)*
+
+The v1 compaction model (`compactOneSegment` called from `writeRecord`) is greedy and local — it always picks the oldest full range with no view of the others. This produces correct results but is not globally optimal, and has a specific failure mode: after compacting a live range into a new generation, that new generation occupies `manifestRanges_[0]` by the oldest-first invariant, so the next `compactOneSegment` call recompacts it wastefully — moving live data for no gain. More broadly, oldest-first ignores dead-byte ratios: a nearly-full old range will be picked over a nearly-empty newer range even when the latter offers far more reclaim per unit of write cost.
+
+A globally optimal compactor needs to analyse all ranges at once and choose a strategy. The natural shape is a two-phase model: an analysis pass that inspects dead-byte ratios across all ranges and produces a prioritised plan, and an execution pass that acts on that plan. This also enables multi-input compaction — packing two sparse ranges into a single output segment — which the single-output v1 cannot do.
+
+The minimum viable improvement before a stable release is a dead-byte threshold: skip ranges where dead bytes fall below a configurable ratio. This alone prevents recompaction of live-only ranges cheaply, without requiring the full two-phase redesign. The threshold config knob is already mentioned in this document; it just needs to be wired into `compactOneSegment`'s range selection.
+
 ### Lazy tail segment creation
 
 Rollover currently pre-creates the next tail segment before manifest publish, guaranteeing a referenced segment always exists on disk. An alternative is to create the tail lazily on first append, saving the flush of an empty segment. This requires mount to handle a missing tail segment without returning DataCorrupt — added complexity for a speculative gain. Worth benchmarking before considering further.

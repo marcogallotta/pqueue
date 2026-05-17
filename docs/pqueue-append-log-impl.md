@@ -4,7 +4,7 @@
 
 **Design target:** `pqueue-append-log-design.pdf` — dual-manifest, segment-file backend.
 
-**Current code state:** Stages 0–4, 5a, and 5b complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Range selection and live record collection for compaction are implemented. Compaction write and RAM update are not yet wired.
+**Current code state:** Stages 0–5c complete. Manifest-backed mount, slot election, rollover, and compaction are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. `compactOneSegment()` and `compactFull()` are wired; `writeRecord` calls `compactFull()` directly. Compaction trigger heuristic and cleanup are not yet wired (Stages 6–7).
 
 ---
 
@@ -168,104 +168,32 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 
 ---
 
-## Current implementation state (Stages 0–4)
+## Current implementation state
 
-### Code shape
+**`append_log_common.h/.cpp`** defines the binary format layer (`pqueue::append_log_detail` namespace): `ManifestRange { startGen, endGen }`, `ManifestData { epoch, nextGeneration, tailGeneration, ranges }`, `serialiseManifest` / `parseManifest`, and the segment/event serialisers and parsers. `parseManifest` returns false (not `DataCorrupt`) on any validation failure; the caller treats an invalid slot the same as a missing one. Segment files are named `seg-{08x}.bin`.
 
-**`append_log_common.h/.cpp`** — binary format layer (`pqueue::append_log_detail` namespace):
-- `ManifestRange { startGen, endGen }`, `ManifestData { epoch, nextGeneration, tailGeneration, ranges }`
-- `serialiseManifest(const ManifestData&, std::vector<uint8_t>& out)` — clears `out` then writes
-- `parseManifest(const uint8_t* data, size_t size, ManifestData& out) → bool` — returns false (not DataCorrupt) on any validation failure; caller treats invalid same as missing
-- Constants: `kManifestMagic`, `kManifestVersion`, `kManifestFixedBytes` (30), `kManifestMaxRanges` (4)
-- Segment files: `seg-{08x}.bin`; `SegmentHeader::startSeq` (was `baseSequence`)
+**`append_log_store.h/.cpp`** is the store layer. The manifest is authoritative for everything: which segments exist, in what order to replay them, and what generation to allocate next. All RAM state is derived from the manifest on mount and kept in sync on every write.
 
-**`append_log_store.h/.cpp`** — store layer:
-- `publishManifest(const ManifestData&)` — writes to inactive slot, updates RAM only on success; uses `chooseInactiveSlot()` / `chooseWinningSlot()` free functions
-- `readManifest(ManifestData& out) → bool` — reads both slots, returns winning manifest or false
-- `applyManifestToRam(const ManifestData&)` — single path for expanding manifest into `activeGenerations_`, `nextGeneration_`, and `manifestRanges_`; called by both `publishManifest` and `scanSegments`
-- `rotateSegment()` — promotes current tail to a full range, range-merges, checks limit, creates segment, publishes manifest
-- `ensureActiveSegment()` — publishes manifest after creating the first segment of a session
-- `scanSegments()` — manifest-authoritative mount path (see below)
-- `manifestRanges_` field mirrors `ManifestData::ranges` in RAM; updated on every `applyManifestToRam()` call
+**Slot election.** Two anonymous-namespace helpers handle the A/B slots. `chooseInactiveSlot` selects where to write next: both missing → slot A; both exist but neither valid → nullptr (DataCorrupt); one missing/invalid → that slot; both valid → lower-epoch slot (equal epoch → B). `chooseWinningSlot` selects which slot to read: neither valid → false; one valid → that slot; both valid → higher epoch (equal epoch → A). `publishManifest` writes to the inactive slot, then calls `applyManifestToRam` only on success. `readManifest` applies `chooseWinningSlot` and returns the winner.
 
-### Slot-election helpers (anonymous namespace)
+**`applyManifestToRam`** is the single RAM-reconstruction path. It sets `manifestRanges_` (mirrors `ManifestData::ranges`), rebuilds `activeGenerations_` (all generations from every range in manifest order, then the tail), and sets `nextGeneration_`. Called by both `publishManifest` after a successful write and by `scanSegments` after `readManifest` returns the winning slot.
 
-`chooseInactiveSlot(existsA, validA, epochA, existsB, validB, epochB) → const char*`:
-- Both missing → slot A (fresh store)
-- Both exist but neither valid → nullptr (caller returns DataCorrupt)
-- One missing/invalid → that slot
-- Both valid → lower-epoch slot (equal epoch → B)
+**Mount (`scanSegments`).** Sets defaults, then calls `readManifest`. A valid manifest → `applyManifestToRam`. No valid manifest with segment files on disk → `DataCorrupt`. No valid manifest and no segment files → empty store, mount succeeds. After applying the manifest, a disk scan advances `nextGeneration_` past all segment files on disk (including dangling ones not referenced by the manifest). The replay loop iterates `activeGenerations_` in manifest order (not numeric generation order); a referenced segment missing or too small is `DataCorrupt`. Torn-tail handling and corruption detection rules are unchanged.
 
-`chooseWinningSlot(validA, mdA, validB, mdB, out) → bool`:
-- Neither valid → false
-- One valid → that slot
-- Both valid → higher epoch; equal epoch → slot A
+**Rollover (`rotateSegment`).** Promotes `activeGeneration_` to a closed range `{oldTailGen, oldTailGen}`, merges with the preceding range if contiguous, and checks the range count before any I/O — if adding this range would exceed `kManifestMaxRanges` it returns `RangeLimitExceeded` without touching the disk. If the count is acceptable it calls `createSegment` to write the new segment header, then publishes the updated manifest. A crash between `createSegment` and `publishManifest` leaves a dangling segment file; on remount the old manifest wins and the dangling file advances `nextGeneration_` without being replayed. `ensureActiveSegment` follows the same pattern for the first segment of a session.
 
-### Mount path (`scanSegments`)
+**Compaction.** `chooseCompactionRange()` returns `manifestRanges_[0]` as a `CompactionRange` if any full ranges exist, nullopt otherwise — the tail is never eligible. `collectLiveRecords(range, out)` iterates `records_` in FIFO order and reads current payloads from disk for every `SegmentRecord` whose `segmentGeneration` falls within the range; popped records are already absent from `records_`; rewritten records have their `segmentGeneration` and `payloadOffset` updated in-place by `appendRewriteEvent`, so `collectLiveRecords` automatically returns the rewritten payload.
 
-Preamble sets defaults (`activeGenerations_` empty, `manifestRanges_` empty, `activeSegmentBytes_ = 0`, `nextGeneration_ = 1`, `nextSequence_ = 0`), then:
+`compactOneSegment()` orchestrates the full compaction step: if `collectLiveRecords` returns empty it publishes a manifest that drops the range entirely with no file I/O (dead-range removal). If live records exist but their total size exceeds `maxSegmentBytes` it returns `Status::noOp()`. Otherwise it pre-computes the replacement `SegmentRecord` layout, writes the new segment file, publishes the manifest (with `nextGeneration = newGen + 1`), and only then applies the replacement layout to `records_`. On publish failure the new segment file is left on disk as a dangling file — Stage 7 cleanup handles it. `publishManifest` calls `applyManifestToRam` on success, so `manifestRanges_`, `activeGenerations_`, and `nextGeneration_` are already updated when the `records_` swap runs. `Status::noOp()` passes `.ok()` but also sets `.isNoOp() = true`.
 
-1. `readManifest()` → if valid, `applyManifestToRam()` sets `activeGenerations_`, `manifestRanges_`, and `nextGeneration_`
-2. If no valid manifest and segment files exist on disk → `DataCorrupt`
-3. If no valid manifest and no segment files → empty store (mount succeeds)
-4. Disk scan advances `nextGeneration_` past all segment files, including dangling ones
+`compactFull()` loops `compactOneSegment()` at most `manifestRanges_.size()` times (captured at entry), breaking early when `compactOneSegment` returns `Status::noOp()`. Intended for idle time or explicit maintenance — not the hot path. `writeRecord` calls `compactOneSegment()` directly (one bounded step per enqueue) when `needsCompaction()` is true. One v1 limitation: when all initial ranges are alive, `compactFull` may recompact the range it just created rather than moving on to the next original range, since the newly-created range occupies `manifestRanges_[0]` by the oldest-first invariant. This is harmless but means not all original ranges are necessarily visited in one call.
 
-Replay loop iterates `activeGenerations_` in manifest order (not numeric order). A referenced segment missing or too small → `DataCorrupt`. Torn-tail and corruption rules unchanged.
+**Key invariants.** `manifestRanges_` is always ordered oldest→newest; `chooseCompactionRange` and `compactOneSegment` both depend on `[0]` being the oldest. Pop events carry the same rotation check as rewrite events — a sequence of pops can trigger a rotation and promote the current tail to a full range. Any test that pops records before calling `compactOneSegment` must account for this.
 
-### Rollover path (`rotateSegment`)
-
-1. Save `oldTailGen = activeGeneration_`
-2. Build `newRanges = manifestRanges_` + promote `{oldTailGen, oldTailGen}` (merge if contiguous with last range)
-3. If `newRanges.size() > kManifestMaxRanges` → return `RangeLimitExceeded` (check before any I/O; no segment file created)
-4. `createSegment(newGen, baseSeq)` — writes segment header, updates `activeGeneration_`, `activeSegmentBytes_`, `nextGeneration_`
-5. Build `ManifestData{ranges=newRanges, tailGeneration=newGen, nextGeneration=nextGeneration_}`
-6. `publishManifest()` — writes to inactive slot, calls `applyManifestToRam()` on success
-
-Crash between steps 4 and 6: new segment file is dangling. On remount, old manifest wins; dangling file advances `nextGeneration_` (preventing reuse) but is not replayed. Stage 7 cleanup removes it.
-
-### Compaction helpers (Stage 5a)
-
-`CompactionRange { startGen, endGen }` — public struct on `AppendLogStore`.
-
-`chooseCompactionRange() const -> std::optional<CompactionRange>`:
-- Returns `manifestRanges_[0]` as a `CompactionRange` if `manifestRanges_` is non-empty.
-- Returns nullopt if no full ranges exist (empty store or tail-only store).
-- The tail generation is never eligible — it is excluded by design since only `manifestRanges_` (full ranges) is consulted; the tail lives in `activeGeneration_` separately.
-
-### Compaction helpers (Stage 5b)
-
-`CompactionLiveRecord { sequence, payload }` — public struct on `AppendLogStore`.
-
-`collectLiveRecords(const CompactionRange& range, std::vector<CompactionLiveRecord>& out) const -> Status`:
-- Iterates `records_` in deque order (FIFO). For each `SegmentRecord` whose `segmentGeneration` falls within `[range.startGen, range.endGen]`, reads the payload from disk via `fs_->readAt(segmentName(sr.segmentGeneration), sr.payloadOffset, sr.payloadBytes, ...)` and appends to `out`.
-- Popped records are absent from `records_` and therefore absent from the result.
-- Rewritten records: after `appendRewriteEvent`, the matching `SegmentRecord` has its `segmentGeneration`, `payloadOffset`, and `payloadBytes` updated to point at the REWRITE event. If the REWRITE landed in the same segment as the original ENQUEUE (i.e., within the compaction range), `collectLiveRecords` reads from the REWRITE offset and returns the new payload. If the REWRITE landed in a later segment (i.e., outside the range), the record's `segmentGeneration` will not match and it will be excluded from the result — it is not lost, just not in this range.
-- Uses `fs_` directly (mutable field) rather than `fs()` so the method can be `const`.
-- Returns any I/O error immediately; `out` may be partially filled on error.
-
-**Invariant: `manifestRanges_` is always ordered oldest→newest.** `chooseCompactionRange()` relies on this — `[0]` is correct only if manifest order equals logical age. This is true by construction today: rollover always appends the promoted tail to the end, and `applyManifestToRam()` preserves manifest order. Stage 5c must maintain it when rebuilding the range list after compaction: replace `[oldStart, oldEnd]` in-place, then merge adjacent entries without resorting.
-
-### Known temporary limitations
-
-- **`needsCompaction()` uses a generation-span heuristic** instead of `activeGenerations_.size()` (Stage 6 TODO comment in code). Overestimates segment pressure before compaction is wired.
-- **Cleanup not implemented** (Stage 7). Dangling segment files (from failed rotations or superseded compactions) accumulate on disk.
-- **`compact()` for the no-live-records path does not publish an updated manifest** — next `ensureActiveSegment()` call will publish one, but a remount between compact and the next write would see a manifest pointing to deleted segments → DataCorrupt. Acceptable at this stage; addressed in Stage 5c when compaction is fully wired.
+**Current limitations.** `needsCompaction()` uses a generation-span heuristic instead of `activeGenerations_.size()` (Stage 6 TODO in code) and overestimates segment pressure. Cleanup (Stage 7) is not implemented: dangling segment files from failed rotations or compactions accumulate on disk.
 
 
 ## Implementation order
-
-### Stage 5c — compactOneSegment() v1
-
-```cpp
-Status compactOneSegment();
-Status compactFull();
-```
-
-Wire range selection, live record collection, segment write, manifest publish, and RAM update into `compactOneSegment()`. Enforce step ordering: write segment file before publishing manifest, publish manifest before updating `records_` and `activeGenerations_`.
-
-**RAM update scope (step 10):** after a successful publish, update every `SegmentRecord` in `records_` whose `segmentGeneration` fell within the compacted range — set `segmentGeneration`, `payloadOffset`, and `payloadBytes` to the values computed for the new compacted segment. Also update `activeGenerations_` to drop the old range and add the new generation. This must be a single atomic swap in RAM: compute the full replacement state first (all affected records + new generation list), then apply it only after `publishManifest` returns success. Partial application (e.g., updating only some records before publish) would leave `records_` inconsistent with the manifest on a crash.
-
-Test: fully dead range removed; live records preserved in FIFO order; `rewriteFront()` result preserved; no-op when live bytes exceed `maxSegmentBytes`; manifest published only after new file written; `records_` updated only after manifest success; old segment files remain on disk; remount after compaction uses new segment. **Critical test:** simulate manifest publish failure after the new segment file is written — on remount the old segment must still be active, the new segment must be dangling, and all records must be intact. This is the core crash-safety guarantee of the whole compaction design.
 
 ### Stage 6 — Compaction trigger
 

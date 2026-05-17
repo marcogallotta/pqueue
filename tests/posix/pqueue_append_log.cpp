@@ -1930,6 +1930,274 @@ TEST_CASE("compaction: collectLiveRecords excludes popped records") {
     CHECK_EQ(live[0].payload,  "b");
 }
 
+TEST_CASE("compaction: compactOneSegment removes dead range without writing a new segment") {
+    // Use a crafted manifest so we control segment layout precisely.
+    // gen=1 (full range, header only — no records): dead range.
+    // gen=2 (tail) has seq=1 "c".
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 3;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        // gen=1: header only — no ENQUEUE events, so no live records map to it
+        const std::string hdr = serializeSegmentHeader(1, 0);
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+    {
+        // gen=2: header + one live record seq=1 "c"
+        std::string seg = serializeSegmentHeader(2, 1);
+        seg += serializeEnqueueEvent(1, "c");
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE(store.chooseCompactionRange().has_value());
+
+    CHECK(store.compactOneSegment().ok());
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3))); // no new segment written
+    CHECK_FALSE(store.chooseCompactionRange().has_value()); // dead range gone
+
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); // live record in gen=2 still accessible
+    CHECK_EQ(out, "c");
+}
+
+TEST_CASE("compaction: compactOneSegment preserves live records in FIFO order") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
+
+    CHECK(store.compactOneSegment().ok());
+
+    // gen=3 was written; records are accessible in order
+    CHECK(std::filesystem::exists(segmentPath(3)));
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+}
+
+TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
+    // seq=1 is rewritten before rotation, so its SegmentRecord points at the REWRITE
+    // offset inside gen=1. compactOneSegment must copy the rewritten value, not the
+    // original enqueue bytes.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 100; // fits 2 enqueues + 1 rewrite; 3rd enqueue rotates
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "x");
+    storeEnqueue(store, 2, "y");
+    CHECK(store.rewriteRecord(1, "z").ok()); // REWRITE stays in gen=1
+    storeEnqueue(store, 3, "w");             // rotation: gen=1 full, gen=2 tail
+
+    CHECK(store.compactOneSegment().ok());
+
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "z"); // rewritten value
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "y");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "w");
+}
+
+TEST_CASE("compaction: compactOneSegment is no-op when live bytes exceed maxSegmentBytes") {
+    // gen=1 holds 2 records (liveBytes=70); maxSegmentBytes=50 < 70 → no-op.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 3;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        const std::string hdr = serializeSegmentHeader(2, 3);
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 50; // liveBytes(70) > 50 → no-op
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+    CHECK(store.compactOneSegment().ok());
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));      // no new segment
+    CHECK(store.chooseCompactionRange().has_value());           // range still present
+}
+
+TEST_CASE("compaction: compactOneSegment leaves old segment files on disk") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c");
+
+    CHECK(store.compactOneSegment().ok());
+    CHECK(std::filesystem::exists(segmentPath(1))); // old file untouched
+}
+
+TEST_CASE("compaction: remount after compactOneSegment reads records from new segment") {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        storeEnqueue(store, 1, "a");
+        storeEnqueue(store, 2, "b");
+        storeEnqueue(store, 3, "c");
+        CHECK(store.compactOneSegment().ok());
+    }
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        std::string out;
+        CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+        CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    }
+}
+
+TEST_CASE("compaction: dangling segment from failed publish is harmless on remount (critical)") {
+    // Simulates a crash after the new compacted segment was written but before the
+    // manifest publish succeeded. On remount the winning manifest still points at the
+    // original segments; the dangling file is ignored and all records are intact.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // gen=1: full range with seq=1 "a", seq=2 "b"
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 3;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        const std::string hdr = serializeSegmentHeader(2, 3);
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+    // Dangling gen=3: written by compactOneSegment before crash, never in manifest
+    {
+        std::string seg = serializeSegmentHeader(3, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(3), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+
+    // Old segments are authoritative; all original records intact
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+
+    // Manifest unchanged: gen=1 is still the compaction target
+    const auto range = store.chooseCompactionRange();
+    REQUIRE(range.has_value());
+    CHECK_EQ(range->startGen, 1u);
+    CHECK_EQ(range->endGen,   1u);
+}
+
+TEST_CASE("compaction: compactFull removes multiple dead ranges in one call") {
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // Two non-contiguous dead ranges {1,1} and {3,3} with tail=5.
+    // Segments have headers only (no records), so both ranges are dead.
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}, {3, 3}};
+        md.tailGeneration = 5;
+        md.nextGeneration = 6;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    for (std::uint32_t gen : {1u, 3u, 5u}) {
+        const std::string hdr = serializeSegmentHeader(gen, 0);
+        std::ofstream f(segmentPath(gen), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE(store.chooseCompactionRange().has_value());
+
+    CHECK(store.compactFull().ok());
+    CHECK_FALSE(store.chooseCompactionRange().has_value()); // both dead ranges gone
+}
+
 TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not original (critical)") {
     // If a record was rewritten before compaction, the collected payload must be
     // the rewritten value. Returning the original would silently compact stale data.
