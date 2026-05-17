@@ -258,34 +258,39 @@ Compaction step cost is ~71 ms when the selected segment has live records (one o
 
 ## Future work
 
-### Range-limit dead-end and multi-segment compaction output *(required before stable release)*
+Items are ordered by priority. The first three are required before a stable release.
 
-v1 compaction writes a single output segment per call and returns no-op if live bytes exceed `maxSegmentBytes`. This is a known v1 limitation. Once multi-input compaction exists, it can produce ranges spanning multiple segments; if such a range later becomes the oldest and its live bytes exceed `maxSegmentBytes`, compaction noops permanently. Meanwhile rollovers keep adding ranges until the manifest hits its 4-range limit and the queue deadlocks. A stable release must define an escape from this dead-end. The preferred fix is multi-segment compaction output, which eliminates the noop by allowing compaction to always make progress on any range regardless of size. Alternatives include returning a `QueueFull` or `NeedsMaintenance` error, or an emergency repair mode — but these defer the problem rather than solving it.
+### 1. Compaction strategy simulator *(required before stable release)*
 
-### Global compaction strategy *(required before stable release)*
+Before redesigning the compaction strategy, data is needed. The space of possible algorithms is large, the right tradeoffs depend on workload, and the queue is intended for general use — not one known use case. A Posix-backed simulator drives the queue through configurable enqueue/pop patterns (rate, burst size, record size distribution) and evaluates candidate algorithms against a sweep of workload parameters. See `docs/pqueue-compaction-strategy.md` for the full simulator design, metrics, and candidate algorithm list. The best simulator candidates are then validated on-device to confirm real LittleFS costs match the simulator model.
 
-The v1 compaction model (`compactOneSegment` called from `writeRecord`) is greedy and local — it always picks the oldest full range with no view of the others. This produces correct results but is not globally optimal, and has a specific failure mode: after compacting a live range into a new generation, that new generation occupies `manifestRanges_[0]` by the oldest-first invariant, so the next `compactOneSegment` call recompacts it wastefully — moving live data for no gain. More broadly, oldest-first ignores dead-byte ratios: a nearly-full old range will be picked over a nearly-empty newer range even when the latter offers far more reclaim per unit of write cost.
+### 2. Multi-segment compaction output *(required before stable release)*
 
-A globally optimal compactor needs to analyse all ranges at once and choose a strategy. The natural shape is a two-phase model: an analysis pass that inspects dead-byte ratios across all ranges and produces a prioritised plan, and an execution pass that acts on that plan. This also enables multi-input compaction — packing two sparse ranges into a single output segment — which the single-output v1 cannot do.
+v1 compaction writes a single output segment per call and returns no-op if live bytes exceed `maxSegmentBytes`. This creates a permanent dead-end: if the oldest range has more live bytes than fit in one segment, compaction never makes progress on it. Rollovers keep adding ranges until the manifest hits its 4-range limit and the queue deadlocks. The fix is allowing compaction to write multiple output segments per call, so it can always make progress regardless of range size. The manifest model already supports arbitrary range spans and non-monotonic generation ordering, so the publish semantics survive unchanged — the change is in the planner and RAM staging. The simulator (item 1) informs how to design this well.
 
-The minimum viable improvement before a stable release is a dead-byte threshold: skip ranges where dead bytes fall below a configurable ratio. This alone prevents recompaction of live-only ranges cheaply, without requiring the full two-phase redesign. The threshold config knob is already mentioned in this document; it just needs to be wired into `compactOneSegment`'s range selection.
+### 3. Global compaction strategy *(required before stable release)*
 
-### Lazy tail segment creation
+The v1 compactor is greedy and local — always picks the oldest full range with no view of the others. This produces correct results but wastes flash: oldest-first ignores dead-byte ratios, and a newly compacted live range immediately becomes the oldest again, causing the next call to recompact it uselessly. The correct long-term direction is a two-phase model: an analysis pass that inspects all segment files across all ranges, scores them by reclaim efficiency (dead bytes reclaimed per live byte copied), and produces a prioritised compaction plan; an execution pass that acts on that plan. This also enables multi-input compaction — combining live records from multiple sparse ranges into fewer output segments — which v1 cannot do. The simulator (item 1) picks the winning strategy.
 
-Rollover currently pre-creates the next tail segment before manifest publish, guaranteeing a referenced segment always exists on disk. An alternative is to create the tail lazily on first append, saving the flush of an empty segment. This requires mount to handle a missing tail segment without returning DataCorrupt — added complexity for a speculative gain. Worth benchmarking before considering further.
+### 4. Dead-byte threshold
 
-### RAM write buffer
+A quick interim improvement: skip ranges whose dead-byte ratio falls below a configurable threshold, with overrides for segment-count pressure and low free space. This prevents the most wasteful recompactions cheaply and can be wired in before or alongside the simulator work. It does not solve the global strategy problem but reduces churn while the full redesign is underway.
 
-All operations currently write directly to flash. A RAM buffer sitting in front of disk ops would allow enqueue/pop/rewrite to return without a flush, batching writes and reducing per-operation flash cost. Needs design: buffer sizing, flush policy, crash-safety implications, and interaction with the existing durability guarantees.
+### 5. Deep invariant validator
 
-### Validation and repair
+As the compactor becomes more complex, debugging subtle ordering or sequence bugs becomes harder. A `validateDeep()` function that rescans every referenced segment and verifies manifest ordering, sequence monotonicity, no duplicate live sequences, tail uniqueness, range ordering, and no referenced-dangling overlap would be a valuable diagnostic tool. Not part of the normal mount path — a separate maintenance or debug call.
 
-Normal mount is strict and simple — it does not salvage aggressively. A repair tool is a separate future concern:
+### 6. RAM write buffer
 
-- scan dangling files;
-- recover from manifest corruption;
-- inspect segment contents;
-- rebuild manifest if possible.
+All operations currently write directly to flash. A RAM buffer sitting in front of disk ops would allow enqueue/pop/rewrite to return without a flush, batching writes and reducing per-operation flash cost. Deferred: adding a buffer makes durability semantics fuzzy, changes replay assumptions, and significantly increases testing complexity. The current ~45 ms durable write is already a large improvement over the original ~400 ms. Stabilise the storage engine and compaction strategy first.
+
+### 7. Lazy tail segment creation
+
+Rollover currently pre-creates the next tail segment before manifest publish, guaranteeing a referenced segment always exists on disk. An alternative is to create the tail lazily on first append, saving the flush of an empty segment. Deferred: the complexity cost to mount semantics and the "tail always exists" invariant is not justified by the speculative gain. Worth revisiting only if profiling shows it matters.
+
+### 8. Compaction generations / levels
+
+Once multi-input, multi-output compaction exists it may become useful to tag segments with compaction level metadata (original vs. compacted, level depth) to support hot/cold segregation or age-aware policies. Not needed now and not soon — the 4-range manifest constraint limits how far tiered compaction could go anyway. Revisit only if the simulator reveals a workload where level-aware policy consistently outperforms simpler strategies.
 
 ## Appendix A: Decisions log
 
