@@ -98,6 +98,7 @@ private:
     Status scanSegments();
 
     bool needsCompaction() const;
+    void cleanupOneDanglingSegment();
 
     // Applies manifest fields to RAM state (activeGenerations_, nextGeneration_).
     // Called by publishManifest() after a successful write, and by scanSegments()

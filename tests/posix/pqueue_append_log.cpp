@@ -2140,7 +2140,7 @@ TEST_CASE("compaction: compactOneSegment is no-op when live bytes exceed maxSegm
     CHECK(store.chooseCompactionRange().has_value());           // range still present
 }
 
-TEST_CASE("compaction: compactOneSegment leaves old segment files on disk") {
+TEST_CASE("cleanup: compactOneSegment deletes old segment file after publish") {
     cleanSpool();
     std::filesystem::create_directories(kSpoolDir);
 
@@ -2151,10 +2151,12 @@ TEST_CASE("compaction: compactOneSegment leaves old segment files on disk") {
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c");
+    storeEnqueue(store, 3, "c"); // gen=1 -> full range, gen=2 = tail
 
-    CHECK(store.compactOneSegment().ok());
-    CHECK(std::filesystem::exists(segmentPath(1))); // old file untouched
+    CHECK(store.compactOneSegment().ok()); // compacts gen=1 -> gen=3; cleanup removes gen=1
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1))); // cleaned up
+    CHECK(std::filesystem::exists(segmentPath(2)));        // tail: live
+    CHECK(std::filesystem::exists(segmentPath(3)));        // new compacted segment: live
 }
 
 TEST_CASE("compaction: remount after compactOneSegment reads records from new segment") {
@@ -2306,6 +2308,153 @@ TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not origina
     CHECK_EQ(live[0].payload,  "z"); // rewritten value, not "x"
     CHECK_EQ(live[1].sequence, 2u);
     CHECK_EQ(live[1].payload,  "y");
+}
+
+// --- Stage 7: cleanup tests ---
+
+TEST_CASE("cleanup: dangling segment from failed publish is deleted on next successful publish") {
+    // Simulate a dangling segment that was written before a crash (never in manifest).
+    // The next successful publishManifest (triggered by compactOneSegment) must delete it.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // Write a valid store: gen=1 full range, gen=2 tail
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 3;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        const std::string hdr = serializeSegmentHeader(2, 3);
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+    // Dangling gen=3: written before a crash, never referenced by the manifest
+    {
+        std::string seg = serializeSegmentHeader(3, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        std::ofstream f(segmentPath(3), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok()); // cleanup on mount removes gen=3
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(1))); // still referenced
+    CHECK(std::filesystem::exists(segmentPath(2))); // still referenced
+}
+
+TEST_CASE("cleanup: referenced segment is never deleted (critical)") {
+    // Every segment referenced by the current manifest must survive cleanup.
+    // This test enqueues across multiple segments, compacts, and then verifies
+    // that after cleanup all manifest-referenced segments still exist on disk.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
+
+    CHECK(store.compactOneSegment().ok()); // gen=1 -> gen=3; cleanup removes gen=1
+
+    // Manifest references gen=2 (tail) and gen=3 (compacted). Both must exist.
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    CHECK(std::filesystem::exists(segmentPath(3)));
+
+    // All records still readable
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+}
+
+TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
+    // Two dangling files on disk. Each successful publishManifest removes one.
+    // After two publishes both should be gone.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // Manifest references only gen=1 (full) and gen=2 (tail).
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 1}};
+        md.tailGeneration = 2;
+        md.nextGeneration = 5;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        const std::string hdr = serializeSegmentHeader(2, 3);
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+    // Two dangling files: gen=3 and gen=4
+    for (std::uint32_t g : {3u, 4u}) {
+        std::string seg = serializeSegmentHeader(g, 1);
+        std::ofstream f(segmentPath(g), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok()); // first cleanup: removes gen=3
+
+    // One dangling file removed; one remains
+    const bool gen3gone = !std::filesystem::exists(segmentPath(3));
+    const bool gen4gone = !std::filesystem::exists(segmentPath(4));
+    CHECK((gen3gone || gen4gone));   // at least one removed
+    CHECK_FALSE((gen3gone && gen4gone)); // not both (one per cleanup pass)
+
+    // Trigger a second publish (compact the dead range) — removes the other dangling file
+    CHECK(store.compactOneSegment().ok()); // dead range: drops gen=1; second cleanup runs
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+}
+
+TEST_CASE("sequence exhaustion: writeRecord fails closed at UINT32_MAX") {
+    cleanSpool();
+    auto cfg = makeStoreConfig();
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    const auto st = store.writeRecord(std::numeric_limits<std::uint32_t>::max(), "data");
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::SequenceExhausted);
 }
 
 #endif // !ARDUINO

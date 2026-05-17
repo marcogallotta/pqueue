@@ -328,6 +328,7 @@ Status AppendLogStore::scanSegments() {
         }
     }
 
+    cleanupOneDanglingSegment();
     return Status::success();
 }
 
@@ -374,6 +375,7 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     if (!st.ok()) return st;
 
     applyManifestToRam(toWrite);
+    cleanupOneDanglingSegment();
     return Status::success();
 }
 
@@ -640,6 +642,24 @@ bool AppendLogStore::needsCompaction() const {
     return false;
 }
 
+void AppendLogStore::cleanupOneDanglingSegment() {
+    auto f = fs();
+    if (!f) return;
+
+    std::vector<std::string> files;
+    if (!f->listFiles(files).ok()) return;
+
+    for (const auto& name : files) {
+        std::uint32_t gen = 0;
+        if (!isSegmentName(name, gen)) continue;
+        const bool live = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
+                          != activeGenerations_.end();
+        if (live) continue;
+        f->removeFile(name); // best-effort; crash leaves an extra file, safe on remount
+        return;
+    }
+}
+
 
 // --- Store interface implementation ---
 
@@ -661,6 +681,12 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     if (record.size() > config_.maxRecordBytes) {
         return diagnostic(Severity::Warning,
             Status::failure(StatusCode::RecordTooLarge, "record exceeds append-log maximum record size"),
+            "writeRecord");
+    }
+
+    if (sequence == std::numeric_limits<std::uint32_t>::max()) {
+        return diagnostic(Severity::Error,
+            Status::failure(StatusCode::SequenceExhausted, "sequence space exhausted; format() required"),
             "writeRecord");
     }
 

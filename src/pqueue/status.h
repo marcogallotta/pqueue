@@ -30,6 +30,7 @@ enum class StatusCode {
 
     DataCorrupt,
     RangeLimitExceeded,
+    SequenceExhausted,
 
     NoOp, // operation succeeded but had nothing to do
 };
@@ -58,6 +59,7 @@ inline const char* statusCodeName(StatusCode code) {
         case StatusCode::Dropped: return "dropped";
         case StatusCode::DataCorrupt: return "data_corrupt";
         case StatusCode::RangeLimitExceeded: return "range_limit_exceeded";
+        case StatusCode::SequenceExhausted: return "sequence_exhausted";
         case StatusCode::NoOp: return "no_op";
     }
     return "unknown";
