@@ -90,3 +90,35 @@ Weight the dead-byte ratio by segment age. Older segments are more likely to con
 ### 10. Minimum live-bytes-copied
 
 Among all ranges that would result in range count reduction after compaction, pick the one with fewest live bytes to copy. Directly minimises the cost of the next compaction step while still making manifest progress.
+
+## Simulation findings (initial run)
+
+### Scheduler cadence dominates strategy quality
+
+The first simulation runs revealed that the compaction trigger cadence matters more than the choice of strategy. With aggressive cadence (compact every 6 enqueues), most compaction calls are no-ops or useless -- one run showed 820 out of 827 compaction attempts producing no useful work. With relaxed cadence (compact every 15 enqueues), all strategies performed similarly and none deadlocked.
+
+This is a strong signal: operation-count-triggered compaction is the wrong primitive. Firing compaction on a fixed schedule regardless of queue state produces pathological behaviour under load -- either compacting fully-live ranges uselessly, or invoking compaction hundreds of times with no effect.
+
+### Strategy quality matters under pressure
+
+Despite the scheduler noise, the gap between strategies under heavy load was large and meaningful. In the enqP=0.65, compact=6 workload, oldest-first produced 206x write amplification while ratio-based strategies (HighestDeadRatio, CostBenefit) produced 2.36x. The difference: oldest-first compacts fully-live ranges, copying all their data for zero reclaim. Ratio-based strategies correctly refuse ranges with no dead bytes.
+
+This confirms that usefulness-gating -- skipping compaction when there is nothing worth reclaiming -- is a first-order correctness requirement, not an optimisation.
+
+### Oldest-first is unsuitable as a long-term strategy
+
+Under any workload with range pressure, oldest-first repeatedly compacts ranges with no dead data. This is pure write amplification with no benefit, and it directly causes the deadlock scenario (range limit hit while compacting live data for no gain). It is retained in the simulator as a baseline only.
+
+### DeferUntilPressure wins for wrong reasons
+
+DeferUntilPressure avoided deadlocks in all runs by never compacting at all -- its pressure threshold was never triggered by the workload parameters used. This is coincidental, not a genuine strategy win. A workload that sustains higher range pressure would expose it.
+
+### Key conclusions
+
+1. The compaction trigger must be state-based, not operation-count-based. The trigger condition should be: dead bytes in some range exceed a threshold, OR range count approaches the manifest limit. This collapses the no-op rate and makes strategy choice meaningful.
+
+2. Any viable strategy must gate on usefulness: refuse to compact a range whose dead-byte ratio is below a minimum threshold, except when range count pressure forces action.
+
+3. Ratio-based strategies (HighestDeadRatio, CostBenefit, AgeWeighted) are directionally correct. Further runs with a usefulness-gated trigger are needed to distinguish between them.
+
+4. The scheduler design is a separate concern from the scoring heuristic, and must be resolved before strategy evaluation is meaningful.
