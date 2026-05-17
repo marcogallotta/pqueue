@@ -41,6 +41,7 @@ public:
     Status removeRecord(std::uint32_t sequence) override;
 
     Status publishManifest(const append_log_detail::ManifestData& manifest);
+    bool readManifest(append_log_detail::ManifestData& out);
 
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;

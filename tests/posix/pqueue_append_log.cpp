@@ -1194,4 +1194,182 @@ TEST_CASE("manifest-publish: corrupt slot B leaves slot A as the valid winner") 
 #endif
 }
 
+// --- Manifest read tests (Stage 3a) ---
+
+TEST_CASE("manifest-read: both slots missing returns false") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    ManifestData out;
+    CHECK_FALSE(store.readManifest(out));
+#endif
+}
+
+TEST_CASE("manifest-read: slot A valid, slot B missing returns A") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('a', 3);
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 3U);
+#endif
+}
+
+TEST_CASE("manifest-read: slot A missing, slot B valid returns B") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('b', 5);
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 5U);
+#endif
+}
+
+TEST_CASE("manifest-read: both valid, A higher epoch wins") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('a', 9);
+    writeManifestSlotDirect('b', 4);
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 9U);
+#endif
+}
+
+TEST_CASE("manifest-read: both valid, B higher epoch wins") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('a', 2);
+    writeManifestSlotDirect('b', 8);
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 8U);
+#endif
+}
+
+TEST_CASE("manifest-read: equal epochs, slot A wins (tiebreaker)") {
+    // Slots have the same epoch but different nextGeneration values so we can
+    // tell from the returned manifest which slot actually won the election.
+    // Spec says: equal epoch → slot A.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    auto writeSlot = [](char slot, uint32_t epoch, uint32_t nextGen) {
+        ManifestData md;
+        md.epoch = epoch;
+        md.nextGeneration = nextGen;
+        md.tailGeneration = 0;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath(slot), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    };
+
+    writeSlot('a', 6, 10); // A: epoch 6, nextGeneration 10
+    writeSlot('b', 6, 20); // B: epoch 6, nextGeneration 20 — same epoch, different payload
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 6U);
+    CHECK_EQ(out.nextGeneration, 10U); // slot A's payload — proves A won, not just epoch match
+#endif
+}
+
+TEST_CASE("manifest-read: corrupt slot A, valid slot B returns B") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    {
+        std::ofstream fa(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        fa.write("GARBAGE", 7);
+    }
+    writeManifestSlotDirect('b', 4);
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 4U);
+#endif
+}
+
+TEST_CASE("manifest-read: valid slot A, corrupt slot B returns A") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    writeManifestSlotDirect('a', 2);
+    {
+        std::ofstream fb(manifestSlotPath('b'), std::ios::binary | std::ios::trunc);
+        fb.write("GARBAGE", 7);
+    }
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 2U);
+#endif
+}
+
+TEST_CASE("manifest-read: higher-epoch slot with corrupt CRC loses to valid lower-epoch slot") {
+    // Critical: a partially-written higher-epoch slot must never beat a valid lower-epoch slot.
+    // This is the key invariant that makes inactive-slot writes crash-safe.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    REQUIRE(store.mount().ok());
+
+    // Slot A: valid, epoch 3.
+    writeManifestSlotDirect('a', 3);
+
+    // Slot B: written with epoch 10 but then CRC-corrupted (simulates a crash mid-write).
+    {
+        ManifestData md;
+        md.epoch = 10;
+        md.nextGeneration = 1;
+        md.tailGeneration = 0;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        bytes[bytes.size() - 8] ^= 0xFF; // flip a CRC byte
+        std::ofstream fb(manifestSlotPath('b'), std::ios::binary | std::ios::trunc);
+        fb.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    }
+
+    ManifestData out;
+    CHECK(store.readManifest(out));
+    CHECK_EQ(out.epoch, 3U); // slot A wins; corrupt B is discarded
+#endif
+}
+
 #endif // !ARDUINO

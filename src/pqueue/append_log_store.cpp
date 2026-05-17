@@ -376,6 +376,29 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     return Status::success();
 }
 
+bool AppendLogStore::readManifest(ManifestData& out) {
+    auto f = fs();
+    if (!f) return false;
+
+    auto tryRead = [&](const char* name, ManifestData& md) -> bool {
+        std::string data;
+        if (!f->readFile(name, data).ok()) return false;
+        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
+    };
+
+    ManifestData mdA, mdB;
+    const bool validA = tryRead(kManifestSlotA, mdA);
+    const bool validB = tryRead(kManifestSlotB, mdB);
+
+    if (!validA && !validB) return false;
+    if (validA && !validB) { out = mdA; return true; }
+    if (!validA)           { out = mdB; return true; }
+    // Both valid: higher epoch wins; equal epoch → slot A
+    if (mdB.epoch > mdA.epoch) { out = mdB; return true; }
+    out = mdA;
+    return true;
+}
+
 void AppendLogStore::applyManifestToRam(const ManifestData& md) {
     activeGenerations_.clear();
     for (const auto& r : md.ranges) {

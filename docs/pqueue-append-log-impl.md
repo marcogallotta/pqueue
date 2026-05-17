@@ -190,15 +190,11 @@ Tests added: first publish writes A, second publish writes B (A valid / B missin
 
 **Durability note:** `writeFile()` on Posix is truncate-then-write with no fsync (not atomic). On LittleFS it flushes and closes, and LittleFS block writes are atomic via its journal. Both are safe for manifests because `publishManifest()` only writes to the inactive slot — a partial write leaves that slot invalid (fails CRC), and the previously-active slot always survives as the mount-election winner.
 
-### Stage 3a — Manifest read helper
+### Stage 3a — Manifest read helper (done)
 
-Add a standalone `readManifest()` helper that reads both slot files, validates each independently (CRC + footer), applies slot election, and returns the winning `ManifestData` (or signals no valid slot). No changes to `scanSegments()` yet:
+Added `readManifest(ManifestData& out)` (public, for testability) to `AppendLogStore`. Reads both slot files via `readFile`, validates each with `parseManifest`, and applies slot election: higher epoch wins; equal epoch → slot A; no valid slot → returns false. No changes to `scanSegments()`.
 
-```cpp
-bool readManifest(ManifestData& out);  // returns false if no valid slot exists
-```
-
-Test: all four slot-election cases, equal epoch tiebreaker, corrupt slot discarded, both missing returns no-winner. **Critical test:** slot with higher epoch but corrupt CRC must lose to a valid slot with lower epoch — a partially written higher-epoch slot must never win.
+Tests added: both missing → false; A valid B missing → A; A missing B valid → B; both valid A higher → A; both valid B higher → B; equal epochs → A (tiebreaker); corrupt A valid B → B; valid A corrupt B → A; critical: higher-epoch slot with corrupt CRC loses to valid lower-epoch slot.
 
 ### Stage 3b — Wire manifest into mount
 
@@ -215,6 +211,8 @@ Test: empty store (no files), normal mount, crash mid-publish (bad CRC slot disc
 ### Stage 4 — Rollover wired to manifest
 
 Wire `publishManifest()` into `rotateSegment()`. Test rollover persists across remount. Test rollover fails cleanly when range limit would be exceeded. **Critical test:** enqueue enough records to force several rollovers, then remount — the full record set must be intact and in FIFO order. A rollover that writes the new segment but fails to publish the manifest must leave the old tail as the tail on next mount.
+
+**Refactor opportunity:** by the end of this stage, slot-election logic exists in two places — `publishManifest()` (chooses the inactive slot to write) and `readManifest()` (chooses the winning slot to read). Extract into two private helpers — `chooseInactiveSlot()` and `chooseWinningSlot()` — to prevent future divergence. The shape of both is clear from actual usage at this point.
 
 ### Stage 5a — Range selection
 
