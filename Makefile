@@ -11,6 +11,7 @@ OBJ_DIR := $(BUILD_DIR)/obj
 TEST_TARGET := $(BUILD_DIR)/pqueue-tests
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
+SIM_TARGET := $(BUILD_DIR)/pqueue-compaction-sim
 
 PQUEUE_SRC := \
 	src/pqueue/append_log_common.cpp \
@@ -51,7 +52,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool profiling docs clean .FORCE
+.PHONY: all test tests run-tests repair-tool profiling sim docs clean .FORCE
 
 all: test
 
@@ -74,6 +75,12 @@ profiling: $(PROFILING_TARGET)
 $(PROFILING_TARGET): tools/pqueue_profiling.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+sim: $(SIM_TARGET)
+
+$(SIM_TARGET): tools/pqueue_compaction_sim.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Itools $^ -o $@ $(LDFLAGS)
 
 $(REPAIR_TOOL_TARGET): tools/pqueue_repair_tool.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)

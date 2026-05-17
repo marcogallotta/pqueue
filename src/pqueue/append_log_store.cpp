@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <limits>
+#include <unordered_map>
 #include <vector>
 
 namespace pqueue {
@@ -543,20 +544,45 @@ Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
     return Status::success();
 }
 
-Status AppendLogStore::compactOneSegment() {
-    auto rangeOpt = chooseCompactionRange();
-    if (!rangeOpt) return Status::noOp();
+std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
+    std::vector<SegmentStat> result;
 
-    const CompactionRange range = *rangeOpt;
+    std::unordered_map<std::uint32_t, std::uint32_t> liveByGen;
+    for (const auto& sr : records_) {
+        liveByGen[sr.segmentGeneration] += kEnqueueOverheadBytes + sr.payloadBytes;
+    }
+
+    for (const auto& range : manifestRanges_) {
+        for (std::uint32_t gen = range.startGen; gen <= range.endGen; ++gen) {
+            SegmentStat stat;
+            stat.generation = gen;
+            auto it = liveByGen.find(gen);
+            stat.liveBytes = kSegmentHeaderBytes + (it != liveByGen.end() ? it->second : 0);
+            std::uint64_t size = 0;
+            fs_->fileSize(segmentName(gen), size);
+            stat.totalBytes = static_cast<std::uint32_t>(size);
+            result.push_back(stat);
+        }
+    }
+
+    return result;
+}
+
+Status AppendLogStore::compactRange(const CompactionRange& range) {
+    auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
+        [&](const ManifestRange& r) {
+            return r.startGen == range.startGen && r.endGen == range.endGen;
+        });
+    if (it == manifestRanges_.end()) return Status::noOp();
+    const std::size_t rangeIdx = static_cast<std::size_t>(it - manifestRanges_.begin());
 
     std::vector<CompactionLiveRecord> liveRecords;
     Status st = collectLiveRecords(range, liveRecords);
     if (!st.ok()) return st;
 
     if (liveRecords.empty()) {
-        // Dead range: remove it from the manifest without writing a new segment.
         std::vector<ManifestRange> newRanges = manifestRanges_;
-        newRanges.erase(newRanges.begin());
+        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
         ManifestData md;
         md.ranges         = std::move(newRanges);
         md.tailGeneration = activeGeneration_;
@@ -564,29 +590,25 @@ Status AppendLogStore::compactOneSegment() {
         return publishManifest(md);
     }
 
-    // Size check: if live data exceeds the segment limit, defer to a future pass.
     std::uint32_t liveBytes = kSegmentHeaderBytes;
     for (const auto& lr : liveRecords) {
         liveBytes += kEnqueueOverheadBytes + static_cast<std::uint32_t>(lr.payload.size());
     }
     if (liveBytes > config_.maxSegmentBytes) return Status::noOp();
 
-    // Build replacement SegmentRecords using the layout the new segment will have.
-    // Must be computed before any I/O so the state is ready to apply atomically.
     std::uint32_t writeOffset = kSegmentHeaderBytes;
     std::vector<SegmentRecord> replacements;
     replacements.reserve(liveRecords.size());
     for (const auto& lr : liveRecords) {
         SegmentRecord sr;
         sr.sequence          = lr.sequence;
-        sr.segmentGeneration = nextGeneration_; // newGen
+        sr.segmentGeneration = nextGeneration_;
         sr.payloadOffset     = writeOffset + kEnqueueHeaderBytes;
         sr.payloadBytes      = static_cast<std::uint32_t>(lr.payload.size());
         replacements.push_back(sr);
         writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
     }
 
-    // Write compacted segment file.
     const std::uint32_t newGen = nextGeneration_;
     std::string segData = serializeSegmentHeader(newGen, liveRecords.front().sequence);
     for (const auto& lr : liveRecords) {
@@ -595,12 +617,11 @@ Status AppendLogStore::compactOneSegment() {
     st = fs()->writeFile(segmentName(newGen), segData);
     if (!st.ok()) return st;
 
-    // Replace first range with [newGen, newGen]; merge with next if contiguous.
     std::vector<ManifestRange> newRanges = manifestRanges_;
-    newRanges[0] = {newGen, newGen};
-    if (newRanges.size() > 1 && newRanges[0].endGen + 1 == newRanges[1].startGen) {
-        newRanges[0].endGen = newRanges[1].endGen;
-        newRanges.erase(newRanges.begin() + 1);
+    newRanges[rangeIdx] = {newGen, newGen};
+    if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
+        newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
+        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
     }
 
     ManifestData md;
@@ -610,10 +631,7 @@ Status AppendLogStore::compactOneSegment() {
 
     st = publishManifest(md);
     if (!st.ok()) return st;
-    // Segment file left on disk if publish failed — Stage 7 cleanup removes it.
 
-    // publishManifest updated manifestRanges_, activeGenerations_, nextGeneration_.
-    // Now update the SegmentRecord entries that moved into the new segment.
     for (auto& r : records_) {
         if (r.segmentGeneration < range.startGen || r.segmentGeneration > range.endGen) continue;
         for (const auto& rep : replacements) {
@@ -621,6 +639,12 @@ Status AppendLogStore::compactOneSegment() {
         }
     }
     return Status::success();
+}
+
+Status AppendLogStore::compactOneSegment() {
+    auto rangeOpt = chooseCompactionRange();
+    if (!rangeOpt) return Status::noOp();
+    return compactRange(*rangeOpt);
 }
 
 Status AppendLogStore::compactFull() {

@@ -57,8 +57,21 @@ public:
     Status collectLiveRecords(const CompactionRange& range,
                               std::vector<CompactionLiveRecord>& out) const;
 
+    Status compactRange(const CompactionRange& range);
     Status compactOneSegment();
     Status compactFull();
+
+    struct SegmentStat {
+        std::uint32_t generation = 0;
+        std::uint32_t totalBytes = 0;
+        std::uint32_t liveBytes  = 0;
+        std::uint32_t deadBytes() const { return totalBytes > liveBytes ? totalBytes - liveBytes : 0; }
+        float deadRatio() const { return totalBytes > 0 ? static_cast<float>(deadBytes()) / static_cast<float>(totalBytes) : 0.0f; }
+    };
+    std::vector<SegmentStat> segmentStats() const;
+
+    const std::vector<append_log_detail::ManifestRange>& manifestRanges() const { return manifestRanges_; }
+    std::uint32_t tailGeneration() const { return activeGeneration_; }
 
     Status tryAcquireLockFile(const std::string& name, const std::string& contents) override;
     Status releaseLockFile(const std::string& name, const std::string& expectedContents) override;
