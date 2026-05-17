@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pqueue::append_log_detail {
 
@@ -12,8 +13,16 @@ constexpr std::uint32_t kEnqueueMagic  = 0x51455150; // "PQEQ"
 constexpr std::uint32_t kPopMagic      = 0x45505150; // "PQPE"
 constexpr std::uint32_t kRewriteMagic  = 0x45525150; // "PQRE"
 constexpr std::uint32_t kFooterMagic   = 0x214B4F50; // "POK!"
+constexpr std::uint32_t kManifestMagic = 0x464D5150; // "PQMF"
 
-constexpr std::uint16_t kFormatVersion = 0;
+constexpr std::uint16_t kFormatVersion   = 0;
+constexpr std::uint16_t kManifestVersion = 1;
+
+// Manifest binary layout sizes
+// Fixed overhead: magic(4)+version(2)+headerBytes(2)+epoch(4)+nextGeneration(4)+
+//                 rangeCount(2)+tailGeneration(4)+crc(4)+footer(4) = 30 bytes
+constexpr std::uint16_t kManifestFixedBytes = 30;
+constexpr std::uint16_t kManifestMaxRanges  = 4;
 
 constexpr std::uint16_t kSegmentHeaderBytes  = 20;
 constexpr std::uint16_t kEnqueueHeaderBytes  = 16; // fixed header only: magic(4)+version(2)+headerBytes(2)+sequence(4)+payloadBytes(4)
@@ -67,5 +76,22 @@ std::string serializePopEvent(std::uint32_t sequence);
 
 bool parseEnqueueHeader(const std::string& bytes, EnqueueHeader& out);
 bool parsePopEvent(const std::string& bytes, PopEvent& out);
+
+// Manifest binary format
+
+struct ManifestRange {
+    std::uint32_t startGen = 0;
+    std::uint32_t endGen   = 0;
+};
+
+struct ManifestData {
+    std::uint32_t epoch          = 0;
+    std::uint32_t nextGeneration = 1;
+    std::vector<ManifestRange> ranges; // max kManifestMaxRanges entries
+    std::uint32_t tailGeneration = 0;
+};
+
+void serialiseManifest(const ManifestData& manifest, std::vector<std::uint8_t>& out);
+bool parseManifest(const std::uint8_t* data, std::size_t size, ManifestData& out);
 
 } // namespace pqueue::append_log_detail

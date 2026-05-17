@@ -618,4 +618,308 @@ TEST_CASE("append-log: stale pqueue-compact.bin is ignored") {
     }
 }
 
+// --- Manifest binary format tests ---
+
+TEST_CASE("manifest: round-trip empty store (tailGen=0, no ranges)") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch          = 1;
+    m.nextGeneration = 1;
+    m.tailGeneration = 0;
+
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    CHECK_EQ(buf.size(), kManifestFixedBytes);
+
+    ManifestData out;
+    CHECK(parseManifest(buf.data(), buf.size(), out));
+    CHECK_EQ(out.epoch,          m.epoch);
+    CHECK_EQ(out.nextGeneration, m.nextGeneration);
+    CHECK_EQ(out.tailGeneration, m.tailGeneration);
+    CHECK(out.ranges.empty());
+#endif
+}
+
+TEST_CASE("manifest: round-trip with two ranges") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch          = 7;
+    m.nextGeneration = 10;
+    m.tailGeneration = 9;
+    m.ranges         = {{1, 3}, {5, 7}};
+
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    CHECK_EQ(buf.size(), std::size_t(kManifestFixedBytes + 2 * 8));
+
+    ManifestData out;
+    CHECK(parseManifest(buf.data(), buf.size(), out));
+    CHECK_EQ(out.epoch,          m.epoch);
+    CHECK_EQ(out.nextGeneration, m.nextGeneration);
+    CHECK_EQ(out.tailGeneration, m.tailGeneration);
+    REQUIRE_EQ(out.ranges.size(), 2u);
+    CHECK_EQ(out.ranges[0].startGen, 1u);
+    CHECK_EQ(out.ranges[0].endGen,   3u);
+    CHECK_EQ(out.ranges[1].startGen, 5u);
+    CHECK_EQ(out.ranges[1].endGen,   7u);
+#endif
+}
+
+TEST_CASE("manifest: binary layout field offsets") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch          = 0x11223344;
+    m.nextGeneration = 0xAABBCCDD;
+    m.tailGeneration = 0x55667788;
+    // No ranges: headerBytes = 30
+
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    REQUIRE_EQ(buf.size(), std::size_t(30));
+
+    // magic at 0 (LE: 0x50, 0x51, 0x4D, 0x46 = "PQMF")
+    CHECK_EQ(buf[0], 0x50u);
+    CHECK_EQ(buf[1], 0x51u);
+    CHECK_EQ(buf[2], 0x4Du);
+    CHECK_EQ(buf[3], 0x46u);
+    // version at 4 = 1 (LE)
+    CHECK_EQ(buf[4], 0x01u);
+    CHECK_EQ(buf[5], 0x00u);
+    // headerBytes at 6 = 30 (LE)
+    CHECK_EQ(buf[6], 0x1Eu);
+    CHECK_EQ(buf[7], 0x00u);
+    // epoch at 8
+    CHECK_EQ(buf[8],  0x44u);
+    CHECK_EQ(buf[9],  0x33u);
+    CHECK_EQ(buf[10], 0x22u);
+    CHECK_EQ(buf[11], 0x11u);
+    // nextGeneration at 12
+    CHECK_EQ(buf[12], 0xDDu);
+    CHECK_EQ(buf[13], 0xCCu);
+    CHECK_EQ(buf[14], 0xBBu);
+    CHECK_EQ(buf[15], 0xAAu);
+    // rangeCount at 16 = 0
+    CHECK_EQ(buf[16], 0x00u);
+    CHECK_EQ(buf[17], 0x00u);
+    // tailGeneration at 18
+    CHECK_EQ(buf[18], 0x88u);
+    CHECK_EQ(buf[19], 0x77u);
+    CHECK_EQ(buf[20], 0x66u);
+    CHECK_EQ(buf[21], 0x55u);
+    // footer at 26 (LE: 0x50, 0x4F, 0x4B, 0x21 = "POK!")
+    CHECK_EQ(buf[26], 0x50u);
+    CHECK_EQ(buf[27], 0x4Fu);
+    CHECK_EQ(buf[28], 0x4Bu);
+    CHECK_EQ(buf[29], 0x21u);
+#endif
+}
+
+TEST_CASE("manifest: corrupted CRC is rejected") {
+    // Critical: a valid manifest with one CRC byte corrupted must not parse.
+    // This is the entire basis of crash-safety on mount.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch          = 3;
+    m.nextGeneration = 5;
+    m.tailGeneration = 4;
+    m.ranges         = {{1, 3}};
+
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+
+    // Corrupt one byte of the CRC field (4th from end: footer(4) then crc(4)).
+    // With 1 range: total = 38 bytes. CRC is at buf[30..33], footer at buf[34..37].
+    CHECK(buf.size() == std::size_t(kManifestFixedBytes + 8));
+    buf[buf.size() - 8] ^= 0xFF; // flip a byte in the CRC field
+
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: wrong magic is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    buf[0] ^= 0xFF; // corrupt magic byte 0
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: wrong version is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    buf[4] = 0x02; // version = 2 instead of 1
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: wrong headerBytes is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    buf[6] = 0xFF; // corrupt headerBytes low byte
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: wrong footer is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    buf[buf.size() - 1] ^= 0xFF; // corrupt last footer byte
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: rangeCount > 4 is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    // Force rangeCount to 5 (at offset 16, LE)
+    buf[16] = 0x05;
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: tailGen==0 with non-zero rangeCount is rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    // Build a manifest with rangeCount=1 but tailGeneration=0 — this is malformed.
+    // We can't construct this via serialiseManifest (which is well-behaved), so
+    // we serialise a valid one and then patch tailGeneration to 0 in the raw bytes.
+    ManifestData m;
+    m.epoch          = 2;
+    m.nextGeneration = 5;
+    m.tailGeneration = 4;
+    m.ranges         = {{1, 3}};
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+
+    // tailGeneration is at offset 18 + 1*8 = 26 (after 1 range)
+    // layout: magic(4)+ver(2)+hdr(2)+epoch(4)+nextGen(4)+rangeCount(2)+range(8)+tailGen(4)+crc(4)+footer(4)
+    // tailGen starts at offset: 4+2+2+4+4+2+8 = 26
+    buf[26] = 0x00;
+    buf[27] = 0x00;
+    buf[28] = 0x00;
+    buf[29] = 0x00; // tailGeneration = 0
+
+    // Recompute CRC since we changed the data (otherwise we'd fail CRC first, not the tailGen check)
+    // CRC covers bytes 0 through 29 (offset of crc field = 30)
+    const uint32_t newCrc = crc32(0, buf.data(), 30);
+    buf[30] = static_cast<uint8_t>((newCrc      ) & 0xFF);
+    buf[31] = static_cast<uint8_t>((newCrc >>  8) & 0xFF);
+    buf[32] = static_cast<uint8_t>((newCrc >> 16) & 0xFF);
+    buf[33] = static_cast<uint8_t>((newCrc >> 24) & 0xFF);
+
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: buffer too small returns false") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size() - 1, out));
+    CHECK_FALSE(parseManifest(buf.data(), 0, out));
+#endif
+}
+
+TEST_CASE("manifest: trailing bytes rejected") {
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+    buf.push_back(0x00); // one extra byte
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+namespace {
+// Patch bytes in buf then recompute and overwrite the CRC field.
+// CRC covers bytes [0, crcOffset), which equals headerBytes - 8 (crc(4)+footer(4)).
+void recomputeManifestCrc(std::vector<uint8_t>& buf) {
+    using namespace pqueue::append_log_detail;
+    // headerBytes is at offset 6 (LE u16)
+    const std::size_t headerBytes = std::size_t(buf[6]) | std::size_t(buf[7]) << 8;
+    const std::size_t crcOffset   = headerBytes - 8; // crc(4) + footer(4)
+    const uint32_t newCrc = crc32(0, buf.data(), crcOffset);
+    buf[crcOffset + 0] = static_cast<uint8_t>((newCrc      ) & 0xFF);
+    buf[crcOffset + 1] = static_cast<uint8_t>((newCrc >>  8) & 0xFF);
+    buf[crcOffset + 2] = static_cast<uint8_t>((newCrc >> 16) & 0xFF);
+    buf[crcOffset + 3] = static_cast<uint8_t>((newCrc >> 24) & 0xFF);
+}
+} // namespace
+
+TEST_CASE("manifest: startGen == 0 in range is rejected") {
+    // CRC is recomputed so the failure proves range validation, not CRC.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 2; m.nextGeneration = 5; m.tailGeneration = 4;
+    m.ranges = {{1, 3}};
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+
+    // startGen of first range is at offset 18 (4+2+2+4+4+2 = 18)
+    buf[18] = 0x00; buf[19] = 0x00; buf[20] = 0x00; buf[21] = 0x00;
+    recomputeManifestCrc(buf);
+
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
+TEST_CASE("manifest: endGen < startGen in range is rejected") {
+    // CRC is recomputed so the failure proves range validation, not CRC.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    ManifestData m;
+    m.epoch = 2; m.nextGeneration = 5; m.tailGeneration = 4;
+    m.ranges = {{3, 5}};
+    std::vector<uint8_t> buf;
+    serialiseManifest(m, buf);
+
+    // endGen of first range is at offset 22 (startGen at 18, endGen at 22)
+    buf[22] = 0x01; buf[23] = 0x00; buf[24] = 0x00; buf[25] = 0x00; // endGen = 1 < startGen = 3
+    recomputeManifestCrc(buf);
+
+    ManifestData out;
+    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+#endif
+}
+
 #endif // !ARDUINO

@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstdint>
 
 namespace pqueue::append_log_detail {
 
@@ -24,6 +25,18 @@ std::uint32_t crc32(std::uint32_t crc, const void* data, std::size_t len) {
 }
 
 namespace {
+
+void pushU32(std::vector<std::uint8_t>& buf, std::uint32_t v) {
+    buf.push_back(static_cast<std::uint8_t>((v      ) & 0xFF));
+    buf.push_back(static_cast<std::uint8_t>((v >>  8) & 0xFF));
+    buf.push_back(static_cast<std::uint8_t>((v >> 16) & 0xFF));
+    buf.push_back(static_cast<std::uint8_t>((v >> 24) & 0xFF));
+}
+
+void pushU16(std::vector<std::uint8_t>& buf, std::uint16_t v) {
+    buf.push_back(static_cast<std::uint8_t>((v     ) & 0xFF));
+    buf.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+}
 
 void writeU32(std::string& buf, std::uint32_t v) {
     buf.push_back(static_cast<char>((v      ) & 0xFF));
@@ -198,6 +211,96 @@ bool parsePopEvent(const std::string& bytes, PopEvent& out) {
         && out.headerBytes == kPopEventBytes
         && out.footer == kFooterMagic
         && out.eventCrc == popEventCrc(out);
+}
+
+void serialiseManifest(const ManifestData& manifest, std::vector<std::uint8_t>& out) {
+    const auto rangeCount  = static_cast<std::uint16_t>(manifest.ranges.size());
+    const auto headerBytes = static_cast<std::uint16_t>(kManifestFixedBytes + rangeCount * 8u);
+
+    out.clear();
+    out.reserve(headerBytes);
+
+    pushU32(out, kManifestMagic);
+    pushU16(out, kManifestVersion);
+    pushU16(out, headerBytes);
+    pushU32(out, manifest.epoch);
+    pushU32(out, manifest.nextGeneration);
+    pushU16(out, rangeCount);
+    for (const auto& r : manifest.ranges) {
+        pushU32(out, r.startGen);
+        pushU32(out, r.endGen);
+    }
+    pushU32(out, manifest.tailGeneration);
+
+    const std::uint32_t crc = crc32(0, out.data(), out.size());
+    pushU32(out, crc);
+    pushU32(out, kFooterMagic);
+}
+
+bool parseManifest(const std::uint8_t* data, std::size_t size, ManifestData& out) {
+    if (size < kManifestFixedBytes) return false;
+
+    std::size_t o = 0;
+    auto leU32 = [&](std::uint32_t& v) -> bool {
+        if (o + 4 > size) return false;
+        v = std::uint32_t(data[o])
+          | std::uint32_t(data[o + 1]) <<  8
+          | std::uint32_t(data[o + 2]) << 16
+          | std::uint32_t(data[o + 3]) << 24;
+        o += 4;
+        return true;
+    };
+    auto leU16 = [&](std::uint16_t& v) -> bool {
+        if (o + 2 > size) return false;
+        v = std::uint16_t(data[o]) | std::uint16_t(data[o + 1]) << 8;
+        o += 2;
+        return true;
+    };
+
+    std::uint32_t magic, epoch, nextGeneration, tailGeneration, storedCrc, footer;
+    std::uint16_t version, headerBytes, rangeCount;
+
+    if (!leU32(magic))          return false;
+    if (!leU16(version))        return false;
+    if (!leU16(headerBytes))    return false;
+    if (magic != kManifestMagic)    return false;
+    if (version != kManifestVersion) return false;
+
+    if (!leU32(epoch))          return false;
+    if (!leU32(nextGeneration)) return false;
+    if (!leU16(rangeCount))     return false;
+    if (rangeCount > kManifestMaxRanges) return false;
+
+    const auto expectedHeaderBytes = static_cast<std::uint16_t>(kManifestFixedBytes + rangeCount * 8u);
+    if (headerBytes != expectedHeaderBytes) return false;
+    if (size != headerBytes) return false;
+
+    std::vector<ManifestRange> ranges;
+    ranges.reserve(rangeCount);
+    for (std::uint16_t i = 0; i < rangeCount; ++i) {
+        ManifestRange r;
+        if (!leU32(r.startGen)) return false;
+        if (!leU32(r.endGen))   return false;
+        if (r.startGen == 0)           return false;
+        if (r.endGen < r.startGen)     return false;
+        ranges.push_back(r);
+    }
+
+    if (!leU32(tailGeneration)) return false;
+    if (tailGeneration == 0 && rangeCount != 0) return false;
+
+    const std::uint32_t computedCrc = crc32(0, data, o);
+    if (!leU32(storedCrc)) return false;
+    if (storedCrc != computedCrc) return false;
+
+    if (!leU32(footer)) return false;
+    if (footer != kFooterMagic) return false;
+
+    out.epoch          = epoch;
+    out.nextGeneration = nextGeneration;
+    out.ranges         = std::move(ranges);
+    out.tailGeneration = tailGeneration;
+    return true;
 }
 
 } // namespace pqueue::append_log_detail

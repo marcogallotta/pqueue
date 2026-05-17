@@ -170,16 +170,13 @@ Completed. Removed all compaction-journal artifacts (`CompactionJournalRecord`, 
 
 `scanSegments()` now sets `activeGenerations_ = sortedGenerations` directly — a deliberate placeholder. **Stage 3b must replace this line with `readManifest()`.** Until then, non-monotonic generation orderings (produced by compaction) are not supported; all segments replay in numerically sorted order. This is acceptable because no manifest exists yet to define a different order.
 
-### Stage 1 — Manifest binary format
+### Stage 1 — Manifest binary format (done)
 
-Add `ManifestData`, `serialiseManifest()`, `parseManifest()` to `append_log_common.*`:
+Added `ManifestRange`, `ManifestData`, `serialiseManifest()`, `parseManifest()` to `append_log_common.*`. Also added `kManifestMagic`, `kManifestVersion`, `kManifestFixedBytes`, `kManifestMaxRanges` constants, and `#include <vector>` to the header.
 
-```cpp
-void serialiseManifest(const ManifestData& manifest, std::vector<uint8_t>& out);
-bool parseManifest(const uint8_t* data, size_t size, ManifestData& out);
-```
+`serialiseManifest` writes to `std::vector<uint8_t>& out` (cleared on entry). `parseManifest` takes `const uint8_t* data, size_t size`. Both live in the `pqueue::append_log_detail` namespace.
 
-Unit-test binary layout, CRC, and all `parseManifest()` rejection cases. **Critical test:** a valid manifest with one byte of the CRC corrupted must be rejected — this is the entire basis of crash-safety on mount.
+Tests added: round-trip empty store, round-trip with two ranges, binary layout field offsets, corrupted CRC rejected, wrong magic rejected, wrong version rejected, wrong headerBytes rejected, wrong footer rejected, rangeCount > 4 rejected, tailGen==0 with non-zero rangeCount rejected, buffer too small rejected.
 
 ### Stage 2 — Manifest publish
 
