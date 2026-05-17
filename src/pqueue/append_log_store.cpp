@@ -31,6 +31,31 @@ std::string formatGeneration(std::uint32_t gen) {
     return {buf, 8};
 }
 
+// Returns the manifest slot to write to, or nullptr when at least one slot file
+// exists but no slot is parseable (caller should surface DataCorrupt).
+const char* chooseInactiveSlot(bool existsA, bool validA, std::uint32_t epochA,
+                                bool existsB, bool validB, std::uint32_t epochB) {
+    if (!existsA && !existsB) return kManifestSlotA;  // fresh store
+    if (!validA && !validB)   return nullptr;           // file(s) exist but none parse
+    if (!validA)              return kManifestSlotA;
+    if (!validB)              return kManifestSlotB;
+    // Both valid: write to the lower-epoch slot (it becomes the new winner next read)
+    return (epochB <= epochA) ? kManifestSlotB : kManifestSlotA;
+}
+
+// Selects the winning manifest from two slots. Returns true and sets out if at
+// least one slot is valid; returns false if neither is valid.
+bool chooseWinningSlot(bool validA, const ManifestData& mdA,
+                       bool validB, const ManifestData& mdB,
+                       ManifestData& out) {
+    if (!validA && !validB) return false;
+    if (validA && !validB)  { out = mdA; return true; }
+    if (!validA)            { out = mdB; return true; }
+    // Both valid: higher epoch wins; equal epoch → slot A
+    out = (mdB.epoch > mdA.epoch) ? mdB : mdA;
+    return true;
+}
+
 } // namespace
 
 AppendLogStore::AppendLogStore(AppendLogConfig config)
@@ -310,65 +335,41 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     auto f = fs();
     if (!f) return Status::failure(StatusCode::BackendUnavailable, "no file system");
 
-    // Check existence and validity of each slot independently.
     auto fileExists = [&](const char* name) -> bool {
         std::uint64_t dummy;
         return f->fileSize(name, dummy).ok();
     };
-    auto tryReadEpoch = [&](const char* name, std::uint32_t& epochOut) -> bool {
+    auto tryRead = [&](const char* name, ManifestData& md) -> bool {
         std::string data;
         if (!f->readFile(name, data).ok()) return false;
-        ManifestData md;
-        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md)
-            && (epochOut = md.epoch, true);
+        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
     };
 
     const bool existsA = fileExists(kManifestSlotA);
     const bool existsB = fileExists(kManifestSlotB);
-    std::uint32_t epochA = 0, epochB = 0;
-    const bool validA = existsA && tryReadEpoch(kManifestSlotA, epochA);
-    const bool validB = existsB && tryReadEpoch(kManifestSlotB, epochB);
+    ManifestData mdA, mdB;
+    const bool validA = existsA && tryRead(kManifestSlotA, mdA);
+    const bool validB = existsB && tryRead(kManifestSlotB, mdB);
 
-    // Winning epoch determines the new epoch written to the inactive slot.
-    std::uint32_t winningEpoch = 0;
-    if (validA && epochA > winningEpoch) winningEpoch = epochA;
-    if (validB && epochB > winningEpoch) winningEpoch = epochB;
-
-    // Slot selection. Fail-closed: the only path that writes without a valid
-    // existing slot is when both files are genuinely absent (fresh store). Any
-    // slot file existing is evidence of a previously committed layout — if no
-    // valid slot remains, surface the corruption rather than silently overwriting.
-    const char* writeSlot;
-    if (!existsA && !existsB) {
-        writeSlot = kManifestSlotA; // fresh store
-    } else if (!validA && !validB) {
+    const char* writeSlot = chooseInactiveSlot(existsA, validA, mdA.epoch,
+                                                existsB, validB, mdB.epoch);
+    if (!writeSlot) {
         return Status::failure(StatusCode::DataCorrupt, "manifest slot(s) exist but none are valid");
-    } else if (!validA) {
-        writeSlot = kManifestSlotA;
-    } else if (!validB) {
-        writeSlot = kManifestSlotB;
-    } else if (epochB <= epochA) {
-        writeSlot = kManifestSlotB;
-    } else {
-        writeSlot = kManifestSlotA;
     }
 
+    ManifestData winning;
+    const std::uint32_t winningEpoch =
+        chooseWinningSlot(validA, mdA, validB, mdB, winning) ? winning.epoch : 0;
+
     ManifestData toWrite = manifest;
-    // Epoch overflow (0xFFFFFFFF → 0) is not handled. At realistic ESP32 write
-    // rates this takes decades; no mitigation is planned.
     toWrite.epoch = winningEpoch + 1;
 
     std::vector<std::uint8_t> bytes;
     serialiseManifest(toWrite, bytes);
     const std::string data(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
-    // Write to the inactive slot. Durability note: writeFile() is not an atomic
-    // replace on Posix (truncate-then-write, no fsync), but that is safe here
-    // because we only write to the INACTIVE slot. A partial write leaves that
-    // slot empty or corrupt; it fails CRC on next parse and is treated as
-    // missing/invalid, so the previously-active slot remains the winner on
-    // remount. LittleFS flushes and closes explicitly, and its journal makes
-    // block writes atomic, so the guarantee is stronger there.
+    // Only the inactive slot is written. A partial write leaves that slot corrupt
+    // (fails CRC on next parse); the active slot remains the election winner on remount.
     Status st = f->writeFile(writeSlot, data);
     if (!st.ok()) return st;
 
@@ -389,17 +390,11 @@ bool AppendLogStore::readManifest(ManifestData& out) {
     ManifestData mdA, mdB;
     const bool validA = tryRead(kManifestSlotA, mdA);
     const bool validB = tryRead(kManifestSlotB, mdB);
-
-    if (!validA && !validB) return false;
-    if (validA && !validB) { out = mdA; return true; }
-    if (!validA)           { out = mdB; return true; }
-    // Both valid: higher epoch wins; equal epoch → slot A
-    if (mdB.epoch > mdA.epoch) { out = mdB; return true; }
-    out = mdA;
-    return true;
+    return chooseWinningSlot(validA, mdA, validB, mdB, out);
 }
 
 void AppendLogStore::applyManifestToRam(const ManifestData& md) {
+    manifestRanges_ = md.ranges;
     activeGenerations_.clear();
     for (const auto& r : md.ranges) {
         for (std::uint32_t g = r.startGen; g <= r.endGen; ++g) {
@@ -426,14 +421,47 @@ Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t sta
 }
 
 Status AppendLogStore::rotateSegment() {
-    const std::uint32_t newGen = nextGeneration_;
+    const std::uint32_t oldTailGen = activeGeneration_;
+    const std::uint32_t newGen    = nextGeneration_;
+
+    // Build new full-range list: promote current tail to a closed range, then
+    // merge with the preceding range if contiguous. Check limit before any I/O.
+    std::vector<ManifestRange> newRanges = manifestRanges_;
+    if (oldTailGen != 0) {
+        ManifestRange r{oldTailGen, oldTailGen};
+        if (!newRanges.empty() && newRanges.back().endGen + 1 == r.startGen) {
+            newRanges.back().endGen = r.endGen;
+        } else {
+            newRanges.push_back(r);
+        }
+    }
+    if (newRanges.size() > kManifestMaxRanges) {
+        return Status::failure(StatusCode::RangeLimitExceeded,
+            "segment range limit exceeded; compaction required before rollover");
+    }
+
     const std::uint32_t baseSeq = records_.empty() ? 0 : records_.back().sequence + 1;
-    return createSegment(newGen, baseSeq);
+    Status st = createSegment(newGen, baseSeq);
+    if (!st.ok()) return st;
+
+    ManifestData manifest;
+    manifest.ranges         = std::move(newRanges);
+    manifest.tailGeneration = newGen;
+    manifest.nextGeneration = nextGeneration_;
+    return publishManifest(manifest);
 }
 
 Status AppendLogStore::ensureActiveSegment(std::uint32_t baseSeq) {
     if (activeSegmentBytes_ == 0) {
-        return createSegment(nextGeneration_, baseSeq);
+        const std::uint32_t newGen = nextGeneration_;
+        Status st = createSegment(newGen, baseSeq);
+        if (!st.ok()) return st;
+
+        ManifestData manifest;
+        manifest.ranges         = manifestRanges_;
+        manifest.tailGeneration = newGen;
+        manifest.nextGeneration = nextGeneration_;
+        return publishManifest(manifest);
     }
     return Status::success();
 }
@@ -524,6 +552,7 @@ Status AppendLogStore::compact() {
             }
         }
     }
+    manifestRanges_.clear();
     activeGenerations_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
@@ -710,6 +739,9 @@ Status AppendLogStore::format() {
             f->removeFile(name);
         }
     }
+    f->removeFile(kManifestSlotA);
+    f->removeFile(kManifestSlotB);
+    manifestRanges_.clear();
     activeGenerations_.clear();
     records_.clear();
     hasPendingEnqueue_ = false;

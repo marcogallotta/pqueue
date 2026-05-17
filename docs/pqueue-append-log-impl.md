@@ -1,8 +1,10 @@
 # pqueue Append-Log Implementation Notes
 
+**Editing rules:** ASCII only — no Unicode symbols (no checkmarks, arrows, emoji). This file is compiled to PDF via LaTeX and non-ASCII characters cause build warnings or missing glyphs.
+
 **Design target:** `pqueue-append-log-design.pdf` — dual-manifest, segment-file backend.
 
-**Current code state:** manifest-backed mount is live (Stages 0–3b complete). Segment files are named, scanned, and replayed under manifest authority. Rollover, compaction, and cleanup are not yet wired.
+**Current code state:** Stages 0–4 complete. Manifest-backed mount, slot election, and rollover are live. Every segment rotation publishes a manifest; `RangeLimitExceeded` signals when compaction is required before the next rollover. Compaction and cleanup are not yet wired.
 
 ---
 
@@ -158,7 +160,7 @@ Before starting any stage, read these files to ground yourself in the current co
 
 Do not infer code structure from this document alone. The code is the source of truth for what currently exists.
 
-After completing each stage, update this section: rewrite it to reflect current code state, not the history of how you got there. Keep known limitations and deferred decisions explicit — they are load-bearing information for the next stage.
+After completing each stage, update the "Current implementation state" section to reflect the new code — rewrite it in place, not as a changelog. Then remove the completed stage entry from this list entirely. Completed stages leave no trace here; their details live in the code shape above. Keep known limitations and deferred decisions explicit in that section — they are load-bearing information for the next stage.
 
 ---
 
@@ -166,7 +168,7 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 
 ---
 
-## Current implementation state (Stages 0–3b)
+## Current implementation state (Stages 0–4)
 
 ### Code shape
 
@@ -178,61 +180,57 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 - Segment files: `seg-{08x}.bin`; `SegmentHeader::startSeq` (was `baseSequence`)
 
 **`append_log_store.h/.cpp`** — store layer:
-- `publishManifest(const ManifestData&)` — writes to inactive slot, updates RAM only on success
+- `publishManifest(const ManifestData&)` — writes to inactive slot, updates RAM only on success; uses `chooseInactiveSlot()` / `chooseWinningSlot()` free functions
 - `readManifest(ManifestData& out) → bool` — reads both slots, returns winning manifest or false
-- `applyManifestToRam(const ManifestData&)` — single path for expanding manifest into `activeGenerations_` and `nextGeneration_`; called by both `publishManifest` and `scanSegments`
+- `applyManifestToRam(const ManifestData&)` — single path for expanding manifest into `activeGenerations_`, `nextGeneration_`, and `manifestRanges_`; called by both `publishManifest` and `scanSegments`
+- `rotateSegment()` — promotes current tail to a full range, range-merges, checks limit, creates segment, publishes manifest
+- `ensureActiveSegment()` — publishes manifest after creating the first segment of a session
 - `scanSegments()` — manifest-authoritative mount path (see below)
+- `manifestRanges_` field mirrors `ManifestData::ranges` in RAM; updated on every `applyManifestToRam()` call
+
+### Slot-election helpers (anonymous namespace)
+
+`chooseInactiveSlot(existsA, validA, epochA, existsB, validB, epochB) → const char*`:
+- Both missing → slot A (fresh store)
+- Both exist but neither valid → nullptr (caller returns DataCorrupt)
+- One missing/invalid → that slot
+- Both valid → lower-epoch slot (equal epoch → B)
+
+`chooseWinningSlot(validA, mdA, validB, mdB, out) → bool`:
+- Neither valid → false
+- One valid → that slot
+- Both valid → higher epoch; equal epoch → slot A
 
 ### Mount path (`scanSegments`)
 
-Preamble sets defaults (`activeGenerations_` empty, `activeSegmentBytes_ = 0`, `nextGeneration_ = 1`, `nextSequence_ = 0`), then:
+Preamble sets defaults (`activeGenerations_` empty, `manifestRanges_` empty, `activeSegmentBytes_ = 0`, `nextGeneration_ = 1`, `nextSequence_ = 0`), then:
 
-1. `readManifest()` → if valid, `applyManifestToRam()` sets `activeGenerations_` and `nextGeneration_`
+1. `readManifest()` → if valid, `applyManifestToRam()` sets `activeGenerations_`, `manifestRanges_`, and `nextGeneration_`
 2. If no valid manifest and segment files exist on disk → `DataCorrupt`
 3. If no valid manifest and no segment files → empty store (mount succeeds)
 4. Disk scan advances `nextGeneration_` past all segment files, including dangling ones
 
-Replay loop then iterates `activeGenerations_` in manifest order (not numeric order — correct post-compaction). A referenced segment that is missing or too small → `DataCorrupt`. Torn-tail and corruption rules are unchanged (see section above).
+Replay loop iterates `activeGenerations_` in manifest order (not numeric order). A referenced segment missing or too small → `DataCorrupt`. Torn-tail and corruption rules unchanged.
 
-### Slot election
+### Rollover path (`rotateSegment`)
 
-**Write (publishManifest):** inactive slot is: A if both missing; A if A missing; B if B missing; lower-epoch slot if both valid; B if equal epoch. Epoch on write = `winningEpoch + 1`. If both slot files exist but neither parses → `DataCorrupt` (not a fresh store).
+1. Save `oldTailGen = activeGeneration_`
+2. Build `newRanges = manifestRanges_` + promote `{oldTailGen, oldTailGen}` (merge if contiguous with last range)
+3. If `newRanges.size() > kManifestMaxRanges` → return `RangeLimitExceeded` (check before any I/O; no segment file created)
+4. `createSegment(newGen, baseSeq)` — writes segment header, updates `activeGeneration_`, `activeSegmentBytes_`, `nextGeneration_`
+5. Build `ManifestData{ranges=newRanges, tailGeneration=newGen, nextGeneration=nextGeneration_}`
+6. `publishManifest()` — writes to inactive slot, calls `applyManifestToRam()` on success
 
-**Read (readManifest):** higher epoch wins; equal epoch → slot A. Invalid/corrupt slot treated same as missing.
-
-**Durability:** `publishManifest` only ever writes to the inactive slot. A partial write leaves that slot corrupt (fails CRC); the active slot survives as mount-election winner on next boot. LittleFS block writes are journal-atomic; Posix is truncate-then-write without fsync — both are safe because only the inactive slot is touched.
+Crash between steps 4 and 6: new segment file is dangling. On remount, old manifest wins; dangling file advances `nextGeneration_` (preventing reuse) but is not replayed. Stage 7 cleanup removes it.
 
 ### Known temporary limitations
 
-- **`rotateSegment()` does not publish a manifest** (Stage 4). Any `Queue`-level operation that causes a rotation leaves the new segment unreferenced by the manifest. On remount, the presence of segment files without a manifest returns `DataCorrupt`. This is why 12 pre-existing tests are currently broken (see below).
 - **`needsCompaction()` uses a generation-span heuristic** instead of `activeGenerations_.size()` (Stage 6 TODO comment in code). Overestimates segment pressure before compaction is wired.
-- **Cleanup not implemented** (Stage 7). Dangling segment files left by failed or superseded operations accumulate on disk until then.
-- **Range merging not wired into `publishManifest`** (Stage 4/5). The manifest binary format supports ranges; merging logic needs to run before each publish.
+- **Cleanup not implemented** (Stage 7). Dangling segment files (from failed rotations or superseded compactions) accumulate on disk.
+- **`compact()` for the no-live-records path does not publish an updated manifest** — next `ensureActiveSegment()` call will publish one, but a remount between compact and the next write would see a manifest pointing to deleted segments → DataCorrupt. Acceptable at this stage; addressed in Stage 5c when compaction is fully wired.
 
-### Intentionally broken tests (12) — fixed by Stage 4
 
-All create segments via `Queue` without publishing a manifest; remount returns `DataCorrupt` where they previously succeeded. Stage 4 must restore all 12 before it is considered complete.
-
-- `append-log: persistence across remount`
-- `append-log: pop persists across remount`
-- `append-log: segment rotation persists`
-- `append-log: rewriteFront persists`
-- `append-log: mixed enqueue and pop with persistence`
-- `append-log: corrupt payloadBytes at tail of last segment is recoverable`
-- `append-log: torn tail on active segment is recoverable`
-- `append-log: corrupt CRC at tail of last segment is recoverable`
-- `append-log: corrupt mid-last-segment discards tail from lastGoodOffset`
-- `append-log: nextGeneration advances past all disk generations on remount`
-- `append-log: nextGeneration skips stray high disk generation`
-- `append-log: stale pqueue-compact.bin is ignored`
-
----
-
-### Stage 4 — Rollover wired to manifest
-
-**PREREQUISITE:** All 12 tests listed in Stage 3b must pass before Stage 4 is complete. Wire `publishManifest()` into `rotateSegment()`. Test rollover persists across remount. Test rollover fails cleanly when range limit would be exceeded. **Critical test:** enqueue enough records to force several rollovers, then remount — the full record set must be intact and in FIFO order. A rollover that writes the new segment but fails to publish the manifest must leave the old tail as the tail on next mount.
-
-**Refactor opportunity:** by the end of this stage, slot-election logic exists in two places — `publishManifest()` (chooses the inactive slot to write) and `readManifest()` (chooses the winning slot to read). Extract into two private helpers — `chooseInactiveSlot()` and `chooseWinningSlot()` — to prevent future divergence. The shape of both is clear from actual usage at this point.
+## Implementation order
 
 ### Stage 5a — Range selection
 
@@ -271,5 +269,7 @@ Wire compaction into `writeRecord()`. Update `needsCompaction()` to use `activeG
 
 ### Stage 7 — Cleanup
 
-Implement lazy deletion of dangling segment files. Test: dangling files deleted; referenced files untouched; cleanup crash is safe. **Critical test:** run cleanup with a file that is referenced by the current manifest — it must not be deleted under any circumstances.
+Implement lazy deletion of dangling segment files. Only delete files whose generation is absent from both the winning manifest's `ranges` and its `tailGeneration` — never anything the winning manifest references. A crash mid-delete is safe: the surviving file is re-evaluated on next mount and the manifest is unchanged, so cleanup is idempotent. Test: dangling files deleted; referenced files untouched; cleanup crash is safe. **Critical test:** run cleanup with a file that is referenced by the current manifest — it must not be deleted under any circumstances.
+
+**Sequence exhaustion (low priority, address here or separately):** `nextSequence_` is a `uint32_t`. Wrap-around would silently corrupt FIFO ordering. Fix must fail closed: detect wrap at enqueue time and require `format()` or a repair path rather than continuing.
 

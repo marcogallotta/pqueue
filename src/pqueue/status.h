@@ -29,6 +29,7 @@ enum class StatusCode {
     Dropped,
 
     DataCorrupt,
+    RangeLimitExceeded,
 };
 
 inline const char* statusCodeName(StatusCode code) {
@@ -54,6 +55,7 @@ inline const char* statusCodeName(StatusCode code) {
         case StatusCode::SendFailed: return "send_failed";
         case StatusCode::Dropped: return "dropped";
         case StatusCode::DataCorrupt: return "data_corrupt";
+        case StatusCode::RangeLimitExceeded: return "range_limit_exceeded";
     }
     return "unknown";
 }

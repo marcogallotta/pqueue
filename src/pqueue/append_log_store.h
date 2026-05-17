@@ -104,6 +104,10 @@ private:
     // Logical active segment order (matches replay order from scanSegments)
     std::vector<std::uint32_t> activeGenerations_;
 
+    // Full-segment ranges from the active manifest (mirrors ManifestData::ranges).
+    // Updated by applyManifestToRam() on every successful publishManifest() or mount.
+    std::vector<append_log_detail::ManifestRange> manifestRanges_;
+
     // In-order live records (front = queue head)
     std::deque<SegmentRecord> records_;
 
