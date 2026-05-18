@@ -590,35 +590,56 @@ Status AppendLogStore::compactRange(const CompactionRange& range) {
         return publishManifest(md);
     }
 
-    std::uint32_t liveBytes = kSegmentHeaderBytes;
-    for (const auto& lr : liveRecords) {
-        liveBytes += kEnqueueOverheadBytes + static_cast<std::uint32_t>(lr.payload.size());
+    struct OutputSeg {
+        std::uint32_t gen;
+        std::vector<std::size_t> indices;
+    };
+    std::vector<OutputSeg> outputSegs;
+    {
+        std::uint32_t gen = nextGeneration_;
+        std::uint32_t segBytes = kSegmentHeaderBytes;
+        outputSegs.push_back({gen, {}});
+        for (std::size_t i = 0; i < liveRecords.size(); ++i) {
+            const std::uint32_t recBytes = kEnqueueOverheadBytes +
+                static_cast<std::uint32_t>(liveRecords[i].payload.size());
+            if (!outputSegs.back().indices.empty() && segBytes + recBytes > config_.maxSegmentBytes) {
+                outputSegs.push_back({++gen, {}});
+                segBytes = kSegmentHeaderBytes;
+            }
+            outputSegs.back().indices.push_back(i);
+            segBytes += recBytes;
+        }
     }
-    if (liveBytes > config_.maxSegmentBytes) return Status::noOp();
 
-    std::uint32_t writeOffset = kSegmentHeaderBytes;
+    const std::size_t inputSegCount = static_cast<std::size_t>(range.endGen - range.startGen + 1);
+    if (outputSegs.size() > 1 && outputSegs.size() >= inputSegCount) return Status::noOp();
+
+    const std::uint32_t firstNewGen = outputSegs.front().gen;
+    const std::uint32_t lastNewGen  = outputSegs.back().gen;
+
     std::vector<SegmentRecord> replacements;
     replacements.reserve(liveRecords.size());
-    for (const auto& lr : liveRecords) {
-        SegmentRecord sr;
-        sr.sequence          = lr.sequence;
-        sr.segmentGeneration = nextGeneration_;
-        sr.payloadOffset     = writeOffset + kEnqueueHeaderBytes;
-        sr.payloadBytes      = static_cast<std::uint32_t>(lr.payload.size());
-        replacements.push_back(sr);
-        writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
-    }
 
-    const std::uint32_t newGen = nextGeneration_;
-    std::string segData = serializeSegmentHeader(newGen, liveRecords.front().sequence);
-    for (const auto& lr : liveRecords) {
-        segData += serializeEnqueueEvent(lr.sequence, lr.payload);
+    for (const auto& seg : outputSegs) {
+        std::uint32_t writeOffset = kSegmentHeaderBytes;
+        std::string segData = serializeSegmentHeader(seg.gen, liveRecords[seg.indices.front()].sequence);
+        for (std::size_t idx : seg.indices) {
+            const auto& lr = liveRecords[idx];
+            SegmentRecord sr;
+            sr.sequence          = lr.sequence;
+            sr.segmentGeneration = seg.gen;
+            sr.payloadOffset     = writeOffset + kEnqueueHeaderBytes;
+            sr.payloadBytes      = static_cast<std::uint32_t>(lr.payload.size());
+            replacements.push_back(sr);
+            segData += serializeEnqueueEvent(lr.sequence, lr.payload);
+            writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
+        }
+        st = fs()->writeFile(segmentName(seg.gen), segData);
+        if (!st.ok()) return st;
     }
-    st = fs()->writeFile(segmentName(newGen), segData);
-    if (!st.ok()) return st;
 
     std::vector<ManifestRange> newRanges = manifestRanges_;
-    newRanges[rangeIdx] = {newGen, newGen};
+    newRanges[rangeIdx] = {firstNewGen, lastNewGen};
     if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
         newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
@@ -627,7 +648,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range) {
     ManifestData md;
     md.ranges         = std::move(newRanges);
     md.tailGeneration = activeGeneration_;
-    md.nextGeneration = newGen + 1;
+    md.nextGeneration = lastNewGen + 1;
 
     st = publishManifest(md);
     if (!st.ok()) return st;

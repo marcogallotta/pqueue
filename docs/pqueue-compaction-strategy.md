@@ -133,14 +133,24 @@ All ratio-based strategies (HighestDeadRatio, CostBenefit, AgeWeighted, MinLiveB
 
 ## Next steps
 
-### Step 1: Implement multi-segment compaction output (required before further simulation)
+### Step 1: Re-run simulator and record findings (multi-segment output is now implemented)
 
-Modify `AppendLogStore::compactRange()` in `src/pqueue/append_log_store.cpp`. Currently, if `liveBytes > maxSegmentBytes`, the function returns `Status::noOp()`. The fix: partition the live records across as many output segments as needed (each within `maxSegmentBytes`), write each segment, then publish a manifest where the old range is replaced by a new range spanning all output segment generations. The range count after compaction must not exceed `kManifestMaxRanges`.
+`compactRange()` now partitions live records across multiple output segments when `liveBytes > maxSegmentBytes`. Partitioning uses a greedy fill: records are packed into segments sequentially until the next record would exceed `maxSegmentBytes`, then a new output segment is started. Greedy fill is simple and correct, but it does not minimise the number of output segments in all cases (e.g., bin-packing could achieve fewer segments with unequal record sizes). This is an intentional design choice accepted for v2; whether a smarter packing strategy is worth the added complexity should be re-evaluated once simulator data shows how often bin-packing would produce a materially different result.
 
-The manifest's contiguous-merge logic in `rotateSegment()` (merging adjacent generation numbers into one range) means that if the output segments have consecutive generation numbers, they will form a single range -- so multi-segment output typically does not increase range count at all.
+A key constraint on multi-segment output: if the number of output segments would equal or exceed the number of input segments, compaction is skipped (returns noOp). Compacting a range without reducing its segment count provides no manifest headroom benefit, and it fragments the generation space in a way that breaks contiguous-range merging during subsequent rotations, leading to unbounded range count growth. Multi-segment output is therefore only performed when it strictly reduces segment count (i.e., dead bytes in the range allow at least one segment to be eliminated).
 
-After implementing, re-run the simulator. The deadlock counts should collapse to near zero for all ratio-based strategies, and meaningful differentiation between them should become visible.
+### Initial re-run findings (after multi-segment output)
 
-### Step 2: Re-run simulator and record findings
+Simulator results after implementing multi-segment output are UNCHANGED from before. Deadlock counts remain at 4932-4940 across all workloads. The root cause is a structural mismatch between the simulator workload and the conditions under which multi-segment output fires:
 
-With multi-segment output in place, re-run the full workload sweep and add a findings section here covering: which strategies minimise write amplification, which minimise flash wear, and whether any show unsafe range pressure under heavy load. Update `docs/pqueue-append-log-design.md` future work section to reflect what is still outstanding.
+With `recordSize=64` and `maxSegmentBytes=512`, each segment holds exactly 5 records (floor((512-20)/88) = 5). For a 3-segment range (15 records) to produce fewer than 3 output segments, fewer than 11 records must be live -- requiring more than 33% of records in the range to be popped. The simulator triggers compaction at 25% dead ratio (by bytes), which fires when only 3-4 records in a 15-record range are dead. At that point, 11+ live records still require 3 output segments (outputSegs >= inputSegCount → noOp). Multi-segment output therefore never fires in the current workload.
+
+This is not a bug -- the gating condition is correct. But it means the simulator workload needs adjustment before multi-segment output can be evaluated. Specifically: the dead-ratio trigger must be raised to at least ~35% (the threshold where a full segment can be eliminated from the oldest range), or the record size must be reduced relative to segment size (fewer records per segment means fewer pops are needed to free one segment).
+
+### Step 2: Tune simulator and record findings
+
+Adjust the simulator workload to produce conditions where multi-segment output fires:
+- Raise `deadRatioTrigger` to 0.40-0.50 (allow enough dead records to accumulate before triggering), OR
+- Reduce `recordSize` relative to `maxSegmentBytes` so fewer pops are needed to eliminate a segment
+
+Re-run and record which strategies minimise write amplification and whether deadlocks collapse. Update `docs/pqueue-append-log-design.md` future work section to reflect what is still outstanding.

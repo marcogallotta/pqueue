@@ -2099,8 +2099,8 @@ TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
     CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "w");
 }
 
-TEST_CASE("compaction: compactOneSegment is no-op when live bytes exceed maxSegmentBytes") {
-    // gen=1 holds 2 records (liveBytes=70); maxSegmentBytes=50 < 70 → no-op.
+TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output would not reduce segment count") {
+    // range {1,1} = 1 input segment; live records require 2 output segments; 2 >= 1 → no-op.
     using namespace pqueue::append_log_detail;
     cleanSpool();
     std::filesystem::create_directories(kSpoolDir);
@@ -2444,6 +2444,182 @@ TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
     CHECK(store.compactOneSegment().ok()); // dead range: drops gen=1; second cleanup runs
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
     CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+}
+
+TEST_CASE("compaction: multi-segment output compacts range when output count < input count") {
+    // range {1,3} = 3 input segments; records 1,2 popped → 4 live records fit in 2 output segments.
+    // 2 < 3 → compaction proceeds with multi-segment output.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // seg 1: records 1,2 (will be popped)
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    // seg 2: records 3,4 (live)
+    {
+        std::string seg = serializeSegmentHeader(2, 3);
+        seg += serializeEnqueueEvent(3, "c");
+        seg += serializeEnqueueEvent(4, "d");
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    // seg 3: records 5,6 (live)
+    {
+        std::string seg = serializeSegmentHeader(3, 5);
+        seg += serializeEnqueueEvent(5, "e");
+        seg += serializeEnqueueEvent(6, "f");
+        std::ofstream f(segmentPath(3), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    // seg 4 (tail): pop events for records 1,2
+    {
+        std::string seg = serializeSegmentHeader(4, 7);
+        seg += serializePopEvent(1);
+        seg += serializePopEvent(2);
+        std::ofstream f(segmentPath(4), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 3}};
+        md.tailGeneration = 4;
+        md.nextGeneration = 5;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // 20 header + 2×(24+1) = 70: exactly 2 one-byte records per segment
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    auto st = store.compactOneSegment();
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    // Two new output segments (gen=5,6) written; old range files still present for cleanup
+    CHECK(std::filesystem::exists(segmentPath(5)));
+    CHECK(std::filesystem::exists(segmentPath(6)));
+
+    // manifest now has one range {5,6} and tail=4
+    ManifestData md;
+    CHECK(readManifestSlot('b', md));
+    REQUIRE_EQ(md.ranges.size(), 1u);
+    CHECK_EQ(md.ranges[0].startGen, 5u);
+    CHECK_EQ(md.ranges[0].endGen, 6u);
+    CHECK_EQ(md.tailGeneration, 4u);
+
+    // records 3-6 still readable; records 1-2 are gone (popped)
+    std::string out;
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, "d");
+    CHECK(store.readRecord(5, out).ok()); CHECK_EQ(out, "e");
+    CHECK(store.readRecord(6, out).ok()); CHECK_EQ(out, "f");
+}
+
+TEST_CASE("compaction: multi-segment output survives remount") {
+    // Same setup as previous test; verify state is consistent after remount.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        storeEnqueue(store, 1, "a");
+        storeEnqueue(store, 2, "b");
+        storeEnqueue(store, 3, "c"); // rotation → {1,1}, tail=2
+        storeEnqueue(store, 4, "d");
+        storeEnqueue(store, 5, "e"); // rotation → {1,2}, tail=3
+        storeEnqueue(store, 6, "f");
+        storeEnqueue(store, 7, "g"); // rotation → {1,3}, tail=4
+        storePop(store); // pop seq=1
+        storePop(store); // pop seq=2 → rotation of tail → {1,4}, tail=5
+    }
+
+    // After remount with range {1,4}: records 1,2 popped → 5 live records in 4-seg range.
+    // Live: seq 3..7 (5 records × 25 bytes = 125 bytes). Output segs needed:
+    //   seg0: 20+25+25=70 (seqs 3,4). seg1: 20+25+25=70 (seqs 5,6). seg2: 20+25=45 (seq 7).
+    // 3 output < 4 input → compaction proceeds.
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        CHECK(store.compactOneSegment().ok());
+    }
+
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        std::string out;
+        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+        CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, "d");
+        CHECK(store.readRecord(5, out).ok()); CHECK_EQ(out, "e");
+        CHECK(store.readRecord(6, out).ok()); CHECK_EQ(out, "f");
+        CHECK(store.readRecord(7, out).ok()); CHECK_EQ(out, "g");
+    }
+}
+
+TEST_CASE("compaction: multi-segment output is no-op when output count equals input count") {
+    // range {1,2} = 2 input segments, all records live, live bytes require 2 output segments.
+    // 2 >= 2 → no-op.
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    {
+        std::string seg = serializeSegmentHeader(1, 1);
+        seg += serializeEnqueueEvent(1, "a");
+        seg += serializeEnqueueEvent(2, "b");
+        std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        std::string seg = serializeSegmentHeader(2, 3);
+        seg += serializeEnqueueEvent(3, "c");
+        seg += serializeEnqueueEvent(4, "d");
+        std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
+        f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+    }
+    {
+        std::string hdr = serializeSegmentHeader(3, 5);
+        std::ofstream f(segmentPath(3), std::ios::binary | std::ios::trunc);
+        f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+    }
+    {
+        ManifestData md;
+        md.epoch          = 1;
+        md.ranges         = {{1, 2}};
+        md.tailGeneration = 3;
+        md.nextGeneration = 4;
+        std::vector<std::uint8_t> bytes;
+        serialiseManifest(md, bytes);
+        std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+        f.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    }
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // 4 live records × 25 bytes = 100+20+20 bytes → 2 output segs
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+    auto st = store.compactOneSegment();
+    CHECK(st.ok());
+    CHECK(st.isNoOp());
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4))); // no new segment written
+    CHECK(store.chooseCompactionRange().has_value());     // range still present
 }
 
 TEST_CASE("sequence exhaustion: writeRecord fails closed at UINT32_MAX") {
