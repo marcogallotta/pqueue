@@ -20,7 +20,7 @@ struct AppendLogConfig {
     StorageBackend backend = StorageBackend::Default;
     std::shared_ptr<FileSystem> fileSystem;
     std::uint32_t maxSegmentBytes = 4096;
-    std::uint32_t maxTotalBytes = 128 * 1024;
+    std::uint32_t maxTotalBytes = 128 * 1024; // 0 = unlimited
     std::uint32_t minFreeBytes = 32 * 1024;
     std::uint8_t maxSegments = 16;
     std::size_t maxRecordBytes = 4096;
@@ -69,6 +69,7 @@ public:
         float deadRatio() const { return totalBytes > 0 ? static_cast<float>(deadBytes()) / static_cast<float>(totalBytes) : 0.0f; }
     };
     std::vector<SegmentStat> segmentStats() const;
+    std::uint32_t totalOnDiskBytes() const { return totalOnDiskBytes_; }
 
     const std::vector<append_log_detail::ManifestRange>& manifestRanges() const { return manifestRanges_; }
     std::uint32_t tailGeneration() const { return activeGeneration_; }
@@ -100,6 +101,8 @@ private:
 
     std::string segmentName(std::uint32_t generation) const;
     bool isSegmentName(const std::string& name, std::uint32_t& generationOut) const;
+    std::uint32_t appendGrowthBytes(std::uint32_t recordSize) const;
+    Status writeSegmentFileTracked(const std::string& name, const std::string& data);
 
     Status createSegment(std::uint32_t generation, std::uint32_t startSeq);
     Status rotateSegment();
@@ -129,6 +132,7 @@ private:
     // Active write segment
     std::uint32_t activeGeneration_ = 0;
     std::uint32_t activeSegmentBytes_ = 0;
+    std::uint32_t totalOnDiskBytes_ = 0; // all seg-*.bin files, including dangling
     std::uint32_t nextGeneration_ = 1;
 
     // Logical active segment order (matches replay order from scanSegments)

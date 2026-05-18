@@ -2082,6 +2082,22 @@ void storePop(pqueue::AppendLogStore& store) {
     CHECK(store.writeIndex(idx).ok());
 }
 
+// Sum actual sizes of all seg-*.bin files in kSpoolDir from disk.
+std::uint32_t actualOnDiskBytes() {
+    std::uint32_t total = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(kSpoolDir)) {
+        const std::string name = entry.path().filename().string();
+        if (name.rfind("seg-", 0) == 0 && name.size() > 4) {
+            total += static_cast<std::uint32_t>(std::filesystem::file_size(entry.path()));
+        }
+    }
+    return total;
+}
+
+void checkTracking(pqueue::AppendLogStore& store) {
+    CHECK_EQ(store.totalOnDiskBytes(), actualOnDiskBytes());
+}
+
 } // namespace
 
 TEST_CASE("compaction: collectLiveRecords returns empty for range with no records") {
@@ -2856,6 +2872,131 @@ TEST_CASE("compaction: multi-segment output is no-op when output count equals in
     CHECK(st.isNoOp());
     CHECK_FALSE(std::filesystem::exists(segmentPath(4))); // no new segment written
     CHECK(store.chooseCompactionRange().has_value());     // range still present
+}
+
+TEST_CASE("totalOnDiskBytes tracking: matches actual file sizes after every operation") {
+    // Verifies that the RAM-tracked totalOnDiskBytes() stays in sync with actual
+    // disk after enqueue, pop, rewrite, rotation, compaction, and cleanup.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // header(20) + 2 records(25 each) = 70
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+    checkTracking(store); // empty store: 0
+
+    storeEnqueue(store, 1, "a"); checkTracking(store);
+    storeEnqueue(store, 2, "b"); checkTracking(store);
+    storeEnqueue(store, 3, "c"); checkTracking(store); // rotation: gen=1 full, gen=2 tail
+
+    CHECK(store.rewriteRecord(1, "x").ok()); checkTracking(store); // rewrite in gen=2
+
+    storePop(store); checkTracking(store); // pop seq=1; POP event appended
+
+    // compact: gen=1 (dead bytes from pop) → gen=3; gen=1 becomes dangling
+    CHECK(store.compactOneSegment().ok()); checkTracking(store);
+
+    // cleanup runs inside the next publishManifest; trigger via another enqueue cycle
+    storeEnqueue(store, 4, "d"); checkTracking(store);
+
+    // Remount: tracking reinitialised from disk
+    pqueue::AppendLogStore store2(cfg);
+    CHECK(store2.mount().ok());
+    checkTracking(store2);
+}
+
+TEST_CASE("maxTotalBytes: enqueue blocked when footprint full and nothing to compact") {
+    // Two live records fill the active segment to exactly maxTotalBytes.
+    // A third enqueue would exceed it; compaction no-ops (no dead bytes); writeRecord
+    // must return QueueFull without writing anything.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // header=20, each 1-byte record=25; two records fill segment to 70 bytes exactly.
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    cfg.maxTotalBytes   = 70; // footprint cap == current segment size
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b"); // on-disk footprint = 70 bytes; cap reached
+
+    const auto st = store.writeRecord(3, "c");
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::QueueFull);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2))); // no rotation triggered
+
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+}
+
+TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
+    // After a pop creates dead bytes in a full range, a subsequent enqueue that would
+    // exceed maxTotalBytes triggers compaction automatically and then succeeds.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    cfg.maxTotalBytes   = 120;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storePop(store); // pop seq=1; POP event overflows gen=1 → rotation to gen=2
+                     // gen=1: 70 bytes (full range), gen=2: 40 bytes (header+pop)
+
+    // footprint=110; +25 for enqueue=135 > 120 → compact gen=1 → gen=3(45b); then fits
+    CHECK(store.writeRecord(3, "c").ok());
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    CHECK(store.writeIndex(idx).ok());
+
+    std::string out;
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+
+    // remount: store survives with correct layout
+    pqueue::AppendLogStore store2(cfg);
+    CHECK(store2.mount().ok());
+    CHECK(store2.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store2.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+}
+
+TEST_CASE("maxTotalBytes: DropOldest evicts and retries when writeRecord returns QueueFull") {
+#ifndef ARDUINO
+    // gen=1 holds a 50-byte record (94 bytes on disk); gen=2 is the tail (45 bytes).
+    // totalOnDisk=139 == maxTotalBytes. enqueue("c") triggers compaction, but gen=1 is
+    // fully live so it no-ops → writeRecord returns QueueFull. The DropOldest retry
+    // evicts "a" (POP lands in gen=2, no rotation), making gen=1 a dead range. The
+    // second writeRecord call compacts gen=1 away (94 bytes freed) and writes "c".
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 100;
+    cfg.reservedBytes   = 139; // gen1(94 bytes) + gen2(45 bytes)
+    cfg.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
+    pqueue::Queue q(cfg);
+
+    REQUIRE(q.enqueue(std::string(50, 'a')).ok()); // gen=1: header(20) + event(74) = 94 bytes
+    REQUIRE(q.enqueue("b").ok());                   // 94+25>100 → rotate; gen=2: 20+25=45; total=139
+    CHECK(q.enqueue("c").ok());                     // canEnqueue passes; writeRecord→QueueFull→evict→retry
+
+    CHECK_EQ(q.stats().count, 2U);
+
+    std::string out;
+    REQUIRE(q.peek(out).ok());
+    CHECK_EQ(out, "b");
+    q.pop();
+    REQUIRE(q.peek(out).ok());
+    CHECK_EQ(out, "c");
+#endif
 }
 
 TEST_CASE("sequence exhaustion: writeRecord fails closed at UINT32_MAX") {

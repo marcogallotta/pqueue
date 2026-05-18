@@ -329,6 +329,15 @@ Status AppendLogStore::scanSegments() {
         }
     }
 
+    // Initialize RAM footprint counter from all segment files on disk (including dangling).
+    totalOnDiskBytes_ = 0;
+    for (std::uint32_t gen : sortedGenerations) {
+        std::uint64_t sz = 0;
+        Status szSt = f->fileSize(segmentName(gen), sz);
+        if (!szSt.ok()) return szSt;
+        totalOnDiskBytes_ += static_cast<std::uint32_t>(sz);
+    }
+
     cleanupOneDanglingSegment();
     return Status::success();
 }
@@ -412,7 +421,7 @@ void AppendLogStore::applyManifestToRam(const ManifestData& md) {
 
 Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {
     const std::string headerBytes = serializeSegmentHeader(generation, startSeq);
-    return fs()->writeFile(segmentName(generation), headerBytes);
+    return writeSegmentFileTracked(segmentName(generation), headerBytes);
 }
 
 Status AppendLogStore::rotateSegment() {
@@ -477,7 +486,9 @@ Status AppendLogStore::ensureActiveSegment(std::uint32_t baseSeq) {
 Status AppendLogStore::appendEnqueueEventBytes(const std::string& eventBytes) {
     Status st = fs()->writeAt(segmentName(activeGeneration_), activeSegmentBytes_, eventBytes);
     if (st.ok()) {
-        activeSegmentBytes_ += static_cast<std::uint32_t>(eventBytes.size());
+        const auto n = static_cast<std::uint32_t>(eventBytes.size());
+        activeSegmentBytes_ += n;
+        totalOnDiskBytes_   += n;
     }
     return st;
 }
@@ -494,7 +505,9 @@ Status AppendLogStore::appendPopEvent(std::uint32_t sequence) {
     const std::string eventBytes = serializePopEvent(sequence);
     st = fs()->writeAt(segmentName(activeGeneration_), activeSegmentBytes_, eventBytes);
     if (st.ok()) {
-        activeSegmentBytes_ += static_cast<std::uint32_t>(eventBytes.size());
+        const auto n = static_cast<std::uint32_t>(eventBytes.size());
+        activeSegmentBytes_ += n;
+        totalOnDiskBytes_   += n;
     }
     return st;
 }
@@ -513,7 +526,9 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     const std::string eventBytes = serializeRewriteEvent(sequence, record);
     Status st = fs()->writeAt(segmentName(activeGeneration_), activeSegmentBytes_, eventBytes);
     if (!st.ok()) return st;
-    activeSegmentBytes_ += static_cast<std::uint32_t>(eventBytes.size());
+    const auto n = static_cast<std::uint32_t>(eventBytes.size());
+    activeSegmentBytes_ += n;
+    totalOnDiskBytes_   += n;
 
     // Update RAM state for rewritten record
     for (auto& r : records_) {
@@ -609,6 +624,31 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
     return result;
 }
 
+Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const std::string& data) {
+    std::uint64_t oldSize = 0;
+    // fileSize failure (file absent or I/O error) leaves oldSize = 0. If the file is
+    // genuinely absent this is correct. If fileSize fails for another reason but writeFile
+    // succeeds below, tracking would drift — but in practice both operations hit the same
+    // underlying storage, so writeFile would also fail and we'd return early.
+    fs()->fileSize(name, oldSize);
+    Status st = fs()->writeFile(name, data);
+    if (!st.ok()) return st;
+    const auto newSz = static_cast<std::uint32_t>(data.size());
+    const auto oldSz = static_cast<std::uint32_t>(oldSize);
+    if (newSz >= oldSz) totalOnDiskBytes_ += newSz - oldSz;
+    else                totalOnDiskBytes_ -= oldSz - newSz;
+    return Status::success();
+}
+
+std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const {
+    const std::uint32_t eventBytes = kEnqueueOverheadBytes + recordSize;
+    const bool needsNewSegment =
+        activeSegmentBytes_ == 0 ||
+        (activeSegmentBytes_ > kSegmentHeaderBytes &&
+         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes);
+    return eventBytes + (needsNewSegment ? kSegmentHeaderBytes : 0);
+}
+
 Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
     auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
         [&](const ManifestRange& r) {
@@ -700,7 +740,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             segData += serializeEnqueueEvent(lr.sequence, lr.payload);
             writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
         }
-        st = fs()->writeFile(segmentName(seg.gen), segData);
+        st = writeSegmentFileTracked(segmentName(seg.gen), segData);
         if (!st.ok()) return st;
     }
 
@@ -772,7 +812,11 @@ void AppendLogStore::cleanupOneDanglingSegment() {
         const bool live = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
                           != activeGenerations_.end();
         if (live) continue;
-        f->removeFile(name); // best-effort; crash leaves an extra file, safe on remount
+        std::uint64_t sz = 0;
+        f->fileSize(name, sz);
+        if (f->removeFile(name).ok()) {
+            totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
+        }
         return;
     }
 }
@@ -808,6 +852,33 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     }
 
     const std::uint32_t eventBytes = kEnqueueOverheadBytes + static_cast<std::uint32_t>(record.size());
+
+    // maxTotalBytes enforcement: compact until footprint fits or nothing left to reclaim.
+    // minFreeBytes is the hard floor; maxTotalBytes is a per-queue soft cap enforced here
+    // rather than in canEnqueue() so that compaction gets a chance to make room first.
+    if (config_.maxTotalBytes > 0) {
+        while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) > config_.maxTotalBytes) {
+            Status compact = compactOneSegment();
+            if (!compact.ok()) return diagnostic(Severity::Error, compact, "writeRecord");
+            if (compact.isNoOp()) {
+                return diagnostic(Severity::Warning,
+                    Status::failure(StatusCode::QueueFull, "queue footprint limit reached"),
+                    "writeRecord");
+            }
+        }
+    }
+
+    // Hard FS floor: canEnqueue() no longer requires free space for the record itself
+    // (only the minFreeBytes reserve), so writeRecord is authoritative here.
+    if (config_.minFreeBytes > 0) {
+        const std::uint64_t free = freeBytes();
+        const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
+        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth) {
+            return diagnostic(Severity::Warning,
+                Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
+                "writeRecord");
+        }
+    }
 
     // Ensure we have an active segment, rotating or compacting if needed
     if (activeSegmentBytes_ > kSegmentHeaderBytes &&
@@ -935,9 +1006,11 @@ std::uint64_t AppendLogStore::freeBytes() const {
     return fs_ ? fs_->freeBytes() : 0;
 }
 
-bool AppendLogStore::canEnqueue(std::size_t recordSize, std::uint32_t /*currentCount*/) const {
-    const auto overhead = static_cast<std::uint64_t>(append_log_detail::kEnqueueOverheadBytes);
-    return freeBytes() >= config_.minFreeBytes + recordSize + overhead;
+bool AppendLogStore::canEnqueue(std::size_t /*recordSize*/, std::uint32_t /*currentCount*/) const {
+    // Only checks the hard FS floor. Finer admission (maxTotalBytes cap, required record
+    // headroom) is enforced inside writeRecord() after a compaction attempt. Checking any
+    // of that here would block the write that triggers compaction.
+    return freeBytes() >= config_.minFreeBytes;
 }
 
 Status AppendLogStore::format() {

@@ -292,6 +292,16 @@ Status Queue::enqueue(const std::string& record) {
 
     const std::uint32_t sequence = index_.tail;
     st = store_->writeRecord(sequence, record);
+    if (!st.ok() && st.code == StatusCode::QueueFull &&
+        config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
+        // writeRecord may return QueueFull when maxTotalBytes is exhausted and compaction
+        // finds nothing to reclaim. Evicting the front record creates dead bytes that the
+        // next writeRecord call can compact away to make room.
+        const Status evictStatus = evictFront();
+        if (!evictStatus.ok()) return evictStatus;
+        diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
+        st = store_->writeRecord(sequence, record);
+    }
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "enqueue");
     }
