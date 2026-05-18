@@ -204,19 +204,13 @@ These are confirmed code defects or API contract violations, ordered by priority
 
 Fix: replace `chooseCompactionRange()` with a `HighestDeadRatio` selector -- compute dead bytes per full range using `segmentStats()`, pick the range with the highest dead/total ratio, and return nullopt if no range has any dead bytes. Wire `segmentStats()` into the selector (it already exists). `needsCompaction()` should also gain a dead-ratio check alongside the segment-count and free-space checks, so the trigger fires when there is actually something to reclaim.
 
-### 2. 1-input to 1-output compaction is not gated out (minor correctness)
-
-`compactRange()` line 616: `if (outputSegs.size() > 1 && outputSegs.size() >= inputSegCount)`. When `inputSegCount == 1` and `outputSegs.size() == 1` the condition is false and compaction proceeds, creating a new segment generation with identical content and no dead bytes reclaimed. This wastes a flash write and a generation number.
-
-Fix: change the condition to `if (outputSegs.size() >= inputSegCount)`. A compaction that does not reduce segment count is never useful and should be a no-op.
-
-### 3. Post-compaction range merge is one-sided
+### 2. Post-compaction range merge is one-sided
 
 After `compactRange()` replaces a range with a new one (lines 643-648), it only checks whether the replacement merges with the next range. It does not check the previous range. This is currently harmless because `chooseCompactionRange()` always picks `manifestRanges_[0]` (no previous range), but will become a real gap once finding 1 is fixed and the selector can pick any range.
 
 Fix: after replacing the range, attempt to merge with both the preceding and following ranges in a single normalization pass. This is also the right place to enforce the 64-byte manifest size limit as a pre-publish assertion.
 
-### 4. `maxTotalBytes` / `reservedBytes` is configured but not enforced
+### 3. `maxTotalBytes` / `reservedBytes` is configured but not enforced
 
 `Queue::open()` maps `config.reservedBytes` to `appendConfig.maxTotalBytes`. `AppendLogStore` stores this value but `canEnqueue()` never reads it -- capacity is checked only against filesystem free bytes minus `minFreeBytes`. The field is dead and the documented capacity reservation does nothing.
 

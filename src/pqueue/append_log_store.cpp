@@ -618,7 +618,30 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     }
 
     const std::size_t inputSegCount = static_cast<std::size_t>(range.endGen - range.startGen + 1);
-    if (outputSegs.size() > 1 && outputSegs.size() >= inputSegCount) return Status::noOp();
+
+    // Compute total live bytes across all output segments.
+    std::uint32_t totalLiveBytes = 0;
+    for (const auto& seg : outputSegs) {
+        totalLiveBytes += kSegmentHeaderBytes;
+        for (std::size_t idx : seg.indices) {
+            totalLiveBytes += kEnqueueOverheadBytes +
+                static_cast<std::uint32_t>(liveRecords[idx].payload.size());
+        }
+    }
+    // Compute total input bytes from disk.
+    std::uint32_t totalInputBytes = 0;
+    for (std::uint32_t gen = range.startGen; gen <= range.endGen; ++gen) {
+        std::uint64_t sz = 0;
+        Status sizeSt = fs()->fileSize(segmentName(gen), sz);
+        if (!sizeSt.ok()) return sizeSt;
+        totalInputBytes += static_cast<std::uint32_t>(sz);
+    }
+    const bool hasDeadBytes = totalLiveBytes < totalInputBytes;
+
+    // Never allow compaction to increase segment count — that worsens manifest pressure.
+    if (outputSegs.size() > inputSegCount) return Status::noOp();
+    // Same-count compaction is only useful when dead bytes exist to reclaim.
+    if (outputSegs.size() == inputSegCount && !hasDeadBytes) return Status::noOp();
     if (outputSegCount) *outputSegCount = static_cast<std::uint32_t>(outputSegs.size());
 
     const std::uint32_t firstNewGen = outputSegs.front().gen;

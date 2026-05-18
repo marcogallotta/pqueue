@@ -2198,6 +2198,45 @@ TEST_CASE("compaction: compactOneSegment removes dead range without writing a ne
     CHECK_EQ(out, "c");
 }
 
+TEST_CASE("compaction: compactOneSegment is no-op when 1-in-1-out with no dead bytes") {
+    // Regression: a fully live single-segment range produces 1 output segment,
+    // which equals the input count with no dead bytes. Must be a no-op — writing
+    // a new segment would waste flash and a generation number for zero benefit.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // fits exactly 2 one-byte records per segment
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3); no dead bytes
+
+    const auto st = store.compactOneSegment();
+    CHECK(st.ok());
+    CHECK(st.isNoOp());
+
+    // No new compacted segment created.
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+
+    // All records still readable from their original segments.
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+
+    // Fresh remount is valid and reads all records.
+    {
+        pqueue::AppendLogStore store2(cfg);
+        CHECK(store2.mount().ok());
+        CHECK(store2.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+        CHECK(store2.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+        CHECK(store2.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    }
+}
+
 TEST_CASE("compaction: compactOneSegment preserves live records in FIFO order") {
     cleanSpool();
     std::filesystem::create_directories(kSpoolDir);
@@ -2209,14 +2248,16 @@ TEST_CASE("compaction: compactOneSegment preserves live records in FIFO order") 
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
+    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3)
+
+    // Pop seq=1 to create dead bytes in gen=1 (compaction is a no-op with no dead bytes).
+    storePop(store);
 
     CHECK(store.compactOneSegment().ok());
 
-    // gen=3 was written; records are accessible in order
+    // gen=3 written with seq=2 only; gen=1 dangling and cleaned up.
     CHECK(std::filesystem::exists(segmentPath(3)));
     std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
     CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
     CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
 }
@@ -2299,6 +2340,9 @@ TEST_CASE("cleanup: compactOneSegment deletes old segment file after publish") {
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
     storeEnqueue(store, 3, "c"); // gen=1 -> full range, gen=2 = tail
+
+    // Pop seq=1 to create dead bytes in gen=1; compaction is a no-op with no dead bytes.
+    storePop(store);
 
     CHECK(store.compactOneSegment().ok()); // compacts gen=1 -> gen=3; cleanup removes gen=1
     CHECK_FALSE(std::filesystem::exists(segmentPath(1))); // cleaned up
@@ -2524,15 +2568,17 @@ TEST_CASE("cleanup: referenced segment is never deleted (critical)") {
     storeEnqueue(store, 2, "b");
     storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
 
-    CHECK(store.compactOneSegment().ok()); // gen=1 -> gen=3; cleanup removes gen=1
+    // Pop seq=1 to create dead bytes in gen=1; compaction is a no-op with no dead bytes.
+    storePop(store);
+
+    CHECK(store.compactOneSegment().ok()); // gen=1 -> gen=3 (seq=2 only); cleanup removes gen=1
 
     // Manifest references gen=2 (tail) and gen=3 (compacted). Both must exist.
     CHECK(std::filesystem::exists(segmentPath(2)));
     CHECK(std::filesystem::exists(segmentPath(3)));
 
-    // All records still readable
+    // Live records still readable (seq=1 was popped).
     std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
     CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
     CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
 }
@@ -2587,7 +2633,11 @@ TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
     CHECK((gen3gone || gen4gone));   // at least one removed
     CHECK_FALSE((gen3gone && gen4gone)); // not both (one per cleanup pass)
 
-    // Trigger a second publish (compact the dead range) — removes the other dangling file
+    // Pop both records so gen=1 is fully dead, then compact (dead-range removal triggers publish).
+    storePop(store);
+    storePop(store);
+
+    // Trigger a second publish (dead-range removal) — removes the other dangling file.
     CHECK(store.compactOneSegment().ok()); // dead range: drops gen=1; second cleanup runs
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
     CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
