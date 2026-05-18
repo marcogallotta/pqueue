@@ -15,7 +15,9 @@ SIM_TARGET := $(BUILD_DIR)/pqueue-compaction-sim
 
 PQUEUE_SRC := \
 	src/pqueue/append_log_common.cpp \
-	src/pqueue/append_log_store.cpp \
+	src/pqueue/append_log_store/store.cpp \
+	src/pqueue/append_log_store/manifest.cpp \
+	src/pqueue/append_log_store/compaction.cpp \
 	src/pqueue/envelope.cpp \
 	src/pqueue/http/esp32_arduino_transport.cpp \
 	src/pqueue/http/outbox.cpp \

@@ -154,9 +154,12 @@ After each successful manifest publish, a cleanup pass may run. Cleanup lists al
 
 Before starting any stage, read these files to ground yourself in the current code:
 
-- `src/pqueue/append_log_common.h` / `.cpp` — binary format, serialisers, parsers
-- `src/pqueue/append_log_store.h` / `.cpp` — main implementation
-- `tests/posix/pqueue_append_log.cpp` — primary test file
+- `src/pqueue/append_log_common.h` / `.cpp` -- binary format, serialisers, parsers
+- `src/pqueue/append_log_store.h` -- public class declaration and config
+- `src/pqueue/append_log_store/store.cpp` -- constructor, fs helpers, diagnostics, segment naming, mount/recovery/scanSegments, public Store API, format/rebuildMetadata, validateUnlocked
+- `src/pqueue/append_log_store/manifest.cpp` -- publishManifest, readManifest, applyManifestToRam, slot election helpers
+- `src/pqueue/append_log_store/compaction.cpp` -- chooseCompactionRange, collectLiveRecords, segmentStats, compactRange, compactOneSegment, compactFull, needsCompaction, cleanupOneDanglingSegment
+- `tests/posix/pqueue_append_log.cpp` -- primary test file
 
 Do not infer code structure from this document alone. The code is the source of truth for what currently exists.
 
@@ -172,7 +175,7 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 
 **`append_log_common.h/.cpp`** defines the binary format layer (`pqueue::append_log_detail` namespace): `ManifestRange { startGen, endGen }`, `ManifestData { epoch, nextGeneration, tailGeneration, ranges }`, `serialiseManifest` / `parseManifest`, and the segment/event serialisers and parsers. `parseManifest` returns false (not `DataCorrupt`) on any validation failure; the caller treats an invalid slot the same as a missing one. Segment files are named `seg-{08x}.bin`.
 
-**`append_log_store.h/.cpp`** is the store layer. The manifest is authoritative for everything: which segments exist, in what order to replay them, and what generation to allocate next. All RAM state is derived from the manifest on mount and kept in sync on every write.
+**`append_log_store.h`** declares the store layer. The implementation is split across three files in `src/pqueue/append_log_store/`: `store.cpp` (constructor, fs helpers, diagnostics, segment naming, mount/recovery/scanSegments, public Store API, format/rebuildMetadata, validateUnlocked), `manifest.cpp` (publishManifest, readManifest, applyManifestToRam, slot election helpers), and `compaction.cpp` (chooseCompactionRange, collectLiveRecords, segmentStats, compactRange, compactOneSegment, compactFull, needsCompaction, cleanupOneDanglingSegment). All three files implement methods of the same `AppendLogStore` class; no state was moved. The manifest is authoritative for everything: which segments exist, in what order to replay them, and what generation to allocate next. All RAM state is derived from the manifest on mount and kept in sync on every write.
 
 **Slot election.** Two anonymous-namespace helpers handle the A/B slots. `chooseInactiveSlot` selects where to write next: both missing → slot A; both exist but neither valid → nullptr (DataCorrupt); one missing/invalid → that slot; both valid → lower-epoch slot (equal epoch → B). `chooseWinningSlot` selects which slot to read: neither valid → false; one valid → that slot; both valid → higher epoch (equal epoch → A). `publishManifest` writes to the inactive slot, then calls `applyManifestToRam` only on success. `readManifest` applies `chooseWinningSlot` and returns the winner.
 

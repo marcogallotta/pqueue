@@ -1,11 +1,10 @@
-#include "append_log_store.h"
-#include "append_log_common.h"
+#include "pqueue/append_log_store.h"
+#include "pqueue/append_log_common.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <limits>
-#include <unordered_map>
 #include <vector>
 
 namespace pqueue {
@@ -16,6 +15,7 @@ namespace {
 
 constexpr const char* kSegmentPrefix  = "seg-";
 constexpr const char* kSegmentSuffix  = ".bin";
+// Duplicated from manifest.cpp for format() cleanup; do not create a shared header for these.
 constexpr const char* kManifestSlotA  = "manifest-a.bin";
 constexpr const char* kManifestSlotB  = "manifest-b.bin";
 
@@ -30,31 +30,6 @@ std::string formatGeneration(std::uint32_t gen) {
     char buf[9];
     std::snprintf(buf, sizeof(buf), "%08x", static_cast<unsigned>(gen));
     return {buf, 8};
-}
-
-// Returns the manifest slot to write to, or nullptr when at least one slot file
-// exists but no slot is parseable (caller should surface DataCorrupt).
-const char* chooseInactiveSlot(bool existsA, bool validA, std::uint32_t epochA,
-                                bool existsB, bool validB, std::uint32_t epochB) {
-    if (!existsA && !existsB) return kManifestSlotA;  // fresh store
-    if (!validA && !validB)   return nullptr;           // file(s) exist but none parse
-    if (!validA)              return kManifestSlotA;
-    if (!validB)              return kManifestSlotB;
-    // Both valid: write to the lower-epoch slot (it becomes the new winner next read)
-    return (epochB <= epochA) ? kManifestSlotB : kManifestSlotA;
-}
-
-// Selects the winning manifest from two slots. Returns true and sets out if at
-// least one slot is valid; returns false if neither is valid.
-bool chooseWinningSlot(bool validA, const ManifestData& mdA,
-                       bool validB, const ManifestData& mdB,
-                       ManifestData& out) {
-    if (!validA && !validB) return false;
-    if (validA && !validB)  { out = mdA; return true; }
-    if (!validA)            { out = mdB; return true; }
-    // Both valid: higher epoch wins; equal epoch → slot A
-    out = (mdB.epoch > mdA.epoch) ? mdB : mdA;
-    return true;
 }
 
 } // namespace
@@ -342,83 +317,6 @@ Status AppendLogStore::scanSegments() {
     return Status::success();
 }
 
-Status AppendLogStore::publishManifest(const ManifestData& manifest) {
-    auto f = fs();
-    if (!f) return Status::failure(StatusCode::BackendUnavailable, "no file system");
-
-    auto fileExists = [&](const char* name) -> bool {
-        std::uint64_t dummy;
-        return f->fileSize(name, dummy).ok();
-    };
-    auto tryRead = [&](const char* name, ManifestData& md) -> bool {
-        std::string data;
-        if (!f->readFile(name, data).ok()) return false;
-        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
-    };
-
-    const bool existsA = fileExists(kManifestSlotA);
-    const bool existsB = fileExists(kManifestSlotB);
-    ManifestData mdA, mdB;
-    const bool validA = existsA && tryRead(kManifestSlotA, mdA);
-    const bool validB = existsB && tryRead(kManifestSlotB, mdB);
-
-    const char* writeSlot = chooseInactiveSlot(existsA, validA, mdA.epoch,
-                                                existsB, validB, mdB.epoch);
-    if (!writeSlot) {
-        return Status::failure(StatusCode::DataCorrupt, "manifest slot(s) exist but none are valid");
-    }
-
-    ManifestData winning;
-    const std::uint32_t winningEpoch =
-        chooseWinningSlot(validA, mdA, validB, mdB, winning) ? winning.epoch : 0;
-
-    ManifestData toWrite = manifest;
-    toWrite.epoch = winningEpoch + 1;
-
-    std::vector<std::uint8_t> bytes;
-    serialiseManifest(toWrite, bytes);
-    const std::string data(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-
-    // Only the inactive slot is written. A partial write leaves that slot corrupt
-    // (fails CRC on next parse); the active slot remains the election winner on remount.
-    Status st = f->writeFile(writeSlot, data);
-    if (!st.ok()) return st;
-
-    applyManifestToRam(toWrite);
-    cleanupOneDanglingSegment();
-    return Status::success();
-}
-
-bool AppendLogStore::readManifest(ManifestData& out) {
-    auto f = fs();
-    if (!f) return false;
-
-    auto tryRead = [&](const char* name, ManifestData& md) -> bool {
-        std::string data;
-        if (!f->readFile(name, data).ok()) return false;
-        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
-    };
-
-    ManifestData mdA, mdB;
-    const bool validA = tryRead(kManifestSlotA, mdA);
-    const bool validB = tryRead(kManifestSlotB, mdB);
-    return chooseWinningSlot(validA, mdA, validB, mdB, out);
-}
-
-void AppendLogStore::applyManifestToRam(const ManifestData& md) {
-    manifestRanges_ = md.ranges;
-    activeGenerations_.clear();
-    for (const auto& r : md.ranges) {
-        for (std::uint32_t g = r.startGen; g <= r.endGen; ++g) {
-            activeGenerations_.push_back(g);
-        }
-    }
-    if (md.tailGeneration != 0) {
-        activeGenerations_.push_back(md.tailGeneration);
-    }
-    nextGeneration_ = md.nextGeneration;
-}
-
 Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {
     const std::string headerBytes = serializeSegmentHeader(generation, startSeq);
     return writeSegmentFileTracked(segmentName(generation), headerBytes);
@@ -542,88 +440,6 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     return Status::success();
 }
 
-std::optional<AppendLogStore::CompactionRange> AppendLogStore::chooseCompactionRange() const {
-    if (manifestRanges_.empty()) return std::nullopt;
-
-    const auto stats = segmentStats();
-
-    std::size_t bestIdx   = manifestRanges_.size();
-    float       bestRatio = -1.0f;
-    for (std::size_t i = 0; i < manifestRanges_.size(); ++i) {
-        const auto& r = manifestRanges_[i];
-
-        bool hasLive = false;
-        for (const auto& rec : records_) {
-            if (rec.segmentGeneration >= r.startGen && rec.segmentGeneration <= r.endGen) {
-                hasLive = true;
-                break;
-            }
-        }
-        if (!hasLive) {
-            return CompactionRange{r.startGen, r.endGen};
-        }
-
-        std::uint32_t total = 0;
-        std::uint32_t dead  = 0;
-        for (const auto& s : stats) {
-            if (s.generation < r.startGen || s.generation > r.endGen) continue;
-            total += s.totalBytes;
-            dead  += s.deadBytes();
-        }
-        if (total == 0) continue;
-        const float ratio = static_cast<float>(dead) / static_cast<float>(total);
-        if (ratio > bestRatio) {
-            bestRatio = ratio;
-            bestIdx   = i;
-        }
-    }
-
-    if (bestRatio <= 0.0f || bestIdx >= manifestRanges_.size()) return std::nullopt;
-    const auto& best = manifestRanges_[bestIdx];
-    return CompactionRange{best.startGen, best.endGen};
-}
-
-Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
-                                          std::vector<CompactionLiveRecord>& out) const {
-    out.clear();
-    for (const SegmentRecord& sr : records_) {
-        if (sr.segmentGeneration < range.startGen || sr.segmentGeneration > range.endGen) {
-            continue;
-        }
-        CompactionLiveRecord lr;
-        lr.sequence = sr.sequence;
-        Status st = fs_->readAt(segmentName(sr.segmentGeneration),
-                                sr.payloadOffset, sr.payloadBytes, lr.payload);
-        if (!st.ok()) return st;
-        out.push_back(std::move(lr));
-    }
-    return Status::success();
-}
-
-std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
-    std::vector<SegmentStat> result;
-
-    std::unordered_map<std::uint32_t, std::uint32_t> liveByGen;
-    for (const auto& sr : records_) {
-        liveByGen[sr.segmentGeneration] += kEnqueueOverheadBytes + sr.payloadBytes;
-    }
-
-    for (const auto& range : manifestRanges_) {
-        for (std::uint32_t gen = range.startGen; gen <= range.endGen; ++gen) {
-            SegmentStat stat;
-            stat.generation = gen;
-            auto it = liveByGen.find(gen);
-            stat.liveBytes = kSegmentHeaderBytes + (it != liveByGen.end() ? it->second : 0);
-            std::uint64_t size = 0;
-            fs_->fileSize(segmentName(gen), size);
-            stat.totalBytes = static_cast<std::uint32_t>(size);
-            result.push_back(stat);
-        }
-    }
-
-    return result;
-}
-
 Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const std::string& data) {
     std::uint64_t oldSize = 0;
     // fileSize failure (file absent or I/O error) leaves oldSize = 0. If the file is
@@ -647,178 +463,6 @@ std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const 
         (activeSegmentBytes_ > kSegmentHeaderBytes &&
          activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes);
     return eventBytes + (needsNewSegment ? kSegmentHeaderBytes : 0);
-}
-
-Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
-    auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
-        [&](const ManifestRange& r) {
-            return r.startGen == range.startGen && r.endGen == range.endGen;
-        });
-    if (it == manifestRanges_.end()) return Status::noOp();
-    const std::size_t rangeIdx = static_cast<std::size_t>(it - manifestRanges_.begin());
-
-    std::vector<CompactionLiveRecord> liveRecords;
-    Status st = collectLiveRecords(range, liveRecords);
-    if (!st.ok()) return st;
-
-    if (liveRecords.empty()) {
-        std::vector<ManifestRange> newRanges = manifestRanges_;
-        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
-        ManifestData md;
-        md.ranges         = std::move(newRanges);
-        md.tailGeneration = activeGeneration_;
-        md.nextGeneration = nextGeneration_;
-        if (outputSegCount) *outputSegCount = 0;
-        return publishManifest(md);
-    }
-
-    struct OutputSeg {
-        std::uint32_t gen;
-        std::vector<std::size_t> indices;
-    };
-    std::vector<OutputSeg> outputSegs;
-    {
-        std::uint32_t gen = nextGeneration_;
-        std::uint32_t segBytes = kSegmentHeaderBytes;
-        outputSegs.push_back({gen, {}});
-        for (std::size_t i = 0; i < liveRecords.size(); ++i) {
-            const std::uint32_t recBytes = kEnqueueOverheadBytes +
-                static_cast<std::uint32_t>(liveRecords[i].payload.size());
-            if (!outputSegs.back().indices.empty() && segBytes + recBytes > config_.maxSegmentBytes) {
-                outputSegs.push_back({++gen, {}});
-                segBytes = kSegmentHeaderBytes;
-            }
-            outputSegs.back().indices.push_back(i);
-            segBytes += recBytes;
-        }
-    }
-
-    const std::size_t inputSegCount = static_cast<std::size_t>(range.endGen - range.startGen + 1);
-
-    // Compute total live bytes across all output segments.
-    std::uint32_t totalLiveBytes = 0;
-    for (const auto& seg : outputSegs) {
-        totalLiveBytes += kSegmentHeaderBytes;
-        for (std::size_t idx : seg.indices) {
-            totalLiveBytes += kEnqueueOverheadBytes +
-                static_cast<std::uint32_t>(liveRecords[idx].payload.size());
-        }
-    }
-    // Compute total input bytes from disk.
-    std::uint32_t totalInputBytes = 0;
-    for (std::uint32_t gen = range.startGen; gen <= range.endGen; ++gen) {
-        std::uint64_t sz = 0;
-        Status sizeSt = fs()->fileSize(segmentName(gen), sz);
-        if (!sizeSt.ok()) return sizeSt;
-        totalInputBytes += static_cast<std::uint32_t>(sz);
-    }
-    const bool hasDeadBytes = totalLiveBytes < totalInputBytes;
-
-    // Never allow compaction to increase segment count — that worsens manifest pressure.
-    if (outputSegs.size() > inputSegCount) return Status::noOp();
-    // Same-count compaction is only useful when dead bytes exist to reclaim.
-    if (outputSegs.size() == inputSegCount && !hasDeadBytes) return Status::noOp();
-    if (outputSegCount) *outputSegCount = static_cast<std::uint32_t>(outputSegs.size());
-
-    const std::uint32_t firstNewGen = outputSegs.front().gen;
-    const std::uint32_t lastNewGen  = outputSegs.back().gen;
-
-    std::vector<SegmentRecord> replacements;
-    replacements.reserve(liveRecords.size());
-
-    for (const auto& seg : outputSegs) {
-        std::uint32_t writeOffset = kSegmentHeaderBytes;
-        std::string segData = serializeSegmentHeader(seg.gen, liveRecords[seg.indices.front()].sequence);
-        for (std::size_t idx : seg.indices) {
-            const auto& lr = liveRecords[idx];
-            SegmentRecord sr;
-            sr.sequence          = lr.sequence;
-            sr.segmentGeneration = seg.gen;
-            sr.payloadOffset     = writeOffset + kEnqueueHeaderBytes;
-            sr.payloadBytes      = static_cast<std::uint32_t>(lr.payload.size());
-            replacements.push_back(sr);
-            segData += serializeEnqueueEvent(lr.sequence, lr.payload);
-            writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
-        }
-        st = writeSegmentFileTracked(segmentName(seg.gen), segData);
-        if (!st.ok()) return st;
-    }
-
-    std::vector<ManifestRange> newRanges = manifestRanges_;
-    newRanges[rangeIdx] = {firstNewGen, lastNewGen};
-    // Merge with following range if contiguous.
-    if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
-        newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
-        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
-    }
-    // Merge with preceding range if contiguous.
-    if (rangeIdx > 0 && newRanges[rangeIdx - 1].endGen + 1 == newRanges[rangeIdx].startGen) {
-        newRanges[rangeIdx - 1].endGen = newRanges[rangeIdx].endGen;
-        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
-    }
-
-    ManifestData md;
-    md.ranges         = std::move(newRanges);
-    md.tailGeneration = activeGeneration_;
-    md.nextGeneration = lastNewGen + 1;
-
-    st = publishManifest(md);
-    if (!st.ok()) return st;
-
-    for (auto& r : records_) {
-        if (r.segmentGeneration < range.startGen || r.segmentGeneration > range.endGen) continue;
-        for (const auto& rep : replacements) {
-            if (rep.sequence == r.sequence) { r = rep; break; }
-        }
-    }
-    return Status::success();
-}
-
-Status AppendLogStore::compactOneSegment() {
-    auto rangeOpt = chooseCompactionRange();
-    if (!rangeOpt) return Status::noOp();
-    return compactRange(*rangeOpt);
-}
-
-Status AppendLogStore::compactFull() {
-    const std::size_t initialCount = manifestRanges_.size();
-    for (std::size_t i = 0; i < initialCount; ++i) {
-        Status st = compactOneSegment();
-        if (!st.ok()) return st;
-        if (st.isNoOp()) break;
-    }
-    return Status::success();
-}
-
-bool AppendLogStore::needsCompaction() const {
-    if (activeGenerations_.size() > config_.maxSegments) return true;
-
-    const std::uint64_t free = fs_ ? fs_->freeBytes() : 0;
-    if (free < config_.minFreeBytes) return true;
-
-    return false;
-}
-
-void AppendLogStore::cleanupOneDanglingSegment() {
-    auto f = fs();
-    if (!f) return;
-
-    std::vector<std::string> files;
-    if (!f->listFiles(files).ok()) return;
-
-    for (const auto& name : files) {
-        std::uint32_t gen = 0;
-        if (!isSegmentName(name, gen)) continue;
-        const bool live = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
-                          != activeGenerations_.end();
-        if (live) continue;
-        std::uint64_t sz = 0;
-        f->fileSize(name, sz);
-        if (f->removeFile(name).ok()) {
-            totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
-        }
-        return;
-    }
 }
 
 
