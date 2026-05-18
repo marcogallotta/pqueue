@@ -12,7 +12,6 @@
 #include "pqueue/status.h"
 #include "pqueue/storage_common.h"
 #include "pqueue/types.h"
-#include "log.h"
 
 namespace {
 
@@ -30,27 +29,6 @@ constexpr std::uint8_t kRebootPhaseVerifyMutated = 2;
 constexpr std::uint8_t kRebootPhaseFailed = 99;
 
 std::uint64_t g_nowMs = 0;
-
-void dbgStatus(const char* label, const pqueue::Status& status) {
-    logLine(
-        LogLevel::Debug,
-        std::string("pqueue_test,") + label +
-        ",ok=" + std::to_string(status.ok() ? 1 : 0) +
-        ",code=" + std::to_string(static_cast<int>(status.code)) +
-        ",message=" + (status.message == nullptr ? "" : status.message) +
-        ",backend=" + std::to_string(status.backendCode)
-    );
-}
-
-void dbgStats(const char* label, pqueue::Queue& queue) {
-    const auto stats = queue.stats();
-    logLine(
-        LogLevel::Debug,
-        std::string("pqueue_test,") + label +
-        ",count=" + std::to_string(static_cast<unsigned>(stats.count)) +
-        ",free_bytes=" + std::to_string(static_cast<unsigned long long>(stats.freeBytes))
-    );
-}
 
 struct FakeSender {
     pqueue::SendDecision decision = pqueue::SendDecision::Sent;
@@ -385,50 +363,33 @@ void test_rewrite_front_persistence() {
 void test_capacity_full_behavior() {
     cleanLittleFs();
     {
-        logLine(LogLevel::Debug, "pqueue_test,capacity:create_first_queue");
         pqueue::Queue queue(queueConfig(16, 2));
 
         const auto one = queue.enqueue("one");
-        dbgStatus("capacity enqueue one", one);
         TEST_ASSERT_TRUE(one.ok());
 
         const auto two = queue.enqueue("two");
-        dbgStatus("capacity enqueue two", two);
         TEST_ASSERT_TRUE(two.ok());
 
         const pqueue::Status full = queue.enqueue("three");
-        dbgStatus("capacity enqueue three/full", full);
         TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::QueueFull), static_cast<int>(full.code));
 
-        dbgStats("capacity before first queue destroyed", queue);
         TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
     }
 
-    logLine(LogLevel::Debug, "pqueue_test,capacity:create_reopened_queue");
     pqueue::Queue queue(queueConfig(16, 2));
-    dbgStats("capacity after reopen", queue);
     TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
 
     std::string out;
-    const auto peekOne = queue.peek(out);
-    dbgStatus("capacity peek one", peekOne);
-    TEST_ASSERT_TRUE(peekOne.ok());
-    logLine(LogLevel::Debug, "pqueue_test,capacity_peek_one,payload=" + out);
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("one", out.c_str());
 
-    const auto popOne = queue.pop();
-    dbgStatus("capacity pop one", popOne);
-    TEST_ASSERT_TRUE(popOne.ok());
+    TEST_ASSERT_TRUE(queue.pop().ok());
 
-    const auto peekTwo = queue.peek(out);
-    dbgStatus("capacity peek two", peekTwo);
-    TEST_ASSERT_TRUE(peekTwo.ok());
-    logLine(LogLevel::Debug, "pqueue_test,capacity_peek_two,payload=" + out);
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("two", out.c_str());
 
-    const auto popTwo = queue.pop();
-    dbgStatus("capacity pop two", popTwo);
-    TEST_ASSERT_TRUE(popTwo.ok());
+    TEST_ASSERT_TRUE(queue.pop().ok());
 
     assertQueueEmpty(queue);
 }
@@ -461,24 +422,18 @@ void test_multiple_queue_objects_share_same_base_path() {
     pqueue::Queue second(queueConfig());
 
     const auto firstStatus = first.enqueue("first");
-    dbgStatus("multi object first enqueue", firstStatus);
     TEST_ASSERT_TRUE(firstStatus.ok());
 
     const auto secondStatus = second.enqueue("second");
-    dbgStatus("multi object second enqueue", secondStatus);
     TEST_ASSERT_TRUE(secondStatus.ok());
 
     std::string out;
-    const pqueue::Status peekFirst = first.peek(out);
-    dbgStatus("multi object first peek", peekFirst);
-    TEST_ASSERT_TRUE(peekFirst.ok());
+    TEST_ASSERT_TRUE(first.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("first", out.c_str());
 
     TEST_ASSERT_TRUE(first.pop().ok());
 
-    const pqueue::Status peekSecond = second.peek(out);
-    dbgStatus("multi object second peek", peekSecond);
-    TEST_ASSERT_TRUE(peekSecond.ok());
+    TEST_ASSERT_TRUE(second.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("second", out.c_str());
     TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
 }
@@ -487,16 +442,11 @@ void test_queue_lock_released_after_each_operation() {
     cleanLittleFs();
 
     pqueue::Queue first(queueConfig());
-    const auto firstStatus = first.enqueue("first");
-    dbgStatus("per-operation lock first enqueue", firstStatus);
-    TEST_ASSERT_TRUE(firstStatus.ok());
+    TEST_ASSERT_TRUE(first.enqueue("first").ok());
 
     pqueue::Queue second(queueConfig());
-    const auto secondStatus = second.enqueue("second");
-    dbgStatus("per-operation lock second enqueue", secondStatus);
-    TEST_ASSERT_TRUE(secondStatus.ok());
+    TEST_ASSERT_TRUE(second.enqueue("second").ok());
 
-    dbgStats("per-operation lock final stats", second);
     TEST_ASSERT_EQUAL_UINT32(2, second.stats().count);
 }
 
@@ -504,14 +454,10 @@ void test_littlefs_locks_are_independent_across_base_paths() {
     cleanLittleFs();
 
     pqueue::Queue first(queueConfigForBase(kBasePath));
-    const auto firstStatus = first.enqueue("first");
-    dbgStatus("independent lock first enqueue", firstStatus);
-    TEST_ASSERT_TRUE(firstStatus.ok());
+    TEST_ASSERT_TRUE(first.enqueue("first").ok());
 
     pqueue::Queue second(queueConfigForBase(kOtherBasePath));
-    const pqueue::Status secondStatus = second.enqueue("other-base");
-    dbgStatus("independent lock second enqueue", secondStatus);
-    TEST_ASSERT_TRUE(secondStatus.ok());
+    TEST_ASSERT_TRUE(second.enqueue("other-base").ok());
     TEST_ASSERT_EQUAL_UINT32(1, first.stats().count);
     TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
 }
@@ -522,18 +468,14 @@ void test_legacy_lock_file_is_removed_and_does_not_block() {
 
     {
         pqueue::Queue queue(queueConfig());
-        const auto status = queue.enqueue("ok");
-        dbgStatus("legacy lock file enqueue", status);
-        TEST_ASSERT_TRUE(status.ok());
+        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
     }
 
     assertPathGone(kLegacyLockFilePath);
 
     pqueue::Queue reopened(queueConfig());
     std::string out;
-    const auto peek = reopened.peek(out);
-    dbgStatus("legacy lock file reopen peek", peek);
-    TEST_ASSERT_TRUE(peek.ok());
+    TEST_ASSERT_TRUE(reopened.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
 }
 
@@ -543,18 +485,14 @@ void test_legacy_lock_directory_is_removed_and_does_not_block() {
 
     {
         pqueue::Queue queue(queueConfig());
-        const auto status = queue.enqueue("ok");
-        dbgStatus("legacy lock dir enqueue", status);
-        TEST_ASSERT_TRUE(status.ok());
+        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
     }
 
     assertPathGone(kLegacyLockDirPath);
 
     pqueue::Queue reopened(queueConfig());
     std::string out;
-    const auto peek = reopened.peek(out);
-    dbgStatus("legacy lock dir reopen peek", peek);
-    TEST_ASSERT_TRUE(peek.ok());
+    TEST_ASSERT_TRUE(reopened.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
 }
 
@@ -564,18 +502,14 @@ void test_legacy_alt_lock_directory_is_removed_and_does_not_block() {
 
     {
         pqueue::Queue queue(queueConfig());
-        const auto status = queue.enqueue("ok");
-        dbgStatus("legacy alt lock dir enqueue", status);
-        TEST_ASSERT_TRUE(status.ok());
+        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
     }
 
     assertPathGone(kLegacyAltLockDirPath);
 
     pqueue::Queue reopened(queueConfig());
     std::string out;
-    const auto peek = reopened.peek(out);
-    dbgStatus("legacy alt lock dir reopen peek", peek);
-    TEST_ASSERT_TRUE(peek.ok());
+    TEST_ASSERT_TRUE(reopened.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
 }
 
