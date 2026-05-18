@@ -457,11 +457,15 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
         checkAndCompact();
     };
 
+    static constexpr std::uint32_t kDeadlockAbortThreshold = 1000;
+
     if (wp.burst) {
         std::uint32_t opsLeft = wp.numOps;
         while (opsLeft > 0) {
-            for (std::uint32_t i = 0; i < wp.burstSize && opsLeft > 0; ++i, --opsLeft)
+            for (std::uint32_t i = 0; i < wp.burstSize && opsLeft > 0; ++i, --opsLeft) {
                 doEnqueue();
+                if (metrics.deadlocks >= kDeadlockAbortThreshold) return metrics;
+            }
             const std::uint32_t toPop =
                 static_cast<std::uint32_t>(static_cast<float>(queueSize) * wp.popRatio);
             for (std::uint32_t i = 0; i < toPop && opsLeft > 0; ++i, --opsLeft)
@@ -473,6 +477,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
                 doEnqueue();
             else
                 doPop();
+            if (metrics.deadlocks >= kDeadlockAbortThreshold) return metrics;
         }
     }
 

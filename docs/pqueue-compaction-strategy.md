@@ -2,176 +2,104 @@
 
 **Editing rules:** ASCII only -- no Unicode symbols (no checkmarks, arrows, emoji). This file is compiled to PDF via LaTeX and non-ASCII characters cause build warnings or missing glyphs.
 
-## Purpose
+## Background
 
-v1 compaction is greedy and local: it always picks the oldest full range, reads all live records from it, and writes one output segment. This is correct but not globally optimal, and has a known failure mode where a range too large to compact into one segment causes a permanent no-op, eventually deadlocking the queue at the 4-range manifest limit.
+v1 compaction is greedy and local: it always picks the oldest full range, reads all live records from it, and writes one output segment. This is correct but not globally optimal. The known failure mode: if the live bytes in the selected range exceed `maxSegmentBytes`, `compactRange()` returns `noOp`. Under sustained enqueue load, ranges routinely exceed one segment of live data. Once range count hits 4 and no range fits in a single output segment, the queue deadlocks permanently.
 
-Before designing a replacement strategy, we need data. The space of possible compaction algorithms is large, the right tradeoffs depend on workload, and the queue is intended for general use -- not just one known use case. This document describes the investigation plan: a simulator, the metrics it will measure, and the candidate algorithms it will evaluate.
+The goal of this investigation is to find a replacement strategy that eliminates deadlocks under realistic workloads, minimises write amplification, and has a simple enough trigger model to be reliable on-device.
 
 ## Simulator
 
-Implementation: `tools/pqueue_compaction_sim.cpp`. Build with `make -j12 sim`, run as `./build/pqueue-compaction-sim`. The simulator uses the real AppendLogStore API via a CountingFileSystem wrapper (in `tools/counting_file_system.h`) that tracks bytes written for flash wear measurement.
+Implementation: `tools/pqueue_compaction_sim.cpp`. Build with `make -j12 sim`, run as `./build/pqueue-compaction-sim`. The full sweep runs in ~13 seconds.
 
-A Posix-backed workload simulator that drives the queue through configurable enqueue/pop patterns and observes compaction behavior. Runs on desktop, no device required. Fast enough to sweep a large parameter space.
+The simulator drives the real `AppendLogStore` API through configurable enqueue/pop patterns and records compaction behaviour. Storage I/O uses an in-memory `FileSystem` (`tools/memory_file_system.h`) -- no disk access occurs. Byte counts for flash wear measurement are tracked via a `CountingFileSystem` wrapper (`tools/counting_file_system.h`) around the memory backend.
 
-### Workload parameters
+A run aborts early once a strategy hits 1000 deadlocks: at that point the workload has already failed and further operations add no signal.
 
-- Enqueue rate and burst size
-- Pop rate and burst size (relative to enqueue rate, to control queue fill level)
-- Record size distribution (fixed, uniform random, bimodal)
-- Workload duration (total number of operations)
+### Workloads
 
-The simulator sweeps across combinations of these parameters to cover the range of unknown real-world usage patterns. A strategy that performs well across the sweep is more trustworthy than one tuned to a single workload.
+Two workload families are swept:
 
-### Pluggable strategy interface
+**Random interleaved.** Each operation is independently an enqueue or pop with probability `enqueueProb`. Three variants: enqP=0.55, 0.65, 0.80. Record size 19 bytes.
 
-Each candidate algorithm implements the same interface: given the current store state (segment files, dead-byte counts per segment, manifest ranges, free space), return a compaction action. The simulator drives the store and calls the strategy at each decision point. Strategies are swapped without changing anything else.
+**Burst.** Models the primary real-world failure scenario: the device enqueues continuously while the server or network is unreachable, then drains when the consumer reconnects. Alternates between a pure-enqueue phase of `burstSize` ops and a pure-pop phase of `popRatio * queueSize` pops. Swept across burstSize in {12, 60, 250}, popRatio in {0.25, 0.5, 0.9}, and recordSize in {8, 19, 62} bytes.
 
-### On-device validation
-
-The simulator uses the Posix backend, so its cost model is based on operation counts rather than real LittleFS timings. The best-performing simulator candidates are run on-device against representative workloads to confirm that real LittleFS flush costs match the simulator's assumptions. This guards against optimising for a model that does not reflect reality.
-
-## Metrics
-
-Each simulator run records the following metrics across the full workload sweep:
-
-**Write amplification** -- live bytes copied per dead byte reclaimed. Lower is better. A strategy that copies large amounts of live data to reclaim small amounts of dead data causes unnecessary flash wear.
-
-**Flash wear** -- total bytes written to disk over the workload lifetime, including all segment writes and manifest publishes. The primary long-term health metric for flash storage.
-
-**Range pressure** -- distribution of range count over time: mean, peak, and time spent near the 4-range limit. A strategy that routinely operates close to the limit is risky even if it never deadlocks during the simulation.
-
-**Compaction frequency** -- how often compaction must be invoked to keep the queue healthy (i.e. to avoid range limit or free space exhaustion). Lower frequency means less interference with normal queue operations.
-
-**Deadlock frequency** -- how often the queue became unable to make progress (range limit hit with no compactable range). Any non-zero value is a failure.
-
-**Compaction cost per pass** -- number of output segment files written per compaction call. Directly proportional to latency on-device.
-
-**Maximum single-pass stall cost** -- worst-case output segments written in a single compaction call across the full workload. On embedded, a strategy that is globally efficient but occasionally writes 6 segments in one pass produces a ~270 ms stall, which may be unacceptable regardless of average efficiency. This metric catches outliers that average cost hides.
-
-## Candidate algorithms
-
-All candidates implement the same interface and are evaluated against the same workload sweep. The goal is to find which approach gives the best tradeoff across the metrics above.
-
-### 1. Oldest-first (v1 baseline)
-
-Pick the oldest full range. If live bytes fit in one output segment, compact it. Otherwise no-op. Included as the baseline to measure improvement against.
-
-### 2. Highest dead-byte ratio
-
-Score each range by dead bytes / total bytes. Pick the highest scorer. Skips ranges that are mostly live, avoiding wasteful copying.
-
-### 3. Cost-benefit ratio
-
-Score each range by dead bytes reclaimed per live byte copied. Minimises write amplification directly rather than maximising absolute reclaim.
-
-### 4. Range-consolidation-first
-
-Ignore dead-byte ratios entirely. Pick the compaction that reduces range count the most -- i.e. prefer ranges that, after compaction, can be merged with an adjacent range. Trades write efficiency for manifest headroom.
-
-### 5. Defer until pressure
-
-Do nothing until forced: either the range count approaches the limit or free space falls below a threshold. Then compact aggressively. The hypothesis is that waiting allows more records to be popped, reducing live bytes copied when compaction finally runs.
-
-### 6. Pressure-weighted hybrid
-
-Normally picks by cost-benefit ratio. As range pressure increases (range count approaching limit), shifts weight toward range-consolidation. Tries to balance efficiency with safety.
-
-### 7. Oldest-first with dead-byte threshold
-
-Like v1, but skips ranges whose dead-byte ratio falls below a configurable threshold. Simple improvement over baseline that prevents recompacting nearly-live ranges.
-
-### 8. Lookahead heuristic
-
-Score ranges not by current dead-byte ratio but by projected ratio after N more operations (estimated from recent pop rate). A range that is 50% dead now but trending toward 80% dead may be better deferred. Requires tracking recent operation history.
-
-### 9. Age-weighted dead-byte ratio
-
-Weight the dead-byte ratio by segment age. Older segments are more likely to continue accumulating dead records, so their current ratio underestimates their future value. Combines reclaim potential with age signal.
-
-### 10. Minimum live-bytes-copied
-
-Among all ranges that would result in range count reduction after compaction, pick the one with fewest live bytes to copy. Directly minimises the cost of the next compaction step while still making manifest progress.
-
-## Simulation findings (initial run)
-
-### Scheduler cadence dominates strategy quality
-
-The first simulation runs revealed that the compaction trigger cadence matters more than the choice of strategy. With aggressive cadence (compact every 6 enqueues), most compaction calls are no-ops or useless -- one run showed 820 out of 827 compaction attempts producing no useful work. With relaxed cadence (compact every 15 enqueues), all strategies performed similarly and none deadlocked.
-
-This is a strong signal: operation-count-triggered compaction is the wrong primitive. Firing compaction on a fixed schedule regardless of queue state produces pathological behaviour under load -- either compacting fully-live ranges uselessly, or invoking compaction hundreds of times with no effect.
-
-### Strategy quality matters under pressure
-
-Despite the scheduler noise, the gap between strategies under heavy load was large and meaningful. In the enqP=0.65, compact=6 workload, oldest-first produced 206x write amplification while ratio-based strategies (HighestDeadRatio, CostBenefit) produced 2.36x. The difference: oldest-first compacts fully-live ranges, copying all their data for zero reclaim. Ratio-based strategies correctly refuse ranges with no dead bytes.
-
-This confirms that usefulness-gating -- skipping compaction when there is nothing worth reclaiming -- is a first-order correctness requirement, not an optimisation.
-
-### Oldest-first is unsuitable as a long-term strategy
-
-Under any workload with range pressure, oldest-first repeatedly compacts ranges with no dead data. This is pure write amplification with no benefit, and it directly causes the deadlock scenario (range limit hit while compacting live data for no gain). It is retained in the simulator as a baseline only.
-
-### DeferUntilPressure avoids deadlocks because ranges never multiply without compaction
-
-DeferUntilPressure showed MaxRange=1 and zero deadlocks across all workloads. This is explained by a structural property of the store: rotateSegment() merges contiguous generation numbers into the same manifest range. Without compaction, all segment rotations extend a single range's endGen, so range count stays at 1 indefinitely. Compaction is what creates non-contiguous output generations, producing new ranges. DeferUntilPressure therefore never encounters range pressure in practice -- its threshold is never triggered. This is not a strategy win; it is a degenerate case where the strategy never acts and the store never accumulates range pressure to force action.
-
-### v1 single-output limit makes strategy evaluation impossible under pressure
-
-In all workloads with enqueueProb >= 0.55, strategies that compact (all except DeferUntilPressure) produced 4900+ deadlocks out of 5000 operations. The root cause is not strategy choice -- it is the v1 hard limit: if live bytes in the chosen range exceed maxSegmentBytes, compactRange() returns noOp(). Under sustained enqueue load, live bytes in a range routinely exceed one segment. Once range count hits 4 and no range fits in a single output segment, the queue deadlocks permanently regardless of strategy.
-
-All ratio-based strategies (HighestDeadRatio, CostBenefit, AgeWeighted, MinLiveBytesCopied, LookaheadHeuristic) deadlocked identically. They cannot be differentiated by the simulator until multi-segment compaction output is implemented, because they are all blocked by the same v1 constraint.
-
-### Key conclusions
-
-1. The compaction trigger must be state-based, not operation-count-based. A rising-edge trigger -- fire on segment rotation or when range count approaches the limit -- collapses the no-op rate and is implemented in the current simulator.
-
-2. Any viable strategy must gate on usefulness: refuse to compact a range whose dead-byte ratio is below a minimum threshold, except when range count pressure forces action. Oldest-first fails this test catastrophically (2000x+ write amplification vs 2.7x for ratio-based strategies).
-
-3. Strategy evaluation is blocked by the v1 single-output compaction limit. Multi-segment output (allowing compactRange to write multiple output segments when live data exceeds one segment) is a prerequisite for meaningful simulator differentiation under realistic load.
-
-4. Once multi-segment output exists, the simulator workloads and trigger logic are sound. Ratio-based strategies are the correct direction; the simulator is ready to distinguish between them once the v1 bottleneck is removed.
-
-## Next steps
-
-### Step 1: Re-run simulator and record findings (multi-segment output is now implemented)
-
-`compactRange()` now partitions live records across multiple output segments when `liveBytes > maxSegmentBytes`. Partitioning uses a greedy fill: records are packed into segments sequentially until the next record would exceed `maxSegmentBytes`, then a new output segment is started. Greedy fill is simple and correct, but it does not minimise the number of output segments in all cases (e.g., bin-packing could achieve fewer segments with unequal record sizes). This is an intentional design choice accepted for v2; whether a smarter packing strategy is worth the added complexity should be re-evaluated once simulator data shows how often bin-packing would produce a materially different result.
-
-A key constraint on multi-segment output: if the number of output segments would equal or exceed the number of input segments, compaction is skipped (returns noOp). Compacting a range without reducing its segment count provides no manifest headroom benefit, and it fragments the generation space in a way that breaks contiguous-range merging during subsequent rotations, leading to unbounded range count growth. Multi-segment output is therefore only performed when it strictly reduces segment count (i.e., dead bytes in the range allow at least one segment to be eliminated).
-
-### Initial re-run findings (after multi-segment output)
-
-Simulator results after implementing multi-segment output are UNCHANGED from before. Deadlock counts remain at 4932-4940 across all workloads. The root cause is a structural mismatch between the simulator workload and the conditions under which multi-segment output fires:
-
-With `recordSize=64` and `maxSegmentBytes=512`, each segment holds exactly 5 records (floor((512-20)/88) = 5). For a 3-segment range (15 records) to produce fewer than 3 output segments, fewer than 11 records must be live -- requiring more than 33% of records in the range to be popped. The simulator triggers compaction at 25% dead ratio (by bytes), which fires when only 3-4 records in a 15-record range are dead. At that point, 11+ live records still require 3 output segments (outputSegs >= inputSegCount → noOp). Multi-segment output therefore never fires in the current workload.
-
-This is not a bug -- the gating condition is correct. But it means the simulator workload needs adjustment before multi-segment output can be evaluated. Specifically: the dead-ratio trigger must be raised to at least ~35% (the threshold where a full segment can be eliminated from the oldest range), or the record size must be reduced relative to segment size (fewer records per segment means fewer pops are needed to free one segment).
-
-### Step 2: Fix simulator workload realism and record findings
-
-The simulator was updated to use `maxSegmentBytes=4096` (the default config value) and `recordSize=150` (representative of the target app's SwitchBot/Xiaomi JSON payloads). With these params each segment holds ~23 records.
-
-Updated results show the opposite extreme from before: zero compactions and zero deadlocks across almost all workloads. The 5000-op workload is now too small to stress the system -- with ~23 records/segment, 5000 ops generates only ~120 rotations, all of which merge into one contiguous range. Dead-ratio thresholds are never hit because the range grows continuously (growing denominator dilutes the ratio), and range pressure never builds.
-
-The sim was previously producing interesting results only because 512-byte segments made things artificially tight -- 5x more rotations per op, 5x more range pressure. At the correct segment size, the workload needs to be longer and more adversarial.
-
-**Changes made to the simulator (code updated, results pending):**
-
-1. **numOps increased to 15000 (scaled).** The real-world target is 50000 ops. The simulator currently uses 15000 for speed (see proportional scaling note below).
-
-2. **Adversarial burst workload added.** A new workload variant models the primary real-world failure scenario: the device enqueues continuously while the server or network is unreachable, then drains rapidly when the consumer reconnects. The burst workload alternates between a pure-enqueue phase of `burstSize` ops and a pure-pop phase sized by `popRatio * burstSize`. This is a separate workload variant; the random interleaved workloads are retained. The sweep covers burstSize in {12, 60, 250} and popRatio in {0.25, 0.5, 0.9}.
-
-3. **Record size sweep added.** Record size has a first-order effect on compaction behavior: it determines how many records fit per segment, which in turn determines how many pops are needed before a segment can be eliminated. The sweep covers small (~8 bytes, proportionally scaled from ~64 bytes), medium (~19 bytes, proportionally scaled from ~150 bytes, representative of the target app's SwitchBot/Xiaomi JSON payloads), and large (~62 bytes, proportionally scaled from ~492 bytes). Sizes are swept across all burst workload variants; random workloads use medium only.
-
-**Proportional scaling note.** All current sim parameters are scaled proportionally to keep individual runs fast. The scaling factor is approximately 1/8:
+All parameters are proportionally scaled to keep runs fast (scaling factor ~1/8 from real-world values):
 
 - maxSegmentBytes: 4096 -> 512
 - recordSizes: 64/150/492 -> 8/19/62
 - burstSizes: 100/500/2000 -> 12/60/250
 - numOps: 50000 -> 15000
 
-This preserves the records-per-segment ratio and relative workload intensity while reducing wall-clock time per run. BEFORE MAKING A FINAL STRATEGY DECISION: revert to real-world sizes (maxSegmentBytes=4096, recordSizes=64/150/492, burstSizes=100/500/2000, numOps=50000) and rerun to confirm that findings hold at production scale.
+This preserves the records-per-segment ratio and relative workload intensity. Before making a final strategy decision, revert to real-world sizes and rerun to confirm findings hold at production scale.
 
-### Step 3: Run updated simulator and record findings
+### Compaction trigger
 
-The simulator has been updated with all three changes above but has not yet been run. This is the next step.
+The simulator uses a state-based, rising-edge trigger rather than a fixed operation-count cadence. Early runs with operation-count triggers (compact every N enqueues) showed that cadence dominates strategy quality: aggressive cadences produced up to 820 no-ops out of 827 attempts; relaxed cadences made all strategies look identical. The current trigger fires when a new full range is added (segment rotation) and at least one range exceeds the `deadRatioTrigger` threshold, or when range count reaches the emergency `rangePressureTrigger`. This collapses the no-op rate without over-firing.
+
+### Metrics
+
+Each run reports:
+
+- **WriteAmp** -- live bytes copied per dead byte reclaimed. Lower is better.
+- **Wear(KB)** -- total bytes written over the workload lifetime.
+- **MaxRange** -- peak range count reached.
+- **Compacts** -- times the strategy returned a range to compact.
+- **NoOps** -- compaction attempts that returned no-op from the store.
+- **Skips** -- times the strategy returned nullopt (declined to compact).
+- **Deadlocks** -- enqueue failures due to range limit exhaustion.
+
+### Candidate strategies
+
+Ten strategies are evaluated. All implement the same interface: given per-range stats (total bytes, live bytes, dead bytes) and the current range count, return a range to compact or nullopt.
+
+1. **OldestFirst** -- always picks the first (oldest) range. v1 baseline.
+2. **HighestDeadRatio** -- picks the range with the highest dead bytes / total bytes ratio. Skips if no range has dead bytes.
+3. **CostBenefit** -- picks the range with the highest dead bytes / live bytes ratio. Minimises write amplification directly.
+4. **RangeConsolidation** -- intended to prefer ranges whose compaction reduces range count by merging with an adjacent range. With single-output compaction this is not achievable (new segments get non-adjacent generations), so it falls back to dead-ratio. Becomes meaningful with multi-segment output.
+5. **DeferUntilPressure** -- no-op until range count reaches 75% of the limit, then picks highest dead-ratio range.
+6. **PressureWeightedHybrid** -- normally uses cost-benefit; falls back to oldest-first when range count reaches 75% of the limit.
+7. **DeadByteThreshold** -- oldest-first, but skips if dead ratio is below a configurable threshold. Overrides threshold under emergency pressure.
+8. **LookaheadHeuristic** -- cost-benefit, but skips ranges below a 20% dead-ratio floor unless under pressure.
+9. **AgeWeightedDeadRatio** -- dead-ratio weighted by position in the range list (older ranges get higher weight).
+10. **MinLiveBytesCopied** -- among ranges with any dead bytes, picks the one with the fewest live bytes to copy.
+
+## Findings
+
+### Strategy only matters in recoverable workloads
+
+If enqueue growth permanently exceeds drain + compaction capacity, every strategy eventually deadlocks. This is not a strategy problem -- it is a capacity problem. The right response is backpressure or queue depth limits at the application layer, not a smarter compactor.
+
+In the simulator, all random workloads (enqP >= 0.55) and burst workloads with slow drain (pop=25%, pop=50% with large bursts) hit 1000 deadlocks regardless of strategy. The binding constraint in these cases is the v1 single-output limit: one compaction pass can eliminate at most one range, which is not enough to keep pace with a queue that is growing faster than it is draining.
+
+### Usefulness-gating is a hard requirement
+
+For recoverable workloads (burst with pop >= 90%, burst=12/pop=50%), the strategy split is binary:
+
+**Strategies that fail:** OldestFirst, PressureWeightedHybrid, DeadByteThreshold. All hit 1000 deadlocks on workloads the other strategies handle cleanly. The common failure mode: these strategies will compact nearly-live ranges -- either always (OldestFirst) or under pressure (PressureWeighted, DeadByteThreshold). Compacting a nearly-live range copies all its data for minimal reclaim, burning a compaction pass without meaningfully reducing range pressure. Under sustained load this exhausts range capacity.
+
+**Strategies that pass:** HighestDeadRatio, CostBenefit, RangeConsolidation, DeferUntilPressure, MinLiveBytesCopied, AgeWeightedDeadRatio, LookaheadHeuristic. These all gate on dead-byte ratio and refuse to compact a range that is mostly live. That refusal is what keeps range count manageable.
+
+Usefulness-gating is therefore a first-order correctness requirement, not an optimisation. Any strategy without it will eventually deadlock under sustained load.
+
+### Differences within the passing family are small
+
+Among the seven passing strategies, write amplification and flash wear are broadly similar on a given workload. The notable observations:
+
+- DeferUntilPressure behaves identically to HighestDeadRatio on almost all workloads. This is structural: without compaction, segment rotations extend a single range's endGen, so range count stays at 1 and the pressure threshold is never triggered. DeferUntilPressure does not proactively compact -- it only acts under emergency pressure, at which point it falls back to dead-ratio selection.
+- MinLiveBytesCopied shows slightly better write amplification on some large-burst/fast-pop workloads (e.g. burst=250/pop=90%/rec=62: 8.15x vs 8.63x for HighestDeadRatio/CostBenefit), but the advantage is not consistent across the sweep.
+- AgeWeightedDeadRatio shows a mild advantage on burst=60/pop=90%/rec=8 (0.94x vs 1.69x) that does not persist elsewhere.
+
+### Current default candidate
+
+**HighestDeadRatio or CostBenefit with a state-based trigger.**
+
+Both are simple, robust, and pass all recoverable workloads. MinLiveBytesCopied remains in the simulator as a contender; it is not clearly dominant enough to be the default yet.
+
+## Open questions
+
+**Are the unrecoverable workloads in scope?** The deadlocking workloads model a device that enqueues faster than the consumer can drain, even when online. At real-world scale (burst=2000 records/offline cycle, pop=25% per online cycle), this corresponds to a consumer that is structurally too slow for the device's publish rate. The correct fix there may be application-level flow control rather than a more powerful compactor. The answer to this question determines whether multi-segment output is necessary.
+
+**Multi-segment output.** `compactRange()` currently returns `noOp` when live bytes in the selected range exceed `maxSegmentBytes`. Multi-segment output would allow it to write multiple output segments per pass, gated on the condition that output segment count is strictly less than input segment count (otherwise range count does not improve). This would unlock the deadlocking workloads for strategy evaluation. It is already partially implemented in the store but the gating condition prevents it from firing in the current sim workloads.
+
+If the slow-drain workloads are in scope, multi-segment output is the next step. If they are out of scope and backpressure is the answer there, the current strategy candidates are sufficient and the investigation can move to on-device validation.
