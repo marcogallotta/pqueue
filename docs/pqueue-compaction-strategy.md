@@ -155,10 +155,23 @@ Updated results show the opposite extreme from before: zero compactions and zero
 
 The sim was previously producing interesting results only because 512-byte segments made things artificially tight -- 5x more rotations per op, 5x more range pressure. At the correct segment size, the workload needs to be longer and more adversarial.
 
-**Outstanding work before the sim produces useful findings:**
+**Changes made to the simulator (code updated, results pending):**
 
-1. **Increase numOps to ~50000.** With larger segments fewer rotations occur per op; proportionally more operations are needed to generate equivalent range pressure. At the current rate, 5000 ops represents roughly one day of sensor data -- too short to observe compaction behavior in a realistic steady-state queue.
+1. **numOps increased to 15000 (scaled).** The real-world target is 50000 ops. The simulator currently uses 15000 for speed (see proportional scaling note below).
 
-2. **Add an adversarial burst workload.** The scenario that matters most for an embedded queue is not random interleaved enqueue/pop but an offline consumer: the device enqueues continuously (WiFi down, server unreachable) until the queue fills, then drains rapidly when the consumer reconnects. A pure-enqueue phase followed by a pure-pop phase stresses range count and space reclaim in a way that random interleaving does not. This should be a separate workload variant, not a replacement.
+2. **Adversarial burst workload added.** A new workload variant models the primary real-world failure scenario: the device enqueues continuously while the server or network is unreachable, then drains rapidly when the consumer reconnects. The burst workload alternates between a pure-enqueue phase of `burstSize` ops and a pure-pop phase sized by `popRatio * burstSize`. This is a separate workload variant; the random interleaved workloads are retained. The sweep covers burstSize in {12, 60, 250} and popRatio in {0.25, 0.5, 0.9}.
 
-3. **Sweep record sizes.** Record size has a first-order effect on compaction behavior because it determines how many records fit per segment, which in turn determines how many pops are needed before a segment can be eliminated. A store holding tiny records (e.g. 16 bytes, ~200 records/segment) needs far more pops to free a segment than one holding large records (e.g. 1024 bytes, ~3 records/segment). The right strategy and trigger threshold can differ substantially across this range. Once the workload is stressful enough to generate compaction activity, the sweep should cover at least three sizes: small (~16 bytes), medium (~150 bytes, the target app), and large (~1024 bytes). This is intentionally deferred until the workload issues above are resolved -- there is no point sweeping record size against a workload that never exercises compaction.
+3. **Record size sweep added.** Record size has a first-order effect on compaction behavior: it determines how many records fit per segment, which in turn determines how many pops are needed before a segment can be eliminated. The sweep covers small (~8 bytes, proportionally scaled from ~64 bytes), medium (~19 bytes, proportionally scaled from ~150 bytes, representative of the target app's SwitchBot/Xiaomi JSON payloads), and large (~62 bytes, proportionally scaled from ~492 bytes). Sizes are swept across all burst workload variants; random workloads use medium only.
+
+**Proportional scaling note.** All current sim parameters are scaled proportionally to keep individual runs fast. The scaling factor is approximately 1/8:
+
+- maxSegmentBytes: 4096 -> 512
+- recordSizes: 64/150/492 -> 8/19/62
+- burstSizes: 100/500/2000 -> 12/60/250
+- numOps: 50000 -> 15000
+
+This preserves the records-per-segment ratio and relative workload intensity while reducing wall-clock time per run. BEFORE MAKING A FINAL STRATEGY DECISION: revert to real-world sizes (maxSegmentBytes=4096, recordSizes=64/150/492, burstSizes=100/500/2000, numOps=50000) and rerun to confirm that findings hold at production scale.
+
+### Step 3: Run updated simulator and record findings
+
+The simulator has been updated with all three changes above but has not yet been run. This is the next step.

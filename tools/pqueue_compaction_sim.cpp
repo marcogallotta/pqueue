@@ -21,13 +21,18 @@
 // ---------------------------------------------------------------------------
 
 struct WorkloadParams {
-    std::uint32_t numOps              = 5000;
-    double        enqueueProb         = 0.6;    // probability of enqueue vs pop
-    std::uint32_t recordSize          = 64;     // bytes per record
-    std::uint32_t maxSegmentBytes     = 512;
-    std::uint8_t  maxSegments         = 200;    // high: disables internal auto-compact
-    float         deadRatioTrigger    = 0.25f;  // compact if any range >= this fraction dead
+    std::uint32_t numOps               = 5000;
+    double        enqueueProb          = 0.6;   // random mode: probability of enqueue vs pop
+    std::uint32_t recordSize           = 150;   // bytes per record
+    std::uint32_t maxSegmentBytes      = 4096;
+    std::uint8_t  maxSegments          = 200;   // high: disables internal auto-compact
+    float         deadRatioTrigger     = 0.25f; // compact if any range >= this fraction dead
     std::uint32_t rangePressureTrigger = 3;     // compact if range count >= this (out of kManifestMaxRanges=4)
+    // Burst mode: models offline consumer pattern (enqueue N, drain ratio R, repeat).
+    // When burst=true, enqueueProb is ignored.
+    bool          burst                = false;
+    std::uint32_t burstSize            = 500;   // records to enqueue per offline cycle
+    float         popRatio             = 0.5f;  // fraction of queue to drain per online cycle
 };
 
 // ---------------------------------------------------------------------------
@@ -425,40 +430,55 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
 
     const std::string payload(wp.recordSize, 'x');
 
-    for (std::uint32_t op = 0; op < wp.numOps; ++op) {
-        const bool doEnqueue = (queueSize == 0) || (nextRand() < wp.enqueueProb);
-
-        if (doEnqueue) {
-            counting->resetCounters();
-            auto st = store.writeRecord(nextSeq, payload);
-            if (st.ok()) {
-                pqueue::FileStoreIndex dummy;
-                store.writeIndex(dummy);
-                ++nextSeq;
-                ++queueSize;
-                metrics.flashWearBytes += counting->counters().bytesWritten;
-            } else {
-                ++metrics.deadlocks;
-            }
-
-            metrics.maxRangeCount = std::max(metrics.maxRangeCount,
-                static_cast<std::uint32_t>(store.manifestRanges().size()));
-
-            checkAndCompact();
+    auto doEnqueue = [&]() {
+        counting->resetCounters();
+        auto st = store.writeRecord(nextSeq, payload);
+        if (st.ok()) {
+            pqueue::FileStoreIndex dummy;
+            store.writeIndex(dummy);
+            ++nextSeq;
+            ++queueSize;
+            metrics.flashWearBytes += counting->counters().bytesWritten;
         } else {
-            counting->resetCounters();
-            pqueue::FileStoreIndex idx;
-            store.readIndex(idx);
-            if (idx.count > 0) {
-                idx.head++;
-                idx.count--;
-                store.writeIndex(idx);
-                --queueSize;
-                metrics.flashWearBytes += counting->counters().bytesWritten;
-            }
-            metrics.maxRangeCount = std::max(metrics.maxRangeCount,
-                static_cast<std::uint32_t>(store.manifestRanges().size()));
-            checkAndCompact();
+            ++metrics.deadlocks;
+        }
+        metrics.maxRangeCount = std::max(metrics.maxRangeCount,
+            static_cast<std::uint32_t>(store.manifestRanges().size()));
+        checkAndCompact();
+    };
+
+    auto doPop = [&]() {
+        counting->resetCounters();
+        pqueue::FileStoreIndex idx;
+        store.readIndex(idx);
+        if (idx.count > 0) {
+            idx.head++;
+            idx.count--;
+            store.writeIndex(idx);
+            --queueSize;
+            metrics.flashWearBytes += counting->counters().bytesWritten;
+        }
+        metrics.maxRangeCount = std::max(metrics.maxRangeCount,
+            static_cast<std::uint32_t>(store.manifestRanges().size()));
+        checkAndCompact();
+    };
+
+    if (wp.burst) {
+        std::uint32_t opsLeft = wp.numOps;
+        while (opsLeft > 0) {
+            for (std::uint32_t i = 0; i < wp.burstSize && opsLeft > 0; ++i, --opsLeft)
+                doEnqueue();
+            const std::uint32_t toPop =
+                static_cast<std::uint32_t>(static_cast<float>(queueSize) * wp.popRatio);
+            for (std::uint32_t i = 0; i < toPop && opsLeft > 0; ++i, --opsLeft)
+                doPop();
+        }
+    } else {
+        for (std::uint32_t op = 0; op < wp.numOps; ++op) {
+            if ((queueSize == 0) || (nextRand() < wp.enqueueProb))
+                doEnqueue();
+            else
+                doPop();
         }
     }
 
@@ -513,23 +533,88 @@ int main() {
 
     // maxSegments=200 disables internal auto-compaction so the external strategy
     // is solely responsible for keeping range count in check.
-    // Trigger thresholds sweep: loose (30% dead or range>=3) vs tight (15% dead or range>=3).
-    const std::vector<WorkloadDef> workloads = {
-        // light: queue drains quickly
-        { "enqP=0.55 dead=25%", { 5000, 0.55, 64, 512, 200, 0.25f, 3 } },
-        { "enqP=0.55 dead=15%", { 5000, 0.55, 64, 512, 200, 0.15f, 3 } },
-        // balanced: queue oscillates
-        { "enqP=0.65 dead=25%", { 5000, 0.65, 64, 512, 200, 0.25f, 3 } },
-        { "enqP=0.65 dead=15%", { 5000, 0.65, 64, 512, 200, 0.15f, 3 } },
-        // heavy: queue fills fast
-        { "enqP=0.80 dead=25%", { 5000, 0.80, 64, 512, 200, 0.25f, 3 } },
-        { "enqP=0.80 dead=15%", { 5000, 0.80, 64, 512, 200, 0.15f, 3 } },
+    //
+    // SPEED NOTE: all sizes below are proportionally scaled down from the real-world
+    // values for simulation runtime. Real values: maxSegmentBytes=4096, recordSizes=
+    // 64/150/492, burstSizes=100/500/2000. Scaled by 1/8: maxSegmentBytes=512,
+    // recordSizes=8/19/62, burstSizes=12/60/250. The records-per-segment ratio is
+    // preserved within rounding (overhead is fixed at 24 bytes per event).
+    // BEFORE MAKING A FINAL STRATEGY DECISION: revert to real-world sizes and rerun
+    // to confirm findings hold at actual LittleFS block sizes and payload sizes.
+
+    // --- Random interleaved workload (baseline) ---
+    const std::vector<WorkloadDef> randomWorkloads = {
+        { "enqP=0.55", { 5000, 0.55, 19, 512, 200, 0.25f, 3 } },
+        { "enqP=0.65", { 5000, 0.65, 19, 512, 200, 0.25f, 3 } },
+        { "enqP=0.80", { 5000, 0.80, 19, 512, 200, 0.25f, 3 } },
     };
 
-    for (const auto& wl : workloads) {
-        std::printf("\nWorkload: %s  ops=%u  maxSeg=%uB  deadTrig=%.0f%%  rangeTrig=%u\n",
-            wl.label, wl.params.numOps, wl.params.maxSegmentBytes,
-            wl.params.deadRatioTrigger * 100.0f, wl.params.rangePressureTrigger);
+    // --- Burst workload (offline consumer pattern) ---
+    // Models the primary real-world failure mode: device enqueues continuously
+    // while the server/network is down (burst phase), then drains rapidly when
+    // connectivity resumes (pop phase). This creates full ranges with concentrated
+    // dead bytes -- exactly the case compaction must handle.
+    //
+    // Parameters swept:
+    //   burstSize  -- records enqueued per offline cycle (12=short, 250=long outage)
+    //   popRatio   -- fraction of queue drained per online cycle (25%=slow, 90%=fast)
+    //   recordSize -- bytes per record (8=small, 19=target app, 62=large)
+    //
+    // Record size matters because it determines records-per-segment, which controls
+    // how many pops are needed before a segment can be eliminated by compaction.
+    // Small records pack more per segment: more pops required, compaction fires later.
+    // Large records pack fewer per segment: compaction fires earlier and more often.
+    const std::uint32_t numBurstOps = 15000;
+    const std::vector<WorkloadDef> burstWorkloads = {
+        // small records (8 bytes, ~14 records/segment)
+        { "burst=12  pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.25f } },
+        { "burst=12  pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.50f } },
+        { "burst=12  pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.90f } },
+        { "burst=60  pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.25f } },
+        { "burst=60  pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.50f } },
+        { "burst=60  pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.90f } },
+        { "burst=250 pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.25f } },
+        { "burst=250 pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.50f } },
+        { "burst=250 pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.90f } },
+        // target records (19 bytes, ~11 records/segment)
+        { "burst=12  pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.25f } },
+        { "burst=12  pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.50f } },
+        { "burst=12  pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.90f } },
+        { "burst=60  pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.25f } },
+        { "burst=60  pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.50f } },
+        { "burst=60  pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.90f } },
+        { "burst=250 pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.25f } },
+        { "burst=250 pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.50f } },
+        { "burst=250 pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.90f } },
+        // large records (62 bytes, ~5 records/segment)
+        { "burst=12  pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.25f } },
+        { "burst=12  pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.50f } },
+        { "burst=12  pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.90f } },
+        { "burst=60  pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.25f } },
+        { "burst=60  pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.50f } },
+        { "burst=60  pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.90f } },
+        { "burst=250 pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.25f } },
+        { "burst=250 pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.50f } },
+        { "burst=250 pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.90f } },
+    };
+
+    std::printf("=== Random interleaved workload (baseline) ===\n");
+    for (const auto& wl : randomWorkloads) {
+        std::printf("\nWorkload: %s  ops=%u  rec=%uB  maxSeg=%uB  deadTrig=%.0f%%\n",
+            wl.label, wl.params.numOps, wl.params.recordSize,
+            wl.params.maxSegmentBytes, wl.params.deadRatioTrigger * 100.0f);
+        printHeader();
+        for (auto& strat : strategies) {
+            SimMetrics m = runSimulation(wl.params, *strat);
+            printRow(strat->name(), m);
+        }
+    }
+
+    std::printf("\n=== Burst workload (offline consumer pattern) ===\n");
+    for (const auto& wl : burstWorkloads) {
+        std::printf("\nWorkload: %s  ops=%u  maxSeg=%uB  deadTrig=%.0f%%\n",
+            wl.label, wl.params.numOps,
+            wl.params.maxSegmentBytes, wl.params.deadRatioTrigger * 100.0f);
         printHeader();
         for (auto& strat : strategies) {
             SimMetrics m = runSimulation(wl.params, *strat);
