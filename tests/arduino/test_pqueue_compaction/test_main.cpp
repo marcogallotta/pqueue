@@ -63,8 +63,9 @@ std::string makePayload(std::uint32_t seq) {
 
 struct RangeStat {
     pqueue::AppendLogStore::CompactionRange range;
-    std::uint32_t totalBytes = 0;
-    std::uint32_t liveBytes  = 0;
+    std::uint32_t totalBytes    = 0;
+    std::uint32_t liveBytes     = 0;
+    std::uint32_t inputSegCount = 0;
     std::uint32_t deadBytes() const {
         return totalBytes > liveBytes ? totalBytes - liveBytes : 0;
     }
@@ -72,6 +73,13 @@ struct RangeStat {
         return totalBytes > 0
             ? static_cast<float>(deadBytes()) / static_cast<float>(totalBytes)
             : 0.0f;
+    }
+    std::uint32_t predictedOutputSegs() const {
+        if (liveBytes == 0) return 0;
+        return (liveBytes + kMaxSegmentBytes - 1) / kMaxSegmentBytes;
+    }
+    bool wouldConsolidate() const {
+        return predictedOutputSegs() < inputSegCount;
     }
 };
 
@@ -84,8 +92,9 @@ std::vector<RangeStat> buildRangeStats(const pqueue::AppendLogStore& store) {
         rs.range = {r.startGen, r.endGen};
         for (const auto& ss : segStats) {
             if (ss.generation >= r.startGen && ss.generation <= r.endGen) {
-                rs.totalBytes += ss.totalBytes;
-                rs.liveBytes  += ss.liveBytes;
+                rs.totalBytes    += ss.totalBytes;
+                rs.liveBytes     += ss.liveBytes;
+                rs.inputSegCount += 1;
             }
         }
         result.push_back(rs);
@@ -158,11 +167,10 @@ void test_compaction_burst_workload() {
         const bool newSeg  = segCount > prevSegCount;
         const bool pressure = rangeCount >= kRangePressureTrigger;
         if (newSeg || pressure) {
-            bool useful = pressure;
-            if (!useful) {
-                for (const auto& rs : buildRangeStats(store)) {
-                    if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
-                }
+            bool useful = false;
+            for (const auto& rs : buildRangeStats(store)) {
+                if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
+                if (pressure && rs.wouldConsolidate())   { useful = true; break; }
             }
             if (useful) tryCompact();
         }
