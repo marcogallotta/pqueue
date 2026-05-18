@@ -1,4 +1,5 @@
 #include "counting_file_system.h"
+#include "memory_file_system.h"
 #include "pqueue/append_log_store.h"
 #include "pqueue/append_log_common.h"
 #include "pqueue/file_system.h"
@@ -8,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <filesystem>
 #include <functional>
 #include <memory>
 #include <numeric>
@@ -336,19 +336,13 @@ struct SimMetrics {
 // Simulation runner
 // ---------------------------------------------------------------------------
 
-static const std::filesystem::path kSimSpoolDir = "build/pqueue-spools/compaction-sim";
-
 static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
     strategy.reset();
 
-    std::error_code ec;
-    std::filesystem::remove_all(kSimSpoolDir, ec);
-    std::filesystem::create_directories(kSimSpoolDir);
-
-    auto counting = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+    auto counting = std::make_shared<CountingFileSystem>(std::make_shared<MemoryFileSystem>());
 
     pqueue::AppendLogConfig cfg;
-    cfg.basePath        = kSimSpoolDir.string();
+    cfg.basePath        = "sim";
     cfg.fileSystem      = counting;
     cfg.maxSegmentBytes = wp.maxSegmentBytes;
     cfg.maxSegments     = wp.maxSegments;
