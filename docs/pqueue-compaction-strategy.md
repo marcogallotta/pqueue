@@ -157,16 +157,67 @@ passing case, higher than the 1-25 estimate from the scaled run. This must be ve
 on-device; if stall latency is unacceptable the trigger thresholds or segment size will
 need tuning.
 
+## On-device validation
+
+Test: `tests/arduino/test_pqueue_compaction/test_main.cpp`. Environment: `esp32s3-compaction`
+in `platformio.ini`. Build and upload with `~/venvs/esp/bin/pio test -e esp32s3-compaction
+--without-testing`.
+
+Workload run: burst=100/pop=90%/rec=150B, 5 cycles, HighestDeadRatio strategy.
+
+### Trigger fix
+
+The sim uses a rising-edge trigger on range count (new range added). On-device, range count
+stays at 1 throughout all cycles: all segment generations fall in one contiguous range and
+compacted output stays in that same range. The range-count rising edge never fires.
+
+Fix: track segment count instead of range count. A new segment file is the correct rising
+edge -- it means new data has been written that may be worth compacting. The trigger then
+checks dead ratio against kDeadRatioTrigger (0.25) and fires compaction if any range
+qualifies. This is implemented in test_main.cpp; the store itself has no built-in trigger
+and does not need to change.
+
+### Results
+
+  Workload: burst=100 pop=90% rec=150B cycles=5
+  Compactions: 100  NoOps: 0  MaxOutSegs: 1
+  MaxLatency: 1090 ms
+  Deadlocks: 0  CapExhausted: 0  FinalQueueSize: 12
+
+- MaxOutSegs=1 confirms the sim prediction for this workload.
+- 0 deadlocks, 0 capacity exhaustion. All enqueued records readable after workload.
+- outSegs=0 results (printed but not counted in MaxOutSegs) are ranges where all records
+  were dead; compaction deleted the segments with no output written. This is correct.
+
+### Latency model correction
+
+The 45ms/segment estimate from the sim was a write-only approximation. Actual measured
+latency per compactRange() call at 150B records and 1 output segment: 200-1090ms. The
+dominant cost is reading all records in the range to find live ones, not just the write.
+The 45ms model is wrong and should not be used for stall estimates. The correct figure
+for this workload at 1 output segment is roughly 200-1100ms.
+
+MaxOutSeg=60 (worst passing case from the real-world sim run, burst=500/pop=90%/rec=492)
+at ~500-1100ms per single-segment compaction would imply a stall in the range of tens of
+seconds in the absolute worst case. This needs a dedicated on-device run at those
+parameters before shipping.
+
+### Compaction frequency
+
+With kDeadRatioTrigger=0.25 and segment-count rising edge, 100 compactions fired over
+5 cycles x 100 enqueues. This is roughly once per segment rotation, which is aggressive.
+Raising kDeadRatioTrigger (e.g. to 0.40 or 0.50) would reduce compaction frequency at
+the cost of higher peak dead-byte accumulation. Tuning is deferred until the full
+burst=500/pop=90%/rec=492 run is complete.
+
 ## Next steps
 
-**1. On-device validation.**
-Run HighestDeadRatio and CostBenefit against a representative burst workload on real
-LittleFS hardware. Key things to confirm:
-- Compaction call latency matches the ~45ms/segment estimate.
-- MaxOutSeg on a real burst workload (expect up to ~60 in worst passing case per sim) stays
-  within acceptable stall bounds. If not, tune deadRatioTrigger or rangePressureTrigger.
-- No regressions in the broader queue behaviour (manifest integrity, correct live record
-  replay after compaction).
+**1. Full on-device run at worst-case parameters.**
+Run burst=500/pop=90%/rec=492, 15 cycles. The sim predicts MaxOutSegs up to 60 for this
+workload. Key question: what is the actual stall duration at MaxOutSegs=60 on real
+LittleFS hardware? If it exceeds an acceptable threshold, tune kDeadRatioTrigger or
+kRangePressureTrigger. The test parameters are in test_main.cpp constants; bump kCycles
+to 15, kBurstSize to 500, kRecordSize to 492 for this run.
 
 **2. Final strategy selection.**
 Pick one of HighestDeadRatio or CostBenefit. Both pass all recoverable workloads and are
