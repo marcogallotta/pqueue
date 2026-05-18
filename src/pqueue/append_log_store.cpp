@@ -568,7 +568,7 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
     return result;
 }
 
-Status AppendLogStore::compactRange(const CompactionRange& range) {
+Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
     auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
         [&](const ManifestRange& r) {
             return r.startGen == range.startGen && r.endGen == range.endGen;
@@ -587,6 +587,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range) {
         md.ranges         = std::move(newRanges);
         md.tailGeneration = activeGeneration_;
         md.nextGeneration = nextGeneration_;
+        if (outputSegCount) *outputSegCount = 0;
         return publishManifest(md);
     }
 
@@ -613,6 +614,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range) {
 
     const std::size_t inputSegCount = static_cast<std::size_t>(range.endGen - range.startGen + 1);
     if (outputSegs.size() > 1 && outputSegs.size() >= inputSegCount) return Status::noOp();
+    if (outputSegCount) *outputSegCount = static_cast<std::uint32_t>(outputSegs.size());
 
     const std::uint32_t firstNewGen = outputSegs.front().gen;
     const std::uint32_t lastNewGen  = outputSegs.back().gen;

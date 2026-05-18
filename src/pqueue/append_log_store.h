@@ -57,7 +57,7 @@ public:
     Status collectLiveRecords(const CompactionRange& range,
                               std::vector<CompactionLiveRecord>& out) const;
 
-    Status compactRange(const CompactionRange& range);
+    Status compactRange(const CompactionRange& range, std::uint32_t* outputSegCount = nullptr);
     Status compactOneSegment();
     Status compactFull();
 

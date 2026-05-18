@@ -326,15 +326,16 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
         }
 
         counting->resetCounters();
-        auto cst = store.compactRange(*chosen);
+        std::uint32_t outSegs = 0;
+        auto cst = store.compactRange(*chosen, &outSegs);
         const std::uint64_t compactWritten = counting->counters().bytesWritten;
 
         if (cst.ok() && !cst.isNoOp()) {
-            metrics.flashWearBytes     += compactWritten;
-            metrics.liveBytesCompacted += liveBefore;
-            metrics.deadBytesReclaimed += deadBefore;
-            ++metrics.totalCompactSegments;
-            metrics.maxSegmentsPerCompact = std::max(metrics.maxSegmentsPerCompact, 1u);
+            metrics.flashWearBytes        += compactWritten;
+            metrics.liveBytesCompacted    += liveBefore;
+            metrics.deadBytesReclaimed    += deadBefore;
+            metrics.totalCompactSegments  += outSegs;
+            metrics.maxSegmentsPerCompact  = std::max(metrics.maxSegmentsPerCompact, outSegs);
         } else {
             ++metrics.compactionNoOps;
         }
@@ -436,15 +437,15 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
 // ---------------------------------------------------------------------------
 
 static void printHeader() {
-    std::printf("%-22s | %8s | %9s | %8s | %8s | %8s | %8s | %8s | %8s\n",
-        "Strategy", "WriteAmp", "Wear(KB)", "MaxRange", "Compacts", "NoOps", "Skips", "Deadlock", "CapExhst");
-    std::printf("%-22s-+-%8s-+-%9s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s\n",
+    std::printf("%-22s | %8s | %9s | %8s | %8s | %8s | %8s | %8s | %8s | %8s\n",
+        "Strategy", "WriteAmp", "Wear(KB)", "MaxRange", "Compacts", "NoOps", "Skips", "MaxOutSeg", "Deadlock", "CapExhst");
+    std::printf("%-22s-+-%8s-+-%9s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s\n",
         "----------------------", "--------", "---------", "--------",
-        "--------", "--------", "--------", "--------", "--------");
+        "--------", "--------", "--------", "--------", "--------", "--------");
 }
 
 static void printRow(const char* name, const SimMetrics& m) {
-    std::printf("%-22s | %8.2f | %9.1f | %8u | %8u | %8u | %8u | %8u | %8u\n",
+    std::printf("%-22s | %8.2f | %9.1f | %8u | %8u | %8u | %8u | %8u | %8u | %8u\n",
         name,
         m.writeAmplification(),
         static_cast<double>(m.flashWearBytes) / 1024.0,
@@ -452,6 +453,7 @@ static void printRow(const char* name, const SimMetrics& m) {
         m.compactionAttempts,
         m.compactionNoOps,
         m.compactionSkips,
+        m.maxSegmentsPerCompact,
         m.trueDeadlocks,
         m.capacityExhausted);
 }
