@@ -412,15 +412,7 @@ void AppendLogStore::applyManifestToRam(const ManifestData& md) {
 
 Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {
     const std::string headerBytes = serializeSegmentHeader(generation, startSeq);
-    Status st = fs()->writeFile(segmentName(generation), headerBytes);
-    if (!st.ok()) return st;
-    activeGeneration_ = generation;
-    activeSegmentBytes_ = kSegmentHeaderBytes;
-    activeGenerations_.push_back(generation);
-    if (generation >= nextGeneration_) {
-        nextGeneration_ = generation + 1;
-    }
-    return Status::success();
+    return fs()->writeFile(segmentName(generation), headerBytes);
 }
 
 Status AppendLogStore::rotateSegment() {
@@ -450,8 +442,15 @@ Status AppendLogStore::rotateSegment() {
     ManifestData manifest;
     manifest.ranges         = std::move(newRanges);
     manifest.tailGeneration = newGen;
-    manifest.nextGeneration = nextGeneration_;
-    return publishManifest(manifest);
+    manifest.nextGeneration = newGen + 1;
+    st = publishManifest(manifest);
+    if (!st.ok()) return st;
+
+    // RAM updated only after durable manifest publish.
+    // publishManifest -> applyManifestToRam already set activeGenerations_ and nextGeneration_.
+    activeGeneration_    = newGen;
+    activeSegmentBytes_  = kSegmentHeaderBytes;
+    return Status::success();
 }
 
 Status AppendLogStore::ensureActiveSegment(std::uint32_t baseSeq) {
@@ -463,8 +462,14 @@ Status AppendLogStore::ensureActiveSegment(std::uint32_t baseSeq) {
         ManifestData manifest;
         manifest.ranges         = manifestRanges_;
         manifest.tailGeneration = newGen;
-        manifest.nextGeneration = nextGeneration_;
-        return publishManifest(manifest);
+        manifest.nextGeneration = newGen + 1;
+        st = publishManifest(manifest);
+        if (!st.ok()) return st;
+
+        // RAM updated only after durable manifest publish.
+        activeGeneration_   = newGen;
+        activeSegmentBytes_ = kSegmentHeaderBytes;
+        return Status::success();
     }
     return Status::success();
 }

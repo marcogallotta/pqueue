@@ -198,33 +198,25 @@ Tests are not optional at any stage. Each stage must be fully tested before the 
 
 These are confirmed code defects or API contract violations, ordered by priority.
 
-### 1. RAM mutated before manifest is durable (correctness bug)
-
-`createSegment()` sets `activeGeneration_`, `activeSegmentBytes_`, `activeGenerations_`, and `nextGeneration_` before the caller calls `publishManifest()`. If the manifest write fails, the live object believes the new segment is the active tail and subsequent `writeRecord()` calls write into it -- a segment not referenced by any manifest. On the next remount the store finds segment files with no valid manifest and returns `DataCorrupt`. The store is unrecoverable through normal operation after a single manifest write failure.
-
-Fix: do not mutate any of those four fields inside `createSegment()`. Instead, return the new generation as an out-parameter and have `rotateSegment()` / `ensureActiveSegment()` apply the RAM update only after `publishManifest()` succeeds.
-
-Add a test: inject a manifest write failure on the first `writeRecord()`, then disable the failure and call `writeRecord()` again on the same live object. Remount and verify the store is not corrupt and the second record is readable.
-
-### 2. Compaction selector is OldestFirst, not ratio-based (correctness bug)
+### 1. Compaction selector is OldestFirst, not ratio-based (correctness bug)
 
 `chooseCompactionRange()` returns `manifestRanges_[0]` unconditionally. The compaction strategy investigation (`docs/pqueue-compaction-strategy.md`) established that oldest-first produces true deadlocks under sustained load and must be replaced with a dead-ratio-gated selector. The strategy doc work has not been integrated.
 
 Fix: replace `chooseCompactionRange()` with a `HighestDeadRatio` selector -- compute dead bytes per full range using `segmentStats()`, pick the range with the highest dead/total ratio, and return nullopt if no range has any dead bytes. Wire `segmentStats()` into the selector (it already exists). `needsCompaction()` should also gain a dead-ratio check alongside the segment-count and free-space checks, so the trigger fires when there is actually something to reclaim.
 
-### 3. 1-input to 1-output compaction is not gated out (minor correctness)
+### 2. 1-input to 1-output compaction is not gated out (minor correctness)
 
 `compactRange()` line 616: `if (outputSegs.size() > 1 && outputSegs.size() >= inputSegCount)`. When `inputSegCount == 1` and `outputSegs.size() == 1` the condition is false and compaction proceeds, creating a new segment generation with identical content and no dead bytes reclaimed. This wastes a flash write and a generation number.
 
 Fix: change the condition to `if (outputSegs.size() >= inputSegCount)`. A compaction that does not reduce segment count is never useful and should be a no-op.
 
-### 4. Post-compaction range merge is one-sided
+### 3. Post-compaction range merge is one-sided
 
-After `compactRange()` replaces a range with a new one (lines 643-648), it only checks whether the replacement merges with the next range. It does not check the previous range. This is currently harmless because `chooseCompactionRange()` always picks `manifestRanges_[0]` (no previous range), but will become a real gap once finding 2 is fixed and the selector can pick any range.
+After `compactRange()` replaces a range with a new one (lines 643-648), it only checks whether the replacement merges with the next range. It does not check the previous range. This is currently harmless because `chooseCompactionRange()` always picks `manifestRanges_[0]` (no previous range), but will become a real gap once finding 1 is fixed and the selector can pick any range.
 
 Fix: after replacing the range, attempt to merge with both the preceding and following ranges in a single normalization pass. This is also the right place to enforce the 64-byte manifest size limit as a pre-publish assertion.
 
-### 5. `maxTotalBytes` / `reservedBytes` is configured but not enforced
+### 4. `maxTotalBytes` / `reservedBytes` is configured but not enforced
 
 `Queue::open()` maps `config.reservedBytes` to `appendConfig.maxTotalBytes`. `AppendLogStore` stores this value but `canEnqueue()` never reads it -- capacity is checked only against filesystem free bytes minus `minFreeBytes`. The field is dead and the documented capacity reservation does nothing.
 

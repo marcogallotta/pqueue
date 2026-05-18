@@ -72,6 +72,39 @@ void cleanSpool() {
     std::filesystem::remove_all(kSpoolDir, ec);
 }
 
+class FaultInjectingFs final : public pqueue::FileSystem {
+public:
+    explicit FaultInjectingFs(std::shared_ptr<pqueue::FileSystem> inner)
+        : inner_(std::move(inner)) {}
+
+    // Fail the next writeFile whose name contains this substring. Cleared on match.
+    std::string failNextWriteFileTo;
+
+    pqueue::Status mount(const std::string& p) override { return inner_->mount(p); }
+    pqueue::Status readFile(const std::string& n, std::string& o) override { return inner_->readFile(n, o); }
+    pqueue::Status writeFile(const std::string& name, const std::string& data) override {
+        if (!failNextWriteFileTo.empty() && name.find(failNextWriteFileTo) != std::string::npos) {
+            failNextWriteFileTo.clear();
+            return pqueue::Status::failure(pqueue::StatusCode::WriteFailed, "injected write failure");
+        }
+        return inner_->writeFile(name, data);
+    }
+    pqueue::Status readAt(const std::string& n, std::uint64_t o, std::size_t s, std::string& out) override { return inner_->readAt(n, o, s, out); }
+    pqueue::Status writeAt(const std::string& n, std::uint64_t o, const std::string& d) override { return inner_->writeAt(n, o, d); }
+    pqueue::Status resizeFile(const std::string& n, std::uint64_t s) override { return inner_->resizeFile(n, s); }
+    pqueue::Status fileSize(const std::string& n, std::uint64_t& o) override { return inner_->fileSize(n, o); }
+    pqueue::Status removeFile(const std::string& n) override { return inner_->removeFile(n); }
+    pqueue::Status renameFile(const std::string& f, const std::string& t) override { return inner_->renameFile(f, t); }
+    pqueue::Status listFiles(std::vector<std::string>& o) override { return inner_->listFiles(o); }
+    pqueue::Status tryAcquireLockFile(const std::string& n, const std::string& c) override { return inner_->tryAcquireLockFile(n, c); }
+    pqueue::Status releaseLockFile(const std::string& n, const std::string& c) override { return inner_->releaseLockFile(n, c); }
+    pqueue::Status recoverStaleLockFile(const std::string& n, const std::string& c) override { return inner_->recoverStaleLockFile(n, c); }
+    std::uint64_t freeBytes() const override { return inner_->freeBytes(); }
+
+private:
+    std::shared_ptr<pqueue::FileSystem> inner_;
+};
+
 pqueue::Config makeConfig() {
     pqueue::Config cfg;
     cfg.basePath = kSpoolDir.string();
@@ -1740,6 +1773,120 @@ TEST_CASE("rollover: dangling new segment ignored when publish fails (critical)"
         CHECK(q.peek(out).ok());
         CHECK_EQ(out, "A");
     }
+}
+
+TEST_CASE("rollover: failed manifest publish does not poison live object (critical)") {
+    // Bug (fixed): createSegment() used to mutate activeGeneration_, activeSegmentBytes_,
+    // activeGenerations_, and nextGeneration_ before publishManifest() succeeded. If the
+    // manifest write failed, the live object believed the new segment was the active tail.
+    // Subsequent writeRecord() calls wrote into an unmanifested segment; fresh remount
+    // returned DataCorrupt.
+    //
+    // Fix: createSegment() only writes the file; callers apply RAM state only after
+    // publishManifest() succeeds.
+    //
+    // This test injects a manifest write failure on the first enqueue (which triggers
+    // ensureActiveSegment), then verifies the live object recovers cleanly: the second
+    // enqueue succeeds, and a fresh remount can read it.
+#ifndef ARDUINO
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto inner = pqueue::makePosixFileSystem();
+    auto faultFs = std::make_shared<FaultInjectingFs>(inner);
+
+    pqueue::AppendLogConfig cfg = makeStoreConfig();
+    cfg.fileSystem = faultFs;
+
+    {
+        pqueue::AppendLogStore store(cfg);
+        REQUIRE(store.mount().ok());
+
+        // Fail the first manifest write — ensureActiveSegment will call publishManifest
+        // which writes a manifest slot.
+        faultFs->failNextWriteFileTo = "manifest";
+        const auto st = store.writeRecord(0, "hello");
+        CHECK_FALSE(st.ok());
+
+        // Fault is cleared; second write must succeed.
+        pqueue::FileStoreIndex dummy{};
+        REQUIRE(store.writeRecord(0, "hello").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+    }
+
+    // Fresh remount (no fault) must find exactly one record and return it.
+    {
+        pqueue::AppendLogStore store2(makeStoreConfig());
+        REQUIRE(store2.mount().ok());
+        pqueue::FileStoreIndex idx;
+        REQUIRE(store2.readIndex(idx).ok());
+        CHECK_EQ(idx.count, 1U);
+        std::string out;
+        REQUIRE(store2.readRecord(0, out).ok());
+        CHECK_EQ(out, "hello");
+    }
+#endif
+}
+
+TEST_CASE("rollover: failed manifest publish during rotation does not poison live object (critical)") {
+    // Regression test for the same RAM-before-manifest bug, exercised through
+    // rotateSegment() rather than ensureActiveSegment().
+    //
+    // Setup: maxSegmentBytes sized to fit exactly one 1-byte record per segment.
+    // Write A so seg 1 is manifest tail and full. Inject a manifest failure on the
+    // next write so the rotation to seg 2 fails during publishManifest(). Clear the
+    // fault and write B on the same live object. Fresh remount must read A then B.
+#ifndef ARDUINO
+    using namespace pqueue::append_log_detail;
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    // One 1-byte record exactly fills a segment: header(20) + enqHeader(16) + 1 + trailer(8) = 45
+    const std::uint32_t maxSeg = kSegmentHeaderBytes + kEnqueueOverheadBytes + 1;
+
+    auto inner = pqueue::makePosixFileSystem();
+    auto faultFs = std::make_shared<FaultInjectingFs>(inner);
+
+    pqueue::AppendLogConfig cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = maxSeg;
+    cfg.fileSystem = faultFs;
+
+    {
+        pqueue::AppendLogStore store(cfg);
+        REQUIRE(store.mount().ok());
+
+        // Write A — seg 1 created, manifest published (tail=1), A written; seg 1 now full.
+        pqueue::FileStoreIndex dummy{};
+        REQUIRE(store.writeRecord(0, "A").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+
+        // Inject failure on the next manifest write. Writing B overflows seg 1 and
+        // triggers rotateSegment() → createSegment(2) succeeds but publishManifest fails.
+        faultFs->failNextWriteFileTo = "manifest";
+        const auto st = store.writeRecord(1, "B");
+        CHECK_FALSE(st.ok());
+
+        // Fault cleared. Retry B on the same live object — rotation succeeds this time.
+        REQUIRE(store.writeRecord(1, "B").ok());
+        REQUIRE(store.writeIndex(dummy).ok());
+    }
+
+    // Fresh remount: must find A in seg 1 and B in seg 2, no DataCorrupt.
+    {
+        pqueue::AppendLogConfig cfg2 = makeStoreConfig();
+        cfg2.maxSegmentBytes = maxSeg;
+        pqueue::AppendLogStore store2(cfg2);
+        REQUIRE(store2.mount().ok());
+        pqueue::FileStoreIndex idx;
+        REQUIRE(store2.readIndex(idx).ok());
+        CHECK_EQ(idx.count, 2U);
+        std::string out;
+        REQUIRE(store2.readRecord(0, out).ok());
+        CHECK_EQ(out, "A");
+        REQUIRE(store2.readRecord(1, out).ok());
+        CHECK_EQ(out, "B");
+    }
+#endif
 }
 
 TEST_CASE("rollover: merged range [1,2] replays both segments in FIFO order") {
