@@ -147,10 +147,18 @@ With `recordSize=64` and `maxSegmentBytes=512`, each segment holds exactly 5 rec
 
 This is not a bug -- the gating condition is correct. But it means the simulator workload needs adjustment before multi-segment output can be evaluated. Specifically: the dead-ratio trigger must be raised to at least ~35% (the threshold where a full segment can be eliminated from the oldest range), or the record size must be reduced relative to segment size (fewer records per segment means fewer pops are needed to free one segment).
 
-### Step 2: Tune simulator and record findings
+### Step 2: Fix simulator workload realism and record findings
 
-Adjust the simulator workload to produce conditions where multi-segment output fires:
-- Raise `deadRatioTrigger` to 0.40-0.50 (allow enough dead records to accumulate before triggering), OR
-- Reduce `recordSize` relative to `maxSegmentBytes` so fewer pops are needed to eliminate a segment
+The simulator was updated to use `maxSegmentBytes=4096` (the default config value) and `recordSize=150` (representative of the target app's SwitchBot/Xiaomi JSON payloads). With these params each segment holds ~23 records.
 
-Re-run and record which strategies minimise write amplification and whether deadlocks collapse. Update `docs/pqueue-append-log-design.md` future work section to reflect what is still outstanding.
+Updated results show the opposite extreme from before: zero compactions and zero deadlocks across almost all workloads. The 5000-op workload is now too small to stress the system -- with ~23 records/segment, 5000 ops generates only ~120 rotations, all of which merge into one contiguous range. Dead-ratio thresholds are never hit because the range grows continuously (growing denominator dilutes the ratio), and range pressure never builds.
+
+The sim was previously producing interesting results only because 512-byte segments made things artificially tight -- 5x more rotations per op, 5x more range pressure. At the correct segment size, the workload needs to be longer and more adversarial.
+
+**Outstanding work before the sim produces useful findings:**
+
+1. **Increase numOps to ~50000.** With larger segments fewer rotations occur per op; proportionally more operations are needed to generate equivalent range pressure. At the current rate, 5000 ops represents roughly one day of sensor data -- too short to observe compaction behavior in a realistic steady-state queue.
+
+2. **Add an adversarial burst workload.** The scenario that matters most for an embedded queue is not random interleaved enqueue/pop but an offline consumer: the device enqueues continuously (WiFi down, server unreachable) until the queue fills, then drains rapidly when the consumer reconnects. A pure-enqueue phase followed by a pure-pop phase stresses range count and space reclaim in a way that random interleaving does not. This should be a separate workload variant, not a replacement.
+
+3. **Sweep record sizes.** Record size has a first-order effect on compaction behavior because it determines how many records fit per segment, which in turn determines how many pops are needed before a segment can be eliminated. A store holding tiny records (e.g. 16 bytes, ~200 records/segment) needs far more pops to free a segment than one holding large records (e.g. 1024 bytes, ~3 records/segment). The right strategy and trigger threshold can differ substantially across this range. Once the workload is stressful enough to generate compaction activity, the sweep should cover at least three sizes: small (~16 bytes), medium (~150 bytes, the target app), and large (~1024 bytes). This is intentionally deferred until the workload issues above are resolved -- there is no point sweeping record size against a workload that never exercises compaction.
