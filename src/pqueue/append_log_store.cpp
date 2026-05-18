@@ -529,7 +529,43 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
 
 std::optional<AppendLogStore::CompactionRange> AppendLogStore::chooseCompactionRange() const {
     if (manifestRanges_.empty()) return std::nullopt;
-    return CompactionRange{manifestRanges_[0].startGen, manifestRanges_[0].endGen};
+
+    const auto stats = segmentStats();
+
+    std::size_t bestIdx   = manifestRanges_.size();
+    float       bestRatio = -1.0f;
+    for (std::size_t i = 0; i < manifestRanges_.size(); ++i) {
+        const auto& r = manifestRanges_[i];
+
+        bool hasLive = false;
+        for (const auto& rec : records_) {
+            if (rec.segmentGeneration >= r.startGen && rec.segmentGeneration <= r.endGen) {
+                hasLive = true;
+                break;
+            }
+        }
+        if (!hasLive) {
+            return CompactionRange{r.startGen, r.endGen};
+        }
+
+        std::uint32_t total = 0;
+        std::uint32_t dead  = 0;
+        for (const auto& s : stats) {
+            if (s.generation < r.startGen || s.generation > r.endGen) continue;
+            total += s.totalBytes;
+            dead  += s.deadBytes();
+        }
+        if (total == 0) continue;
+        const float ratio = static_cast<float>(dead) / static_cast<float>(total);
+        if (ratio > bestRatio) {
+            bestRatio = ratio;
+            bestIdx   = i;
+        }
+    }
+
+    if (bestRatio <= 0.0f || bestIdx >= manifestRanges_.size()) return std::nullopt;
+    const auto& best = manifestRanges_[bestIdx];
+    return CompactionRange{best.startGen, best.endGen};
 }
 
 Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
@@ -670,9 +706,15 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     std::vector<ManifestRange> newRanges = manifestRanges_;
     newRanges[rangeIdx] = {firstNewGen, lastNewGen};
+    // Merge with following range if contiguous.
     if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
         newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
+    }
+    // Merge with preceding range if contiguous.
+    if (rangeIdx > 0 && newRanges[rangeIdx - 1].endGen + 1 == newRanges[rangeIdx].startGen) {
+        newRanges[rangeIdx - 1].endGen = newRanges[rangeIdx].endGen;
+        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
     }
 
     ManifestData md;

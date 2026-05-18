@@ -2102,14 +2102,16 @@ TEST_CASE("compaction: collectLiveRecords returns records in FIFO order; out-of-
     using namespace pqueue::append_log_detail;
 
     // One 1-byte record costs kEnqueueHeaderBytes(16) + 1 + kEventTrailerBytes(8) = 25 bytes.
-    // Header = 20. Two records fill 20+25+25 = 70 bytes exactly; third triggers rotation.
+    // Header = 20. Two records + one rewrite fill 20+25+25+25 = 95 bytes; fourth event triggers
+    // rotation. Rewrite creates dead bytes so the ratio selector picks up gen=1.
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
+    cfg.maxSegmentBytes = 95;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
+    CHECK(store.rewriteRecord(1, "a").ok()); // dead bytes in gen=1; seq=1 payload unchanged
     storeEnqueue(store, 3, "c"); // triggers rotation: gen=1 becomes full range, gen=2 = tail
 
     const auto range = store.chooseCompactionRange();
@@ -2196,6 +2198,36 @@ TEST_CASE("compaction: compactOneSegment removes dead range without writing a ne
     std::string out;
     CHECK(store.readRecord(1, out).ok()); // live record in gen=2 still accessible
     CHECK_EQ(out, "c");
+}
+
+TEST_CASE("compaction: compactOneSegment is no-op under segment-count pressure when all ranges are live") {
+    // needsCompaction() fires because activeGenerations_.size() > maxSegments.
+    // All records are live — no dead bytes — so compactOneSegment() must return no-op
+    // without writing any new segment. The write path must tolerate this cleanly.
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70; // fits exactly 2 one-byte records per segment
+    cfg.maxSegments     = 1;  // trigger needsCompaction() at 2+ active generations
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3); 2 gens > maxSegments=1
+
+    // needsCompaction() would fire due to segment count; all records live → no-op
+    const auto st = store.compactOneSegment();
+    CHECK(st.ok());
+    CHECK(st.isNoOp()); // nothing to reclaim; no-op, not an error
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3))); // no new segment written
+
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
 }
 
 TEST_CASE("compaction: compactOneSegment is no-op when 1-in-1-out with no dead bytes") {
@@ -2288,7 +2320,8 @@ TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
 }
 
 TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output would not reduce segment count") {
-    // range {1,1} = 1 input segment; live records require 2 output segments; 2 >= 1 → no-op.
+    // range {1,1} = 1 input segment; seq=1 popped (dead bytes), seq=2+3 live require 2 output
+    // segments with maxSegmentBytes=50; 2 output > 1 input → no-op.
     using namespace pqueue::append_log_detail;
     cleanSpool();
     std::filesystem::create_directories(kSpoolDir);
@@ -2309,19 +2342,21 @@ TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output woul
         std::string seg = serializeSegmentHeader(1, 1);
         seg += serializeEnqueueEvent(1, "a");
         seg += serializeEnqueueEvent(2, "b");
+        seg += serializeEnqueueEvent(3, "c");
         std::ofstream f(segmentPath(1), std::ios::binary | std::ios::trunc);
         f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
     }
     {
-        const std::string hdr = serializeSegmentHeader(2, 3);
+        const std::string hdr = serializeSegmentHeader(2, 4);
         std::ofstream f(segmentPath(2), std::ios::binary | std::ios::trunc);
         f.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
     }
 
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 50; // liveBytes(70) > 50 → no-op
+    cfg.maxSegmentBytes = 50;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
+    storePop(store); // pop seq=1 → dead bytes in gen=1; seq=2+3 still live
     CHECK(store.compactOneSegment().ok());
 
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));      // no new segment
@@ -2423,6 +2458,9 @@ TEST_CASE("compaction: dangling segment from failed publish is harmless on remou
     std::string out;
     CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
     CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+
+    // Rewrite seq=1 to same value to create dead bytes in gen=1 so the ratio selector fires.
+    CHECK(store.rewriteRecord(1, "a").ok());
 
     // Manifest unchanged: gen=1 is still the compaction target
     const auto range = store.chooseCompactionRange();
@@ -2770,8 +2808,8 @@ TEST_CASE("compaction: multi-segment output survives remount") {
 }
 
 TEST_CASE("compaction: multi-segment output is no-op when output count equals input count") {
-    // range {1,2} = 2 input segments, all records live, live bytes require 2 output segments.
-    // 2 >= 2 → no-op.
+    // range {1,2} = 2 input segments; seq=1 popped (dead bytes), seq=2+3+4 live require 3
+    // output segments with maxSegmentBytes=50; 3 output > 2 input → no-op.
     using namespace pqueue::append_log_detail;
     cleanSpool();
     std::filesystem::create_directories(kSpoolDir);
@@ -2809,9 +2847,10 @@ TEST_CASE("compaction: multi-segment output is no-op when output count equals in
     }
 
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70; // 4 live records × 25 bytes = 100+20+20 bytes → 2 output segs
+    cfg.maxSegmentBytes = 50; // 3 live records each need their own segment → 3 output > 2 input
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
+    storePop(store); // pop seq=1 → dead bytes in gen=1; seq=2+3+4 still live
     auto st = store.compactOneSegment();
     CHECK(st.ok());
     CHECK(st.isNoOp());
