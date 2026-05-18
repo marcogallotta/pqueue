@@ -117,18 +117,64 @@ MaxOutSeg on passing workloads peaks at 1-25 (e.g. burst=250/pop=90%/rec=62 reac
 
 The two candidates are functionally indistinguishable on all tested workloads: same Deadlock/CapExhst split, similar write amplification and flash wear. The difference is the scoring function: HighestDeadRatio maximises dead fraction (dead/total); CostBenefit maximises dead-to-live ratio (dead/live), which directly minimises write amplification. Either is a correct choice.
 
+## Real-world scale rerun
+
+Sim parameters reverted to production values (maxSegmentBytes=4096, recordSizes=64/150/492,
+burstSizes=100/500/2000, numOps=50000). Results confirm and extend the scaled findings.
+
+### Confirmed findings
+
+HighestDeadRatio and CostBenefit remain identical across all 30 burst workloads and all 3
+random workloads. The Deadlock/CapExhst classification is consistent: failures are either
+all-deadlock or all-capacity-exhaustion with no mixed results.
+
+### New finding: DeferUntilPressure diverges at real scale
+
+The scaled run described DeferUntilPressure as structurally identical to HighestDeadRatio.
+At real scale it deadlocks on enqP=0.55 (Deadlock=1000) while all other candidates pass.
+The scaled description was wrong: at 4096-byte segments the structural equivalence breaks
+down. DeferUntilPressure is now a confirmed elimination on correctness grounds, not just
+redundancy grounds.
+
+### MinLiveBytesCopied write-amp divergence is larger at real scale
+
+The scaled run noted minor write-amp advantages for MinLiveBytesCopied on some workloads.
+At real scale the wear gap is more pronounced on large-burst/slow-pop workloads:
+
+- burst=2000/pop=25%/rec=64: 2132 KB vs 12080 KB (HighestDeadRatio/CostBenefit) -- ~6x less wear
+- burst=500/pop=25%/rec=150: 1685 KB vs 4912 KB -- ~3x less wear
+
+However it is worse on other workloads (burst=500/pop=25%/rec=492: WriteAmp 133 vs 67).
+The advantage is concentrated in a specific regime (very large bursts, slow drain, small
+records) and does not generalise across the sweep. MinLiveBytesCopied remains eliminated
+as not consistently dominant.
+
+### MaxOutSeg at real scale
+
+On genuinely passing workloads (Deadlock=0, CapExhst=0) MaxOutSeg peaks at 60
+(burst=500/pop=90%/rec=492). At 45ms/segment this is a ~2.7 second stall in the worst
+passing case, higher than the 1-25 estimate from the scaled run. This must be verified
+on-device; if stall latency is unacceptable the trigger thresholds or segment size will
+need tuning.
+
 ## Next steps
 
-**1. Revert to real-world scale and rerun.**
-All sim params are currently scaled ~1/8 from production values to keep runs fast (maxSegmentBytes: 4096->512, recordSizes: 64/150/492->8/19/62, burstSizes: 100/500/2000->12/60/250, numOps: 50000->15000). Before making the final strategy selection, revert these to real-world values and confirm that the Deadlock/CapExhst classification and the HighestDeadRatio/CostBenefit findings hold at production scale. The records-per-segment ratio is preserved by the scaling, so the findings are expected to hold, but this must be verified.
-
-**2. On-device validation.**
-Run HighestDeadRatio and CostBenefit against a representative burst workload on real LittleFS hardware. Key things to confirm:
+**1. On-device validation.**
+Run HighestDeadRatio and CostBenefit against a representative burst workload on real
+LittleFS hardware. Key things to confirm:
 - Compaction call latency matches the ~45ms/segment estimate.
-- MaxOutSeg on a real burst workload stays within acceptable stall bounds.
-- No regressions in the broader queue behaviour (manifest integrity, correct live record replay after compaction).
+- MaxOutSeg on a real burst workload (expect up to ~60 in worst passing case per sim) stays
+  within acceptable stall bounds. If not, tune deadRatioTrigger or rangePressureTrigger.
+- No regressions in the broader queue behaviour (manifest integrity, correct live record
+  replay after compaction).
 
-**3. Final strategy selection.**
-Pick one of HighestDeadRatio or CostBenefit. Both pass all recoverable workloads and are behaviourally identical in the sim. If on-device results show a write-amplification difference at real scale, prefer CostBenefit. Otherwise either is acceptable; HighestDeadRatio is slightly simpler to reason about.
+**2. Final strategy selection.**
+Pick one of HighestDeadRatio or CostBenefit. Both pass all recoverable workloads and are
+behaviourally identical in the sim at both scaled and real-world parameters. Either is
+acceptable; HighestDeadRatio is slightly simpler to reason about.
 
-**Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0): the queue is full of live data and no compaction strategy can help. The correct fix is application-level backpressure or a larger queue. `RangeLimitExceeded` in this state is correct and expected behaviour.
+**Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based
+strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0):
+the queue is full of live data and no compaction strategy can help. The correct fix is
+application-level backpressure or a larger queue. `RangeLimitExceeded` in this state is
+correct and expected behaviour.

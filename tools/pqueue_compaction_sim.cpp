@@ -480,19 +480,15 @@ int main() {
     // maxSegments=200 disables internal auto-compaction so the external strategy
     // is solely responsible for keeping range count in check.
     //
-    // SPEED NOTE: all sizes below are proportionally scaled down from the real-world
-    // values for simulation runtime. Real values: maxSegmentBytes=4096, recordSizes=
-    // 64/150/492, burstSizes=100/500/2000. Scaled by 1/8: maxSegmentBytes=512,
-    // recordSizes=8/19/62, burstSizes=12/60/250. The records-per-segment ratio is
-    // preserved within rounding (overhead is fixed at 24 bytes per event).
-    // BEFORE MAKING A FINAL STRATEGY DECISION: revert to real-world sizes and rerun
-    // to confirm findings hold at actual LittleFS block sizes and payload sizes.
+    // Real-world sizes: maxSegmentBytes=4096, recordSizes=64/150/492,
+    // burstSizes=100/500/2000, numOps=50000. These match production LittleFS block
+    // sizes and payload sizes.
 
     // --- Random interleaved workload (baseline) ---
     const std::vector<WorkloadDef> randomWorkloads = {
-        { "enqP=0.55", { 5000, 0.55, 19, 512, 200, 0.25f, 3 } },
-        { "enqP=0.65", { 5000, 0.65, 19, 512, 200, 0.25f, 3 } },
-        { "enqP=0.80", { 5000, 0.80, 19, 512, 200, 0.25f, 3 } },
+        { "enqP=0.55", { 50000, 0.55, 150, 4096, 200, 0.25f, 3 } },
+        { "enqP=0.65", { 50000, 0.65, 150, 4096, 200, 0.25f, 3 } },
+        { "enqP=0.80", { 50000, 0.80, 150, 4096, 200, 0.25f, 3 } },
     };
 
     // --- Burst workload (offline consumer pattern) ---
@@ -510,38 +506,38 @@ int main() {
     // how many pops are needed before a segment can be eliminated by compaction.
     // Small records pack more per segment: more pops required, compaction fires later.
     // Large records pack fewer per segment: compaction fires earlier and more often.
-    const std::uint32_t numBurstOps = 15000;
+    const std::uint32_t numBurstOps = 50000;
     const std::vector<WorkloadDef> burstWorkloads = {
-        // small records (8 bytes, ~14 records/segment)
-        { "burst=12  pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.25f } },
-        { "burst=12  pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.50f } },
-        { "burst=12  pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 12,  0.90f } },
-        { "burst=60  pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.25f } },
-        { "burst=60  pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.50f } },
-        { "burst=60  pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 60,  0.90f } },
-        { "burst=250 pop=25% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.25f } },
-        { "burst=250 pop=50% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.50f } },
-        { "burst=250 pop=90% rec=8",  { numBurstOps, 0.0, 8,  512, 200, 0.25f, 3, true, 250, 0.90f } },
-        // target records (19 bytes, ~11 records/segment)
-        { "burst=12  pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.25f } },
-        { "burst=12  pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.50f } },
-        { "burst=12  pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 12,  0.90f } },
-        { "burst=60  pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.25f } },
-        { "burst=60  pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.50f } },
-        { "burst=60  pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 60,  0.90f } },
-        { "burst=250 pop=25% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.25f } },
-        { "burst=250 pop=50% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.50f } },
-        { "burst=250 pop=90% rec=19", { numBurstOps, 0.0, 19, 512, 200, 0.25f, 3, true, 250, 0.90f } },
-        // large records (62 bytes, ~5 records/segment)
-        { "burst=12  pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.25f } },
-        { "burst=12  pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.50f } },
-        { "burst=12  pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 12,  0.90f } },
-        { "burst=60  pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.25f } },
-        { "burst=60  pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.50f } },
-        { "burst=60  pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 60,  0.90f } },
-        { "burst=250 pop=25% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.25f } },
-        { "burst=250 pop=50% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.50f } },
-        { "burst=250 pop=90% rec=62", { numBurstOps, 0.0, 62, 512, 200, 0.25f, 3, true, 250, 0.90f } },
+        // small records (64 bytes)
+        { "burst=100  pop=25% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 100,  0.25f } },
+        { "burst=100  pop=50% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 100,  0.50f } },
+        { "burst=100  pop=90% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 100,  0.90f } },
+        { "burst=500  pop=25% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 500,  0.25f } },
+        { "burst=500  pop=50% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 500,  0.50f } },
+        { "burst=500  pop=90% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 500,  0.90f } },
+        { "burst=2000 pop=25% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 2000, 0.25f } },
+        { "burst=2000 pop=50% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 2000, 0.50f } },
+        { "burst=2000 pop=90% rec=64",  { numBurstOps, 0.0, 64,  4096, 200, 0.25f, 3, true, 2000, 0.90f } },
+        // target records (150 bytes)
+        { "burst=100  pop=25% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 100,  0.25f } },
+        { "burst=100  pop=50% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 100,  0.50f } },
+        { "burst=100  pop=90% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 100,  0.90f } },
+        { "burst=500  pop=25% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 500,  0.25f } },
+        { "burst=500  pop=50% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 500,  0.50f } },
+        { "burst=500  pop=90% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 500,  0.90f } },
+        { "burst=2000 pop=25% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 2000, 0.25f } },
+        { "burst=2000 pop=50% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 2000, 0.50f } },
+        { "burst=2000 pop=90% rec=150", { numBurstOps, 0.0, 150, 4096, 200, 0.25f, 3, true, 2000, 0.90f } },
+        // large records (492 bytes)
+        { "burst=100  pop=25% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 100,  0.25f } },
+        { "burst=100  pop=50% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 100,  0.50f } },
+        { "burst=100  pop=90% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 100,  0.90f } },
+        { "burst=500  pop=25% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 500,  0.25f } },
+        { "burst=500  pop=50% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 500,  0.50f } },
+        { "burst=500  pop=90% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 500,  0.90f } },
+        { "burst=2000 pop=25% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 2000, 0.25f } },
+        { "burst=2000 pop=50% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 2000, 0.50f } },
+        { "burst=2000 pop=90% rec=492", { numBurstOps, 0.0, 492, 4096, 200, 0.25f, 3, true, 2000, 0.90f } },
     };
 
     std::printf("=== Random interleaved workload (baseline) ===\n");
