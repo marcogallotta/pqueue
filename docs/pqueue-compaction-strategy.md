@@ -210,22 +210,121 @@ Raising kDeadRatioTrigger (e.g. to 0.40 or 0.50) would reduce compaction frequen
 the cost of higher peak dead-byte accumulation. Tuning is deferred until the full
 burst=500/pop=90%/rec=492 run is complete.
 
+## Worst-case on-device run (burst=500/pop=90%/rec=492)
+
+Test parameters: kBurstSize=500, kCycles=15, kRecordSize=492, kMaxTotalBytes=1MB,
+kDeadRatioTrigger=0.25 (later 0.10). Environment: esp32s3-compaction.
+
+### Result
+
+The run did not complete normally. Within the first burst phase of cycle 0 the first
+compactRange() call stalled for 30 seconds with outSegs=54:
+
+  [compact] outSegs=54 latency=30602ms
+
+This is not a measurement of worst-case stall under correct operation. It is a symptom
+of a structural bug in how the trigger interacts with the compaction output generation
+numbering. Lowering kDeadRatioTrigger from 0.25 to 0.10 did not help -- the stall
+recurred at the same magnitude.
+
+### Root cause: generation gap fragmentation
+
+When compactRange([1,59]) runs, it writes output segments starting at nextGeneration_
+(say gen 61), producing range [61,114]. The active segment at the time of compaction is
+gen 60 -- it was open during compaction and is not included in the compacted range.
+
+When gen 60 eventually fills and rotates, it seals as {60,60}. rotateSegment() checks
+whether it is contiguous with the last manifest range: back().endGen+1 == 60? With back
+= [61,114], that is 115 == 60, which is false. So {60,60} is added as a new range:
+[{61,114},{60,60}].
+
+The next new segment after compaction is gen 115 (nextGeneration_ was set to 115 after
+compaction output). When gen 115 rotates, it checks back().endGen+1 == 115: back is
+{60,60}, so 61 == 115, false. A third range is added: [{61,114},{60,60},{115,115}].
+
+kManifestMaxRanges=4 and kRangePressureTrigger=3. With 3 ranges, the test trigger fires
+compaction regardless of dead ratio. chooseHighestDeadRatio is called but with ~0% dead
+bytes it returns nullopt -- no compaction fires. However the next rotation would push to
+4 ranges, hitting RangeLimitExceeded in rotateSegment(). To avoid this, compaction must
+reduce range count before then.
+
+When dead bytes do exist (e.g. after pops in earlier cycles), pressure triggers
+compaction on a range that may contain hundreds of live records. With 492B records and
+maxSegmentBytes=4096, a range holding ~430 live records requires 54 output segments.
+compactRange() allows this because outputSegs(54) <= inputSegs(59). The result is a
+30-second stall.
+
+The root problem is that compaction output generations are numerically above the active
+generation, creating a gap that prevents range merging and causes permanent fragmentation
+after every compaction pass.
+
+### Two fixes required
+
+**Fix 1 -- compaction usefulness gate (safe, in progress).** The trigger currently
+treats range pressure as unconditionally useful:
+
+  bool useful = pressure;
+
+This causes compaction to fire even when the selected range has 0% dead bytes and
+outputSegs == inputSegs (no structural improvement possible). The correct predicate:
+compaction is useful only if it improves state, meaning:
+
+  - the range is fully dead (all records popped), or
+  - dead bytes > 0 and predicted outputSegs <= inputSegs, or
+  - predicted outputSegs < inputSegs (structural consolidation, even with low dead ratio)
+
+Predicted output segment count can be estimated cheaply from segmentStats() liveBytes
+without reading records: ceil(liveBytes / maxSegmentBytes).
+
+Compaction must be rejected if:
+  - predicted outputSegs > inputSegs (would worsen range count), or
+  - predicted outputSegs == inputSegs and dead bytes == 0 (pure no-op)
+
+This fix is local to the trigger in test_main.cpp and does not touch the store.
+
+**Fix 2 -- generation gap in the store (needs invariant analysis first).** The
+structural fix is to ensure compaction output remains contiguous with the active segment,
+eliminating the fragmentation entirely. The candidate approach is to rotate (seal) the
+active segment before compaction writes its output, so its generation is included in the
+compacted range and the output generations start from a point contiguous with whatever
+follows.
+
+Before implementing this, the following invariants must be written down and verified
+against scanSegments() and cleanup:
+
+  1. What is the intended logical replay order after compaction produces ranges with
+     generation numbers greater than the (former) active generation?
+  2. Is manifest order authoritative over numeric generation order in scanSegments()?
+  3. After rotate-before-compact, the active is sealed and included in the compaction
+     input. Output gens then start at nextGeneration_, which is contiguous with new
+     enqueue gens. Does this hold after remount?
+  4. Does cleanupOneDanglingSegment treat compaction-output segments (numeric-new but
+     logically replacing old data) safely?
+
+The impl doc notes that isLastSegment is determined by manifest position, not numeric
+generation -- this is the key invariant that would make fix 2 safe. But this must be
+verified explicitly against the code before proceeding.
+
 ## Next steps
 
-**1. Full on-device run at worst-case parameters.**
-Run burst=500/pop=90%/rec=492, 15 cycles. The sim predicts MaxOutSegs up to 60 for this
-workload. Key question: what is the actual stall duration at MaxOutSegs=60 on real
-LittleFS hardware? If it exceeds an acceptable threshold, tune kDeadRatioTrigger or
-kRangePressureTrigger. The test parameters are in test_main.cpp constants; bump kCycles
-to 15, kBurstSize to 500, kRecordSize to 492 for this run.
+**1. Implement fix 1 (gate).** Add the predicted-output-segment check to the
+checkAndCompact trigger in test_main.cpp. Rerun burst=500/pop=90%/rec=492, 15 cycles
+to confirm fix 1 eliminates the 30-second stalls and measures actual worst-case stall
+under correct operation.
 
-**2. Final strategy selection.**
-Pick one of HighestDeadRatio or CostBenefit. Both pass all recoverable workloads and are
-behaviourally identical in the sim at both scaled and real-world parameters. Either is
-acceptable; HighestDeadRatio is slightly simpler to reason about.
+**2. Analyse and implement fix 2 (store).** Write down the replay and cleanup invariants
+listed above, verify against scanSegments() and cleanupOneDanglingSegment(), then
+implement rotate-before-compact in the store. Rerun the on-device test to confirm range
+fragmentation is gone.
+
+**3. Final strategy selection.** Pick one of HighestDeadRatio or CostBenefit. Both pass
+all recoverable workloads and are behaviourally identical in the sim at both scaled and
+real-world parameters. Either is acceptable; HighestDeadRatio is slightly simpler to
+reason about. Deferred until fixes 1 and 2 are complete and a clean measurement of
+worst-case stall is available.
 
 **Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based
 strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0):
 the queue is full of live data and no compaction strategy can help. The correct fix is
-application-level backpressure or a larger queue. `RangeLimitExceeded` in this state is
+application-level backpressure or a larger queue. RangeLimitExceeded in this state is
 correct and expected behaviour.

@@ -21,26 +21,30 @@
 // latency and output segment count on real LittleFS hardware, and verifies
 // all live records are readable after the workload.
 //
-// Workload: burst=100/pop=90%/rec=150B -- the lightest passing burst scenario
-// from the real-world sim run.
+// Workload: burst=500/pop=90%/rec=492B -- the worst-case passing burst scenario
+// from the real-world sim run. Sim predicts MaxOutSegs up to 60. Goal is to
+// measure actual stall duration on real LittleFS hardware before committing to
+// trigger thresholds. kMaxAcceptableLatencyMs is set generously; tune after
+// this run produces real data.
 
 namespace {
 
 constexpr const char* kBasePath   = "/pqueue_compact";
 constexpr std::uint32_t kMaxSegmentBytes   = 4096;
 constexpr std::uint32_t kMaxSegments       = 200;  // disables internal auto-compaction
-constexpr std::uint32_t kMaxTotalBytes     = 512 * 1024;
-constexpr std::uint32_t kBurstSize         = 100;
+constexpr std::uint32_t kMaxTotalBytes     = 1024 * 1024;
+constexpr std::uint32_t kBurstSize         = 500;
 constexpr float         kPopRatio          = 0.90f;
-constexpr std::uint32_t kCycles            = 5;
-constexpr float         kDeadRatioTrigger  = 0.25f;
+constexpr std::uint32_t kCycles            = 15;
+constexpr float         kDeadRatioTrigger  = 0.10f;
 constexpr std::uint32_t kRangePressureTrigger = 3;
-constexpr std::size_t   kRecordSize        = 150;
+constexpr std::size_t   kRecordSize        = 492;
 
-// Acceptable stall per compactRange() call. At 45ms/segment and MaxOutSeg=9
-// (sim result for this workload), 450ms is the expected worst case.
-// Allow 3x headroom for LittleFS variance.
-constexpr std::uint32_t kMaxAcceptableLatencyMs = 1500;
+// Generous upper bound -- this run is for measurement, not enforcement.
+// The previous run (burst=100/rec=150) measured up to 1090ms at MaxOutSegs=1.
+// Sim predicts up to MaxOutSegs=60 for this workload; at ~500-1100ms per pass
+// the true worst case could be tens of seconds.
+constexpr std::uint32_t kMaxAcceptableLatencyMs = 120000;
 
 void formatAndUnmountLittleFs() {
     LittleFS.end();
@@ -229,8 +233,8 @@ void test_compaction_burst_workload() {
         kBurstSize, kPopRatio * 100.0f, static_cast<unsigned>(kRecordSize), kCycles);
     Serial.printf("Compactions: %u  NoOps: %u  MaxOutSegs: %u\n",
         compactions, noOps, maxOutSegs);
-    Serial.printf("MaxLatency: %u ms  (45ms/seg estimate: %u ms at MaxOutSegs=%u)\n",
-        maxLatencyMs, maxOutSegs * 45, maxOutSegs);
+    Serial.printf("MaxLatency: %u ms  MaxOutSegs=%u\n",
+        maxLatencyMs, maxOutSegs);
     Serial.printf("Deadlocks: %u  CapExhausted: %u  FinalQueueSize: %u\n",
         deadlocks, capExhausted, queueSize);
 
