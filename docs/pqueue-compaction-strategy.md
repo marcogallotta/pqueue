@@ -52,18 +52,25 @@ Each run reports:
 
 ### Candidate strategies
 
-Ten strategies are evaluated. All implement the same interface: given per-range stats (total bytes, live bytes, dead bytes) and the current range count, return a range to compact or nullopt.
+Seven strategies are evaluated. All implement the same interface: given per-range stats (total bytes, live bytes, dead bytes) and the current range count, return a range to compact or nullopt.
 
-1. **OldestFirst** -- always picks the first (oldest) range. v1 baseline.
-2. **HighestDeadRatio** -- picks the range with the highest dead bytes / total bytes ratio. Skips if no range has dead bytes.
-3. **CostBenefit** -- picks the range with the highest dead bytes / live bytes ratio. Minimises write amplification directly.
-4. **RangeConsolidation** -- intended to prefer ranges whose compaction reduces range count by merging with an adjacent range. With single-output compaction this is not achievable (new segments get non-adjacent generations), so it falls back to dead-ratio. Becomes meaningful with multi-segment output.
-5. **DeferUntilPressure** -- no-op until range count reaches 75% of the limit, then picks highest dead-ratio range.
-6. **PressureWeightedHybrid** -- normally uses cost-benefit; falls back to oldest-first when range count reaches 75% of the limit.
-7. **DeadByteThreshold** -- oldest-first, but skips if dead ratio is below a configurable threshold. Overrides threshold under emergency pressure.
-8. **LookaheadHeuristic** -- cost-benefit, but skips ranges below a 20% dead-ratio floor unless under pressure.
-9. **AgeWeightedDeadRatio** -- dead-ratio weighted by position in the range list (older ranges get higher weight).
-10. **MinLiveBytesCopied** -- among ranges with any dead bytes, picks the one with the fewest live bytes to copy.
+1. **HighestDeadRatio** -- picks the range with the highest dead bytes / total bytes ratio. Skips if no range has dead bytes.
+2. **CostBenefit** -- picks the range with the highest dead bytes / live bytes ratio. Minimises write amplification directly.
+3. **RangeConsolidation** -- intended to prefer ranges whose compaction reduces range count by merging with an adjacent range. With single-output compaction this is not achievable (new segments get non-adjacent generations), so it falls back to dead-ratio. Becomes meaningful with multi-segment output.
+4. **DeferUntilPressure** -- no-op until range count reaches 75% of the limit, then picks highest dead-ratio range.
+5. **MinLiveBytesCopied** -- among ranges with any dead bytes, picks the one with the fewest live bytes to copy.
+6. **AgeWeightedDeadRatio** -- dead-ratio weighted by position in the range list (older ranges get higher weight).
+7. **LookaheadHeuristic** -- cost-benefit, but skips ranges below a 20% dead-ratio floor unless under pressure.
+
+### Eliminated strategies
+
+Three strategies were eliminated after simulator results showed they produce true deadlocks (Deadlock > 0) on workloads that all remaining candidates handle without deadlocking. A strategy that deadlocks where another does not is strictly worse -- there is no tradeoff to weigh.
+
+**OldestFirst** -- always picks the oldest range regardless of dead-byte content. Under any sustained enqueue load, it compacts fully-live ranges, copying all their data for zero reclaim. This wastes compaction passes and consumes range capacity without progress, eventually hitting the range limit while dead data is still available. Retained only as an implicit baseline: the eliminated strategies exist as a reminder of what not to do.
+
+**PressureWeightedHybrid** -- normally uses cost-benefit, but falls back to oldest-first when range count reaches 75% of the limit. The fallback is triggered precisely when the queue is under the most pressure -- the worst time to compact a live range. The fallback cancels out any benefit from the normal-mode selection.
+
+**DeadByteThreshold** -- oldest-first with a dead-ratio skip threshold, but the threshold is overridden to zero under emergency pressure. Same failure mode as PressureWeightedHybrid: the pressure override causes it to compact live ranges exactly when that is most harmful.
 
 ## Findings
 
@@ -77,9 +84,9 @@ The Deadlock and CapExhst metrics distinguish the two cases. Ratio-based strateg
 
 For recoverable workloads (burst with pop >= 90%, burst=12/pop=50%), the strategy split is binary:
 
-**Strategies that fail:** OldestFirst, PressureWeightedHybrid, DeadByteThreshold. All show Deadlock=1000 on workloads the other strategies handle cleanly. The common failure mode: these strategies compact nearly-live ranges -- either always (OldestFirst) or under pressure (PressureWeighted, DeadByteThreshold). Compacting a nearly-live range copies all its data for minimal reclaim, burning a compaction pass without meaningfully reducing range pressure. Under sustained load this exhausts range capacity with dead data still present -- a true deadlock.
+The three eliminated strategies (OldestFirst, PressureWeightedHybrid, DeadByteThreshold) all show Deadlock=1000 on workloads the remaining candidates handle cleanly. See the Eliminated strategies section for the root cause analysis.
 
-**Strategies that pass:** HighestDeadRatio, CostBenefit, RangeConsolidation, DeferUntilPressure, MinLiveBytesCopied, AgeWeightedDeadRatio, LookaheadHeuristic. These gate on dead-byte ratio and refuse to compact a mostly-live range. When they hit the limit on overloaded workloads, the CapExhst column shows it is capacity exhaustion, not a strategy failure.
+The seven remaining candidates all gate on dead-byte ratio and refuse to compact a mostly-live range. When they hit the limit on overloaded workloads, the CapExhst column confirms it is capacity exhaustion, not a strategy failure.
 
 Usefulness-gating is therefore a first-order correctness requirement. Any strategy without it produces true deadlocks under sustained load.
 

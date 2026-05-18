@@ -92,19 +92,7 @@ public:
 // Strategy implementations
 // ---------------------------------------------------------------------------
 
-// 1. Oldest-first (v1 baseline): always pick the first (oldest) range.
-class OldestFirst : public Strategy {
-public:
-    const char* name() const override { return "OldestFirst"; }
-    std::optional<pqueue::AppendLogStore::CompactionRange> choose(
-        const std::vector<RangeStat>& stats, std::uint32_t) override
-    {
-        if (stats.empty()) return std::nullopt;
-        return stats[0].range;
-    }
-};
-
-// 2. Highest dead-byte ratio: pick the range with the most dead data proportionally.
+// 1. Highest dead-byte ratio: pick the range with the most dead data proportionally.
 class HighestDeadRatio : public Strategy {
 public:
     const char* name() const override { return "HighestDeadRatio"; }
@@ -119,7 +107,7 @@ public:
     }
 };
 
-// 3. Cost-benefit ratio: maximise dead bytes reclaimed per live byte copied.
+// 2. Cost-benefit ratio: maximise dead bytes reclaimed per live byte copied.
 class CostBenefit : public Strategy {
 public:
     const char* name() const override { return "CostBenefit"; }
@@ -141,7 +129,7 @@ public:
     }
 };
 
-// 4. Range-consolidation-first: prefer ranges whose compaction would reduce range count
+// 3. Range-consolidation-first: prefer ranges whose compaction would reduce range count
 //    by merging with an adjacent range (contiguous generation numbers).
 class RangeConsolidation : public Strategy {
 public:
@@ -161,7 +149,7 @@ public:
     }
 };
 
-// 5. Defer until pressure: no-op until range count reaches threshold, then
+// 4. Defer until pressure: no-op until range count reaches threshold, then
 //    pick the highest dead-ratio range.
 class DeferUntilPressure : public Strategy {
     float pressureThreshold_; // fraction of maxRanges
@@ -183,57 +171,7 @@ public:
     }
 };
 
-// 6. Pressure-weighted hybrid: cost-benefit normally; shift to oldest-first under pressure.
-class PressureWeightedHybrid : public Strategy {
-public:
-    const char* name() const override { return "PressureWeightedHybrid"; }
-    std::optional<pqueue::AppendLogStore::CompactionRange> choose(
-        const std::vector<RangeStat>& stats, std::uint32_t maxRanges) override
-    {
-        if (stats.empty()) return std::nullopt;
-        const float pressure = maxRanges > 0
-            ? static_cast<float>(stats.size()) / static_cast<float>(maxRanges)
-            : 1.0f;
-        if (pressure >= 0.75f) {
-            // Under pressure: oldest-first to guarantee progress.
-            return stats[0].range;
-        }
-        // Normal: cost-benefit.
-        const RangeStat* best = nullptr;
-        float bestScore = 0.0f;
-        for (const auto& rs : stats) {
-            if (rs.deadBytes() == 0) continue;
-            float score = rs.liveBytes > 0
-                ? static_cast<float>(rs.deadBytes()) / static_cast<float>(rs.liveBytes)
-                : static_cast<float>(rs.deadBytes());
-            if (score > bestScore) { bestScore = score; best = &rs; }
-        }
-        if (!best) return std::nullopt;
-        return best->range;
-    }
-};
-
-// 7. Dead-byte threshold: oldest-first but skip if dead ratio below threshold.
-class DeadByteThreshold : public Strategy {
-    float threshold_;
-public:
-    explicit DeadByteThreshold(float threshold = 0.25f) : threshold_(threshold) {}
-    const char* name() const override { return "DeadByteThreshold"; }
-    std::optional<pqueue::AppendLogStore::CompactionRange> choose(
-        const std::vector<RangeStat>& stats, std::uint32_t maxRanges) override
-    {
-        if (stats.empty()) return std::nullopt;
-        const float pressure = maxRanges > 0
-            ? static_cast<float>(stats.size()) / static_cast<float>(maxRanges)
-            : 1.0f;
-        // Override threshold under pressure.
-        const float effective = pressure >= 0.75f ? 0.0f : threshold_;
-        if (stats[0].deadRatio() >= effective) return stats[0].range;
-        return std::nullopt;
-    }
-};
-
-// 8. Minimum live bytes copied: among ranges with any dead bytes, pick the one
+// 5. Minimum live bytes copied: among ranges with any dead bytes, pick the one
 //    with fewest live bytes to copy (minimises write cost directly).
 class MinLiveBytesCopied : public Strategy {
 public:
@@ -252,7 +190,7 @@ public:
     }
 };
 
-// 9. Age-weighted dead-byte ratio: weight dead ratio by position in range list
+// 6. Age-weighted dead-byte ratio: weight dead ratio by position in range list
 //    (older ranges get higher weight).
 class AgeWeightedDeadRatio : public Strategy {
 public:
@@ -275,7 +213,7 @@ public:
     }
 };
 
-// 10. Lookahead heuristic: skip ranges that are still mostly live (ratio < 0.2)
+// 7. Lookahead heuristic: skip ranges that are still mostly live (ratio < 0.2)
 //     on the assumption they will accumulate more dead data soon; otherwise
 //     use cost-benefit.
 class LookaheadHeuristic : public Strategy {
@@ -524,13 +462,10 @@ static void printRow(const char* name, const SimMetrics& m) {
 
 int main() {
     std::vector<std::unique_ptr<Strategy>> strategies;
-    strategies.push_back(std::make_unique<OldestFirst>());
     strategies.push_back(std::make_unique<HighestDeadRatio>());
     strategies.push_back(std::make_unique<CostBenefit>());
     strategies.push_back(std::make_unique<RangeConsolidation>());
     strategies.push_back(std::make_unique<DeferUntilPressure>());
-    strategies.push_back(std::make_unique<PressureWeightedHybrid>());
-    strategies.push_back(std::make_unique<DeadByteThreshold>());
     strategies.push_back(std::make_unique<MinLiveBytesCopied>());
     strategies.push_back(std::make_unique<AgeWeightedDeadRatio>());
     strategies.push_back(std::make_unique<LookaheadHeuristic>());
