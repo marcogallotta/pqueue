@@ -315,7 +315,8 @@ struct SimMetrics {
     std::uint32_t compactionAttempts      = 0;  // times strategy returned a range
     std::uint32_t compactionNoOps         = 0;  // strategy returned range but store returned no-op
     std::uint32_t compactionSkips         = 0;  // strategy returned nullopt
-    std::uint32_t deadlocks               = 0;  // enqueue failures due to range limit
+    std::uint32_t trueDeadlocks           = 0;  // range limit hit with reclaimable dead bytes
+    std::uint32_t capacityExhausted       = 0;  // range limit hit with no reclaimable dead bytes
     std::uint32_t maxRangeCount           = 0;
     std::uint32_t maxSegmentsPerCompact   = 0;  // always 0 or 1 in v1; tracked for future
     std::uint64_t totalCompactSegments    = 0;
@@ -434,7 +435,15 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
             ++queueSize;
             metrics.flashWearBytes += counting->counters().bytesWritten;
         } else {
-            ++metrics.deadlocks;
+            static constexpr float kMinDeadRatioReclaimable = 0.01f;
+            bool reclaimable = false;
+            for (const auto& rs : buildRangeStats(store)) {
+                if (rs.deadRatio() >= kMinDeadRatioReclaimable) { reclaimable = true; break; }
+            }
+            if (reclaimable)
+                ++metrics.trueDeadlocks;
+            else
+                ++metrics.capacityExhausted;
         }
         metrics.maxRangeCount = std::max(metrics.maxRangeCount,
             static_cast<std::uint32_t>(store.manifestRanges().size()));
@@ -464,7 +473,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
         while (opsLeft > 0) {
             for (std::uint32_t i = 0; i < wp.burstSize && opsLeft > 0; ++i, --opsLeft) {
                 doEnqueue();
-                if (metrics.deadlocks >= kDeadlockAbortThreshold) return metrics;
+                if (metrics.trueDeadlocks + metrics.capacityExhausted >= kDeadlockAbortThreshold) return metrics;
             }
             const std::uint32_t toPop =
                 static_cast<std::uint32_t>(static_cast<float>(queueSize) * wp.popRatio);
@@ -477,7 +486,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
                 doEnqueue();
             else
                 doPop();
-            if (metrics.deadlocks >= kDeadlockAbortThreshold) return metrics;
+            if (metrics.trueDeadlocks + metrics.capacityExhausted >= kDeadlockAbortThreshold) return metrics;
         }
     }
 
@@ -489,15 +498,15 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
 // ---------------------------------------------------------------------------
 
 static void printHeader() {
-    std::printf("%-22s | %8s | %9s | %8s | %8s | %8s | %8s | %8s\n",
-        "Strategy", "WriteAmp", "Wear(KB)", "MaxRange", "Compacts", "NoOps", "Skips", "Deadlocks");
-    std::printf("%-22s-+-%8s-+-%9s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s\n",
+    std::printf("%-22s | %8s | %9s | %8s | %8s | %8s | %8s | %8s | %8s\n",
+        "Strategy", "WriteAmp", "Wear(KB)", "MaxRange", "Compacts", "NoOps", "Skips", "Deadlock", "CapExhst");
+    std::printf("%-22s-+-%8s-+-%9s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s-+-%8s\n",
         "----------------------", "--------", "---------", "--------",
-        "--------", "--------", "--------", "--------");
+        "--------", "--------", "--------", "--------", "--------");
 }
 
 static void printRow(const char* name, const SimMetrics& m) {
-    std::printf("%-22s | %8.2f | %9.1f | %8u | %8u | %8u | %8u | %8u\n",
+    std::printf("%-22s | %8.2f | %9.1f | %8u | %8u | %8u | %8u | %8u | %8u\n",
         name,
         m.writeAmplification(),
         static_cast<double>(m.flashWearBytes) / 1024.0,
@@ -505,7 +514,8 @@ static void printRow(const char* name, const SimMetrics& m) {
         m.compactionAttempts,
         m.compactionNoOps,
         m.compactionSkips,
-        m.deadlocks);
+        m.trueDeadlocks,
+        m.capacityExhausted);
 }
 
 // ---------------------------------------------------------------------------

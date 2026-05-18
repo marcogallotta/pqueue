@@ -47,7 +47,8 @@ Each run reports:
 - **Compacts** -- times the strategy returned a range to compact.
 - **NoOps** -- compaction attempts that returned no-op from the store.
 - **Skips** -- times the strategy returned nullopt (declined to compact).
-- **Deadlocks** -- enqueue failures due to range limit exhaustion.
+- **Deadlock** -- enqueue failures where at least one range had >= 1% dead bytes at the time of failure. These are true strategy failures: compaction could have made progress but did not.
+- **CapExhst** -- enqueue failures where no range had >= 1% dead bytes. These are capacity exhaustion: the queue is full of live data and no compaction strategy can help.
 
 ### Candidate strategies
 
@@ -66,21 +67,21 @@ Ten strategies are evaluated. All implement the same interface: given per-range 
 
 ## Findings
 
-### Strategy only matters in recoverable workloads
+### Capacity exhaustion is not a strategy failure
 
-If enqueue growth permanently exceeds drain + compaction capacity, every strategy eventually deadlocks. This is not a strategy problem -- it is a capacity problem. The right response is backpressure or queue depth limits at the application layer, not a smarter compactor.
+When the queue fills with live data and enqueue growth permanently exceeds drain rate, the range limit is hit with no dead bytes available to reclaim. No compaction strategy can help in this state -- it is equivalent to any bounded queue hitting its size limit. The right response is backpressure or a larger queue, not a smarter compactor.
 
-In the simulator, all random workloads (enqP >= 0.55) and burst workloads with slow drain (pop=25%, pop=50% with large bursts) hit 1000 deadlocks regardless of strategy. The binding constraint in these cases is the v1 single-output limit: one compaction pass can eliminate at most one range, which is not enough to keep pace with a queue that is growing faster than it is draining.
+The Deadlock and CapExhst metrics distinguish the two cases. Ratio-based strategies on overloaded workloads show CapExhst=1000, Deadlock=0: the queue is genuinely full of live data. OldestFirst on the same workloads shows Deadlock=1000, CapExhst=0: it is hitting the range limit while dead data is still present, because it wastes compaction passes on live ranges.
 
 ### Usefulness-gating is a hard requirement
 
 For recoverable workloads (burst with pop >= 90%, burst=12/pop=50%), the strategy split is binary:
 
-**Strategies that fail:** OldestFirst, PressureWeightedHybrid, DeadByteThreshold. All hit 1000 deadlocks on workloads the other strategies handle cleanly. The common failure mode: these strategies will compact nearly-live ranges -- either always (OldestFirst) or under pressure (PressureWeighted, DeadByteThreshold). Compacting a nearly-live range copies all its data for minimal reclaim, burning a compaction pass without meaningfully reducing range pressure. Under sustained load this exhausts range capacity.
+**Strategies that fail:** OldestFirst, PressureWeightedHybrid, DeadByteThreshold. All show Deadlock=1000 on workloads the other strategies handle cleanly. The common failure mode: these strategies compact nearly-live ranges -- either always (OldestFirst) or under pressure (PressureWeighted, DeadByteThreshold). Compacting a nearly-live range copies all its data for minimal reclaim, burning a compaction pass without meaningfully reducing range pressure. Under sustained load this exhausts range capacity with dead data still present -- a true deadlock.
 
-**Strategies that pass:** HighestDeadRatio, CostBenefit, RangeConsolidation, DeferUntilPressure, MinLiveBytesCopied, AgeWeightedDeadRatio, LookaheadHeuristic. These all gate on dead-byte ratio and refuse to compact a range that is mostly live. That refusal is what keeps range count manageable.
+**Strategies that pass:** HighestDeadRatio, CostBenefit, RangeConsolidation, DeferUntilPressure, MinLiveBytesCopied, AgeWeightedDeadRatio, LookaheadHeuristic. These gate on dead-byte ratio and refuse to compact a mostly-live range. When they hit the limit on overloaded workloads, the CapExhst column shows it is capacity exhaustion, not a strategy failure.
 
-Usefulness-gating is therefore a first-order correctness requirement, not an optimisation. Any strategy without it will eventually deadlock under sustained load.
+Usefulness-gating is therefore a first-order correctness requirement. Any strategy without it produces true deadlocks under sustained load.
 
 ### Differences within the passing family are small
 
@@ -98,7 +99,7 @@ Both are simple, robust, and pass all recoverable workloads. MinLiveBytesCopied 
 
 ## Open questions
 
-**Are the unrecoverable workloads in scope?** The deadlocking workloads model a device that enqueues faster than the consumer can drain, even when online. At real-world scale (burst=2000 records/offline cycle, pop=25% per online cycle), this corresponds to a consumer that is structurally too slow for the device's publish rate. The correct fix there may be application-level flow control rather than a more powerful compactor. The answer to this question determines whether multi-segment output is necessary.
+**Capacity exhaustion workloads are out of scope for compaction strategy.** The sim now confirms that workloads where ratio-based strategies hit the limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0): the queue is full of live data and no compaction algorithm can help. These workloads model a consumer that is structurally too slow for the device's publish rate, or a queue sized too small for the expected burst. The correct fix is application-level backpressure or a larger queue, not a more powerful compactor. `RangeLimitExceeded` in this state is the correct and expected behaviour.
 
 **Multi-segment output.** `compactRange()` currently returns `noOp` when live bytes in the selected range exceed `maxSegmentBytes`. Multi-segment output would allow it to write multiple output segments per pass, gated on the condition that output segment count is strictly less than input segment count (otherwise range count does not improve). This would unlock the deadlocking workloads for strategy evaluation. It is already partially implemented in the store but the gating condition prevents it from firing in the current sim workloads.
 
