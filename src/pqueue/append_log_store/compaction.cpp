@@ -2,7 +2,12 @@
 #include "pqueue/append_log_common.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace pqueue {

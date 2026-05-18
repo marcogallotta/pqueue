@@ -1,6 +1,10 @@
 #include "pqueue/append_log_store.h"
 #include "pqueue/append_log_common.h"
 
+#include <cstdint>
+#include <string>
+#include <vector>
+
 namespace pqueue {
 
 using namespace append_log_detail;

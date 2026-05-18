@@ -4,14 +4,13 @@
 #include "storage_common.h"
 
 #include <cstdint>
+#include <sstream>
 #include <utility>
 
 #ifdef ARDUINO
 #include <Arduino.h>
-#include <sstream>
 #else
 #include <chrono>
-#include <sstream>
 #include <thread>
 #include <unistd.h>
 #endif
