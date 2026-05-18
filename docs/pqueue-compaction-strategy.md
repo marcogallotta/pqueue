@@ -10,7 +10,7 @@ The goal of this investigation is to find a replacement strategy that eliminates
 
 ## Simulator
 
-Implementation: `tools/pqueue_compaction_sim.cpp`. Build with `make -j12 sim`, run as `./build/pqueue-compaction-sim`. The full sweep runs in ~13 seconds.
+Implementation: `tools/pqueue_compaction_sim.cpp`. Build with `make -j12 sim`, run as `./build/pqueue-compaction-sim`. The full sweep runs in ~2 seconds (7 strategies, in-memory FS, early abort at 1000 failures).
 
 The simulator drives the real `AppendLogStore` API through configurable enqueue/pop patterns and records compaction behaviour. Storage I/O uses an in-memory `FileSystem` (`tools/memory_file_system.h`) -- no disk access occurs. Byte counts for flash wear measurement are tracked via a `CountingFileSystem` wrapper (`tools/counting_file_system.h`) around the memory backend.
 
@@ -47,30 +47,45 @@ Each run reports:
 - **Compacts** -- times the strategy returned a range to compact.
 - **NoOps** -- compaction attempts that returned no-op from the store.
 - **Skips** -- times the strategy returned nullopt (declined to compact).
+- **MaxOutSeg** -- maximum number of output segments written in a single compaction call. Directly maps to on-device stall latency: each LittleFS segment write is ~45ms, so MaxOutSeg=5 means up to 225ms stall. On passing workloads this peaks at 1-25; large values (up to 123) only appear on already-failed (capacity exhaustion) workloads.
 - **Deadlock** -- enqueue failures where at least one range had >= 1% dead bytes at the time of failure. These are true strategy failures: compaction could have made progress but did not.
 - **CapExhst** -- enqueue failures where no range had >= 1% dead bytes. These are capacity exhaustion: the queue is full of live data and no compaction strategy can help.
 
 ### Candidate strategies
 
-Seven strategies are evaluated. All implement the same interface: given per-range stats (total bytes, live bytes, dead bytes) and the current range count, return a range to compact or nullopt.
+Seven strategies were evaluated. All implement the same interface: given per-range stats (total bytes, live bytes, dead bytes) and the current range count, return a range to compact or nullopt.
 
 1. **HighestDeadRatio** -- picks the range with the highest dead bytes / total bytes ratio. Skips if no range has dead bytes.
 2. **CostBenefit** -- picks the range with the highest dead bytes / live bytes ratio. Minimises write amplification directly.
-3. **RangeConsolidation** -- intended to prefer ranges whose compaction reduces range count by merging with an adjacent range. With single-output compaction this is not achievable (new segments get non-adjacent generations), so it falls back to dead-ratio. Becomes meaningful with multi-segment output.
-4. **DeferUntilPressure** -- no-op until range count reaches 75% of the limit, then picks highest dead-ratio range.
-5. **MinLiveBytesCopied** -- among ranges with any dead bytes, picks the one with the fewest live bytes to copy.
-6. **AgeWeightedDeadRatio** -- dead-ratio weighted by position in the range list (older ranges get higher weight).
-7. **LookaheadHeuristic** -- cost-benefit, but skips ranges below a 20% dead-ratio floor unless under pressure.
+3. **RangeConsolidation** -- intended to prefer ranges whose compaction reduces range count by merging with an adjacent range. With current generation numbering, output segments get non-adjacent generations, so true merge is not achievable; falls back to dead-ratio selection. Eliminated: structurally identical to HighestDeadRatio.
+4. **DeferUntilPressure** -- no-op until range count reaches 75% of the limit, then picks highest dead-ratio range. Eliminated: without proactive compaction, segment rotations extend a single range's endGen and range count stays at 1, so the pressure threshold is never triggered. In practice identical to HighestDeadRatio.
+5. **MinLiveBytesCopied** -- among ranges with any dead bytes, picks the one with the fewest live bytes to copy. Shows occasional write-amp advantage on large-burst/fast-pop workloads but not consistently dominant.
+6. **AgeWeightedDeadRatio** -- dead-ratio weighted by position in the range list (older ranges get higher weight). Mild advantage on a single workload (burst=60/pop=90%/rec=8) that does not persist across the sweep.
+7. **LookaheadHeuristic** -- cost-benefit, but skips ranges below a 20% dead-ratio floor unless under pressure. Behaviour is identical to CostBenefit on almost all workloads.
 
 ### Eliminated strategies
 
-Three strategies were eliminated after simulator results showed they produce true deadlocks (Deadlock > 0) on workloads that all remaining candidates handle without deadlocking. A strategy that deadlocks where another does not is strictly worse -- there is no tradeoff to weigh.
+Ten strategies were evaluated in total. Eight were eliminated; two remain.
 
-**OldestFirst** -- always picks the oldest range regardless of dead-byte content. Under any sustained enqueue load, it compacts fully-live ranges, copying all their data for zero reclaim. This wastes compaction passes and consumes range capacity without progress, eventually hitting the range limit while dead data is still available. Retained only as an implicit baseline: the eliminated strategies exist as a reminder of what not to do.
+**First-pass eliminations (true deadlocks):** Three strategies were eliminated because they produce true deadlocks (Deadlock > 0) on workloads that all remaining candidates handle without deadlocking. A strategy that deadlocks where another does not is strictly worse -- there is no tradeoff to weigh.
+
+**OldestFirst** -- always picks the oldest range regardless of dead-byte content. Under any sustained enqueue load, it compacts fully-live ranges, copying all their data for zero reclaim. This wastes compaction passes and consumes range capacity without progress, eventually hitting the range limit while dead data is still available.
 
 **PressureWeightedHybrid** -- normally uses cost-benefit, but falls back to oldest-first when range count reaches 75% of the limit. The fallback is triggered precisely when the queue is under the most pressure -- the worst time to compact a live range. The fallback cancels out any benefit from the normal-mode selection.
 
 **DeadByteThreshold** -- oldest-first with a dead-ratio skip threshold, but the threshold is overridden to zero under emergency pressure. Same failure mode as PressureWeightedHybrid: the pressure override causes it to compact live ranges exactly when that is most harmful.
+
+**Second-pass eliminations (redundancy):** After the three above were removed, the remaining seven were compared directly. Four are structurally equivalent to one of the two finalists and add no benefit.
+
+**RangeConsolidation** -- falls back to dead-ratio selection because output segments receive non-adjacent generation numbers, making true range merging impossible. Identical in behaviour to HighestDeadRatio.
+
+**DeferUntilPressure** -- designed to defer until range count pressure builds, but without proactive compaction, segment rotations extend a single range endGen and range count stays at 1. The pressure threshold is structurally never triggered. Identical in behaviour to HighestDeadRatio.
+
+**AgeWeightedDeadRatio** -- adds an age weight on top of dead-ratio scoring. Shows a mild write-amp advantage on one workload (burst=60/pop=90%/rec=8: 0.94x vs 1.69x) that does not appear elsewhere in the sweep. Not consistently better than HighestDeadRatio.
+
+**LookaheadHeuristic** -- cost-benefit with a 20% dead-ratio floor that is lifted under emergency pressure. Behaviour is identical to CostBenefit on almost all workloads. The floor adds complexity without measurable benefit.
+
+**MinLiveBytesCopied** -- shows slightly better write amplification on some large-burst/fast-pop workloads (e.g. burst=250/pop=90%/rec=62: 8.15x vs 8.63x for HighestDeadRatio/CostBenefit) but the advantage is not consistent across the sweep and does not justify the added complexity over the two finalists.
 
 ## Findings
 
@@ -90,24 +105,30 @@ The seven remaining candidates all gate on dead-byte ratio and refuse to compact
 
 Usefulness-gating is therefore a first-order correctness requirement. Any strategy without it produces true deadlocks under sustained load.
 
-### Differences within the passing family are small
+### Multi-segment output is confirmed and bounded
 
-Among the seven passing strategies, write amplification and flash wear are broadly similar on a given workload. The notable observations:
+`compactRange()` writes multiple output segments when live bytes in the selected range exceed `maxSegmentBytes`, gated on outputSegs < inputSegs (strictly reduces segment count). This was listed as a possible future feature in earlier work; it is already implemented and actively firing.
 
-- DeferUntilPressure behaves identically to HighestDeadRatio on almost all workloads. This is structural: without compaction, segment rotations extend a single range's endGen, so range count stays at 1 and the pressure threshold is never triggered. DeferUntilPressure does not proactively compact -- it only acts under emergency pressure, at which point it falls back to dead-ratio selection.
-- MinLiveBytesCopied shows slightly better write amplification on some large-burst/fast-pop workloads (e.g. burst=250/pop=90%/rec=62: 8.15x vs 8.63x for HighestDeadRatio/CostBenefit), but the advantage is not consistent across the sweep.
-- AgeWeightedDeadRatio shows a mild advantage on burst=60/pop=90%/rec=8 (0.94x vs 1.69x) that does not persist elsewhere.
+MaxOutSeg on passing workloads peaks at 1-25 (e.g. burst=250/pop=90%/rec=62 reaches 25). At 45ms per LittleFS segment write this is up to ~1.1 seconds of stall in the worst case on passing workloads. Large MaxOutSeg values (up to 123) appear only on capacity-exhaustion runs, which are not strategy failures. The stall risk is acceptable for the target use case, but should be monitored on-device.
 
-### Current default candidate
+### Final candidates
 
-**HighestDeadRatio or CostBenefit with a state-based trigger.**
+**HighestDeadRatio and CostBenefit are the two remaining candidates.** All other strategies were eliminated either for producing true deadlocks or for being structurally equivalent to one of these two. See the Eliminated strategies section for per-strategy reasoning.
 
-Both are simple, robust, and pass all recoverable workloads. MinLiveBytesCopied remains in the simulator as a contender; it is not clearly dominant enough to be the default yet.
+The two candidates are functionally indistinguishable on all tested workloads: same Deadlock/CapExhst split, similar write amplification and flash wear. The difference is the scoring function: HighestDeadRatio maximises dead fraction (dead/total); CostBenefit maximises dead-to-live ratio (dead/live), which directly minimises write amplification. Either is a correct choice.
 
-## Open questions
+## Next steps
 
-**Capacity exhaustion workloads are out of scope for compaction strategy.** The sim now confirms that workloads where ratio-based strategies hit the limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0): the queue is full of live data and no compaction algorithm can help. These workloads model a consumer that is structurally too slow for the device's publish rate, or a queue sized too small for the expected burst. The correct fix is application-level backpressure or a larger queue, not a more powerful compactor. `RangeLimitExceeded` in this state is the correct and expected behaviour.
+**1. Revert to real-world scale and rerun.**
+All sim params are currently scaled ~1/8 from production values to keep runs fast (maxSegmentBytes: 4096->512, recordSizes: 64/150/492->8/19/62, burstSizes: 100/500/2000->12/60/250, numOps: 50000->15000). Before making the final strategy selection, revert these to real-world values and confirm that the Deadlock/CapExhst classification and the HighestDeadRatio/CostBenefit findings hold at production scale. The records-per-segment ratio is preserved by the scaling, so the findings are expected to hold, but this must be verified.
 
-**Multi-segment output.** `compactRange()` currently returns `noOp` when live bytes in the selected range exceed `maxSegmentBytes`. Multi-segment output would allow it to write multiple output segments per pass, gated on the condition that output segment count is strictly less than input segment count (otherwise range count does not improve). This would unlock the deadlocking workloads for strategy evaluation. It is already partially implemented in the store but the gating condition prevents it from firing in the current sim workloads.
+**2. On-device validation.**
+Run HighestDeadRatio and CostBenefit against a representative burst workload on real LittleFS hardware. Key things to confirm:
+- Compaction call latency matches the ~45ms/segment estimate.
+- MaxOutSeg on a real burst workload stays within acceptable stall bounds.
+- No regressions in the broader queue behaviour (manifest integrity, correct live record replay after compaction).
 
-If the slow-drain workloads are in scope, multi-segment output is the next step. If they are out of scope and backpressure is the answer there, the current strategy candidates are sufficient and the investigation can move to on-device validation.
+**3. Final strategy selection.**
+Pick one of HighestDeadRatio or CostBenefit. Both pass all recoverable workloads and are behaviourally identical in the sim. If on-device results show a write-amplification difference at real scale, prefer CostBenefit. Otherwise either is acceptable; HighestDeadRatio is slightly simpler to reason about.
+
+**Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0): the queue is full of live data and no compaction strategy can help. The correct fix is application-level backpressure or a larger queue. `RangeLimitExceeded` in this state is correct and expected behaviour.
