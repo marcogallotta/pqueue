@@ -64,6 +64,7 @@ public:
     Status compactRange(const CompactionRange& range, std::uint32_t* outputSegCount = nullptr);
     Status compactOneSegment();
     Status compactFull();
+    CompactIdleResult compactIdle(std::size_t maxSteps) override;
 
     struct SegmentStat {
         std::uint32_t generation = 0;

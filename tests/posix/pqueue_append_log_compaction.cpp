@@ -279,6 +279,74 @@ TEST_CASE("compaction: compactFull removes multiple dead ranges in one call") {
     CHECK_FALSE(store.chooseCompactionRange().has_value());
 }
 
+TEST_CASE("compaction: compactIdle maxSteps=0 does nothing") {
+    plantLayout({
+        .ranges = {{1,1}}, .tail = 2, .next = 3,
+        .segments = {{.gen=1,.firstSeq=0,.body={}},{.gen=2,.firstSeq=0,.body={}}},
+    });
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE(store.chooseCompactionRange().has_value());
+
+    const auto r = store.compactIdle(0);
+    CHECK(r.status.ok());
+    CHECK_EQ(r.stepsRun, 0u);
+    CHECK_EQ(r.compactions, 0u);
+    CHECK_EQ(r.noOps, 0u);
+    CHECK_FALSE(r.moreWorkLikely);
+    CHECK(store.chooseCompactionRange().has_value()); // nothing changed
+}
+
+TEST_CASE("compaction: compactIdle maxSteps=1 runs at most one step") {
+    // Two dead ranges: compactIdle(1) should compact only one of them.
+    plantLayout({
+        .ranges = {{1,1},{3,3}}, .tail = 5, .next = 6,
+        .segments = {{.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}},{.gen=5,.firstSeq=0,.body={}}},
+    });
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+
+    const auto r = store.compactIdle(1);
+    CHECK(r.status.ok());
+    CHECK_EQ(r.stepsRun, 1u);
+    CHECK_EQ(r.compactions, 1u);
+    CHECK_EQ(r.noOps, 0u);
+    CHECK(r.moreWorkLikely); // stopped by budget, second range still pending
+}
+
+TEST_CASE("compaction: compactIdle moreWorkLikely false when exhausted naturally") {
+    // One dead range: compactIdle with a large budget should finish in one step.
+    plantLayout({
+        .ranges = {{1,1}}, .tail = 3, .next = 4,
+        .segments = {{.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}}},
+    });
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+
+    const auto r = store.compactIdle(10);
+    CHECK(r.status.ok());
+    CHECK_EQ(r.compactions, 1u);
+    CHECK_GE(r.noOps, 1u);    // hit noOp after the one useful step
+    CHECK_FALSE(r.moreWorkLikely);
+    CHECK_FALSE(store.chooseCompactionRange().has_value());
+}
+
+TEST_CASE("compaction: compactFull still bounded by initial range count") {
+    plantLayout({
+        .ranges = {{1,1},{3,3}}, .tail = 5, .next = 6,
+        .segments = {{.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}},{.gen=5,.firstSeq=0,.body={}}},
+    });
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+
+    CHECK(store.compactFull().ok());
+    CHECK_FALSE(store.chooseCompactionRange().has_value());
+}
+
 TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not original (critical)") {
     // If a record was rewritten before compaction, the collected payload must be
     // the rewritten value, not the original enqueue bytes.

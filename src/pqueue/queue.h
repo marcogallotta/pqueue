@@ -33,6 +33,7 @@ public:
     Status pop();
     Status rewriteFront(const std::string& record);
     Status format();
+    CompactIdleResult compactIdle(std::size_t maxSteps);
     Status dropFrontIfCorrupt();
     Status recoverStaleLock();
     Status rebuildMetadata();

@@ -435,6 +435,14 @@ Status Queue::dropFrontIfCorrupt() {
     return Status::success();
 }
 
+CompactIdleResult Queue::compactIdle(std::size_t maxSteps) {
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return CompactIdleResult{lock.status(), 0, 0, 0, false};
+    }
+    return store_->compactIdle(maxSteps);
+}
+
 Status Queue::format() {
     ScopedLock lock(*this);
     if (!lock.status().ok()) {

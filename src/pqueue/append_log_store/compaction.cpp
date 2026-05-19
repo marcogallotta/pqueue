@@ -508,14 +508,30 @@ Status AppendLogStore::compactOneSegment() {
     return compactRange(range);
 }
 
+CompactIdleResult AppendLogStore::compactIdle(std::size_t maxSteps) {
+    CompactIdleResult result{};
+    result.status = Status::success();
+    for (std::size_t i = 0; i < maxSteps; ++i) {
+        Status st = compactOneSegment();
+        ++result.stepsRun;
+        if (!st.ok()) {
+            result.status = st;
+            return result;
+        }
+        if (st.isNoOp()) {
+            ++result.noOps;
+            return result; // moreWorkLikely stays false
+        }
+        ++result.compactions;
+    }
+    result.moreWorkLikely = (result.compactions > 0);
+    return result;
+}
+
 Status AppendLogStore::compactFull() {
     const std::size_t initialCount = manifestRanges_.size();
-    for (std::size_t i = 0; i < initialCount; ++i) {
-        Status st = compactOneSegment();
-        if (!st.ok()) return st;
-        if (st.isNoOp()) break;
-    }
-    return Status::success();
+    const CompactIdleResult result = compactIdle(initialCount);
+    return result.status;
 }
 
 bool AppendLogStore::needsCompaction() const {

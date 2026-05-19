@@ -111,6 +111,18 @@ struct FileStoreRuntimeState {
     std::uint32_t spoolBytes = 0;
 };
 
+struct CompactIdleResult {
+    Status status;
+    std::size_t stepsRun = 0;
+    std::size_t compactions = 0;
+    std::size_t noOps = 0;
+    // True when the loop stopped because maxSteps was exhausted after at least
+    // one successful compaction — meaning more candidates likely remain.
+    // False when the loop stopped due to a noOp (no actionable compaction under
+    // the current selector/budget), or when maxSteps was 0.
+    bool moreWorkLikely = false;
+};
+
 // Abstract storage interface used by Queue. Both FileStore (fixed-slot) and
 // AppendLogStore implement this interface.
 class Store {
@@ -137,6 +149,7 @@ public:
     virtual Status format() = 0;
     virtual Status rebuildMetadata() = 0;
     virtual ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) = 0;
+    virtual CompactIdleResult compactIdle(std::size_t maxSteps) = 0;
 };
 
 class FileStore : public Store {
@@ -164,6 +177,11 @@ public:
     Status format() override;
     Status rebuildMetadata() override;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) override;
+    CompactIdleResult compactIdle(std::size_t /*maxSteps*/) override {
+        CompactIdleResult r;
+        r.status = Status::success();
+        return r;
+    }
 
 private:
     StorageBackend resolvedBackend() const;
