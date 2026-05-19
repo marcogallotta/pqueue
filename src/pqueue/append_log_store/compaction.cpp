@@ -310,7 +310,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             return st;
         }
         CR_T0(ms_cleanup);
-        for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+        for (std::uint32_t i = 0; i < inputSegCount; ++i) cleanupOneDanglingSegment();
         CR_T1(ms_cleanup);
 #ifdef ARDUINO
         logLine("ok(dead)");
@@ -411,7 +411,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     // Phase: cleanup dangling input segments.
     CR_T0(ms_cleanup);
-    for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+    for (std::uint32_t i = 0; i < inputSegCount; ++i) cleanupOneDanglingSegment();
     CR_T1(ms_cleanup);
 
     // Phase: update in-RAM records to point at new segment generations.

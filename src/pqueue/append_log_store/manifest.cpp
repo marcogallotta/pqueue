@@ -110,14 +110,8 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     applyManifestToRam(toWrite);
 #ifdef ARDUINO
     ms_apply = millis() - _t0;
-    _t0 = millis();
-#endif
-
-    cleanupOneDanglingSegment();
-#ifdef ARDUINO
-    ms_cleanup = millis() - _t0;
-    Serial.printf("[publishManifest] slot=%s probe_ms=%u serial_ms=%u write_ms=%u apply_ms=%u cleanup_ms=%u total_ms=%u\n",
-        writeSlot, ms_probe, ms_serial, ms_write, ms_apply, ms_cleanup, millis() - t_pub_start);
+    Serial.printf("[publishManifest] slot=%s probe_ms=%u serial_ms=%u write_ms=%u apply_ms=%u total_ms=%u\n",
+        writeSlot, ms_probe, ms_serial, ms_write, ms_apply, millis() - t_pub_start);
     Serial.flush();
 #endif
 
