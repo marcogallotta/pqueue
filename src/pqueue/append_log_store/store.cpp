@@ -530,6 +530,11 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
             Status::failure(StatusCode::RecordTooLarge, "record exceeds append-log maximum record size"),
             "writeRecord");
     }
+    if (kSegmentHeaderBytes + kEnqueueOverheadBytes + record.size() > config_.maxSegmentBytes) {
+        return diagnostic(Severity::Warning,
+            Status::failure(StatusCode::RecordTooLarge, "record too large to fit in a segment"),
+            "writeRecord");
+    }
 
     if (sequence == std::numeric_limits<std::uint32_t>::max()) {
         return diagnostic(Severity::Error,
@@ -666,6 +671,11 @@ Status AppendLogStore::rewriteRecord(std::uint32_t sequence, const std::string& 
     if (record.size() > config_.maxRecordBytes) {
         return diagnostic(Severity::Warning,
             Status::failure(StatusCode::RecordTooLarge, "record exceeds append-log maximum record size"),
+            "rewriteRecord");
+    }
+    if (kSegmentHeaderBytes + kEnqueueOverheadBytes + record.size() > config_.maxSegmentBytes) {
+        return diagnostic(Severity::Warning,
+            Status::failure(StatusCode::RecordTooLarge, "record too large to fit in a segment"),
             "rewriteRecord");
     }
 
