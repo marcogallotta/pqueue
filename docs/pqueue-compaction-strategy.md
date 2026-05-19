@@ -134,7 +134,7 @@ MaxOutSegs=1 confirms sim prediction. 0 deadlocks, 0 capacity exhaustion.
 
 Latency model note: the 45ms/segment estimate from the sim was write-only. Actual measured latency per `compactRange()` at 150B records and 1 output segment: 200-1090ms. The dominant cost is reading all records in the range, not the write.
 
-### Run 2: burst=500/pop=90%/rec=492B (15 cycles, bounded window)
+### Run 2: burst=500/pop=90%/rec=492B (15 cycles, bounded window, pre-fix)
 
 Run after rotate-before-compact and bounded window landed, before O(1) cleanup and preflight fixes.
 
@@ -143,12 +143,19 @@ Run after rotate-before-compact and bounded window landed, before O(1) cleanup a
   Deadlocks: 0  CapExhausted: 0  FinalQueueSize: 56
   PASS
 
-0 deadlocks. MaxLatency=82580ms was dominated by cleanup (77216ms) and preflight fileSize (1601ms) -- both now fixed. A re-run with current code is needed to confirm acceptable latency.
+MaxLatency=82580ms was dominated by cleanup (77216ms) and preflight fileSize (1601ms).
+
+### Run 3: burst=500/pop=90%/rec=492B (3 cycles, O(1) cleanup + preflight)
+
+  Compactions: 17  NoOps: 6  MaxOutSegs: 8
+  MaxLatency: 10652 ms
+  Deadlocks: 0  CapExhausted: 0  FinalQueueSize: 56
+  PASS
+
+MaxLatency dropped from 82s to 10.6s. 0 deadlocks. O(1) cleanup and sealedSegmentBytes_ preflight confirmed working (pre_size_ms=0 throughout). MaxOutSegs=8 matches the kMaxOutputSegs budget.
 
 ## Outstanding
 
-**Run 3 (worst-case on-device).** Re-run burst=500/pop=90%/rec=492B with O(1) cleanup and preflight fixes in place. Expected: cleanup_ms drops from ~77s to ~2s; pre_size_ms drops from ~1600ms to ~0ms. Confirm MaxLatency is acceptable.
-
-**Final strategy selection.** Deferred until Run 3 confirms MaxLatency. Both HighestDeadRatio and CostBenefit are correct; pick one and remove the other from the sim.
+**Final strategy selection.** HighestDeadRatio and CostBenefit are functionally identical across all tested workloads. Pick one and remove the other from the sim.
 
 **Capacity exhaustion is out of scope.** Workloads where ratio-based strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0): the queue is full of live data and no compaction strategy can help. RangeLimitExceeded in this state is correct and expected behaviour.
