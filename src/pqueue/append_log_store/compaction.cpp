@@ -200,9 +200,8 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         if (gen == activeGeneration_) {
             hypoInputBytes += activeSegmentBytes_;
         } else {
-            std::uint64_t sz = 0;
-            fs()->fileSize(segmentName(gen), sz);
-            hypoInputBytes += static_cast<std::uint32_t>(sz);
+            auto sit = sealedSegmentBytes_.find(gen);
+            hypoInputBytes += sit != sealedSegmentBytes_.end() ? sit->second : 0;
         }
     }
     CR_T1(ms_pre_size);
