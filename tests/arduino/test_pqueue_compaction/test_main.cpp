@@ -190,67 +190,91 @@ void test_compaction_burst_workload() {
     std::uint32_t t_check = 0, t_stats = 0, t_compact = 0;
     std::uint32_t t_enq = 0, t_pop = 0;
 
-    auto tryCompact = [&]() {
-        std::uint32_t t0;
-
-        t0 = millis();
-        const auto rangeStats = buildRangeStats(store);
-        t_stats += millis() - t0;
-
-        const auto chosen = chooseHighestDeadRatio(rangeStats);
-        if (!chosen) return;
-
-        const RangeStat* chosenStat = nullptr;
-        for (const auto& rs : rangeStats) {
-            if (rs.range.startGen == chosen->startGen && rs.range.endGen == chosen->endGen) {
-                chosenStat = &rs;
-                break;
-            }
-        }
-        const auto target = chosenStat ? narrowRange(*chosen, *chosenStat, store) : *chosen;
-        if (target.startGen != chosen->startGen || target.endGen != chosen->endGen) {
-            Serial.printf("[narrow] [%u,%u]->>[%u,%u]\n",
-                chosen->startGen, chosen->endGen, target.startGen, target.endGen);
-        }
-
-        ++compactions;
-        std::uint32_t outSegs = 0;
-        t0 = millis();
-        const auto st = store.compactRange(target, &outSegs);
-        const std::uint32_t elapsed = millis() - t0;
-        t_compact += elapsed;
-
-        if (st.ok() && !st.isNoOp()) {
-            maxOutSegs   = std::max(maxOutSegs, outSegs);
-            maxLatencyMs = std::max(maxLatencyMs, elapsed);
-            Serial.printf("[compact] outSegs=%u latency=%ums\n", outSegs, elapsed);
-        } else {
-            ++noOps;
-        }
-    };
-
     auto checkAndCompact = [&]() {
-        const std::uint32_t t0 = millis();
+        // Step 1: logical count (in-memory, no I/O).
+        const std::uint32_t t0_count = millis();
         const auto& ranges = store.manifestRanges();
         std::uint32_t logicalSegCount = 1;
         for (const auto& r : ranges) logicalSegCount += r.endGen - r.startGen + 1;
         const std::uint32_t rangeCount = static_cast<std::uint32_t>(ranges.size());
         const bool changed  = logicalSegCount != prevSegCount || rangeCount != prevRangeCount;
         const bool pressure = rangeCount >= kRangePressureTrigger;
-        if (changed) {
-            bool useful = false;
-            std::uint32_t ts = millis();
-            const auto rs2 = buildRangeStats(store);
-            t_stats += millis() - ts;
-            for (const auto& rs : rs2) {
-                if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
-                if (pressure && rs.wouldConsolidate())   { useful = true; break; }
-            }
-            if (useful) tryCompact();
-        }
+        const std::uint32_t ms_count = millis() - t0_count;
         prevSegCount   = logicalSegCount;
         prevRangeCount = rangeCount;
-        t_check += millis() - t0;
+        if (!changed) return;
+
+        // Step 2: buildRangeStats.
+        const std::uint32_t t0_stats = millis();
+        const auto rangeStats = buildRangeStats(store);
+        const std::uint32_t ms_stats = millis() - t0_stats;
+
+        bool useful = false;
+        for (const auto& rs : rangeStats) {
+            if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
+            if (pressure && rs.wouldConsolidate())   { useful = true; break; }
+        }
+
+        // Step 3: choose + narrow.
+        std::uint32_t ms_choose = 0, ms_compact = 0;
+        std::uint32_t chosen_s = 0, chosen_e = 0, target_s = 0, target_e = 0;
+        bool did_narrow = false, did_compact = false;
+        std::uint32_t outSegs = 0;
+
+        if (useful) {
+            const std::uint32_t t0_choose = millis();
+            const auto chosen = chooseHighestDeadRatio(rangeStats);
+            std::optional<pqueue::AppendLogStore::CompactionRange> target_opt;
+            if (chosen) {
+                chosen_s = chosen->startGen; chosen_e = chosen->endGen;
+                const RangeStat* cstat = nullptr;
+                for (const auto& rs : rangeStats) {
+                    if (rs.range.startGen == chosen_s && rs.range.endGen == chosen_e) {
+                        cstat = &rs; break;
+                    }
+                }
+                const auto tgt = cstat ? narrowRange(*chosen, *cstat, store) : *chosen;
+                target_s = tgt.startGen; target_e = tgt.endGen;
+                did_narrow  = (target_s != chosen_s || target_e != chosen_e);
+                target_opt  = tgt;
+            }
+            ms_choose = millis() - t0_choose;
+
+            // Step 4: compactRange.
+            if (target_opt) {
+                ++compactions;
+                const std::uint32_t t0_compact = millis();
+                const auto st = store.compactRange(*target_opt, &outSegs);
+                ms_compact = millis() - t0_compact;
+                t_compact += ms_compact;
+                if (st.ok() && !st.isNoOp()) {
+                    maxOutSegs   = std::max(maxOutSegs, outSegs);
+                    maxLatencyMs = std::max(maxLatencyMs, ms_compact);
+                    did_compact  = true;
+                } else {
+                    ++noOps;
+                }
+            }
+        }
+
+        t_check += ms_count + ms_stats + ms_choose + ms_compact;
+        t_stats += ms_stats;
+
+        const std::uint32_t ms_total = ms_count + ms_stats + ms_choose + ms_compact;
+        if (ms_total > 100 || did_compact) {
+            Serial.printf("[check] changed=1 pressure=%u ranges=%u segs=%u "
+                "count_ms=%u stats_ms=%u choose_ms=%u compact_ms=%u useful=%u",
+                pressure, rangeCount, logicalSegCount,
+                ms_count, ms_stats, ms_choose, ms_compact, useful);
+            if (did_narrow)
+                Serial.printf(" narrow=[%u,%u]->[%u,%u]", chosen_s, chosen_e, target_s, target_e);
+            else if (chosen_s)
+                Serial.printf(" compact=[%u,%u]", target_s, target_e);
+            if (did_compact)
+                Serial.printf(" outSegs=%u", outSegs);
+            Serial.printf("\n");
+            Serial.flush();
+        }
     };
 
     for (std::uint32_t cycle = 0; cycle < kCycles; ++cycle) {
