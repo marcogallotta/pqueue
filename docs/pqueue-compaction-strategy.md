@@ -34,9 +34,9 @@ Design: preflight-before-rotate. Usefulness is evaluated on the hypothetical ext
 
 Tail dependency guard: rotate-before-compact is suppressed when the active tail contains POP or REWRITE tombstones for records whose source segments fall outside the range being compacted. Rotating and destroying those tombstones would resurrect records on remount. Tracked in `activeTailAffectedGenerations_`; see the impl doc for details.
 
-### O(1) cleanup and preflight (store)
+### O(1) preflight sizing (store)
 
-`cleanupAllDanglingSegments()` calls `listFiles` once and deletes all unreferenced segments in a single pass. The preflight loop in `compactRange()` uses `sealedSegmentBytes_.find(gen)` for O(1) size lookup instead of `fs()->fileSize()` per segment (~21ms each on LittleFS).
+The preflight loop in `compactRange()` uses `sealedSegmentBytes_.find(gen)` for O(1) size lookup instead of `fs()->fileSize()` per segment (~21ms each on LittleFS).
 
 ### Bulk segment reads in collectLiveRecords (store)
 
@@ -103,12 +103,35 @@ MaxLatency dominated by cleanup (77216ms) and preflight fileSize (1601ms). Both 
 
 Confirmed: cleanup and preflight fixed. MaxLatency dominated by collect (per-record readAt). Now fixed via bulk readFile in collectLiveRecords.
 
-**Run 4 (pending):** Re-run burst=500/pop=90%/rec=492B after bulk-read fix + targeted cleanup. Predicted MaxLatency: ~7.1s (profiler simMaxLatency=70.5ms x 100).
+**Run 4: burst=500/pop=90%/rec=492B, 3 cycles** (bulk-read + targeted cleanup)
 
-## Outstanding
+  Compactions: 17  NoOps: 6  MaxOutSegs: 8
+  MaxLatency: 4861 ms  Deadlocks: 0  CapExhausted: 0
 
-**Run 4 (on-device).** Validate collectLiveRecords bulk-read + targeted cleanup improvements on real LittleFS.
+Predicted 7.1s (simMaxLatency=70.5ms x 100); actual 4.9s. Sim overestimated by ~45% for this workload -- the x100 calibration factor is conservative. Improvement over Run 3: 10652ms -> 4861ms (~54% reduction).
 
-**Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]), which is blocked by the 4-range limit and would need a range-count increase or a two-phase approach. Until then, `maxOutputSegments` only limits compaction when the full chosen range exceeds the budget -- it does not truly cap the compaction work unit.
+## Workload characterisation and compaction trigger model
 
-**Future idea: cost-aware strategy.** Score ranges by `bytes_reclaimed / estimated_compaction_ms`, where estimated cost is derived from the latency model (readFile x readFileUs + writeFile x writeFileUs + listFiles x listFilesBaseUs + ...). Naturally avoids large nearly-live ranges when stall budget is tight. The posix profiler's latency model provides the per-op constants without on-device guesswork.
+Understanding when compaction is useful requires understanding the actual usage pattern.
+
+Enqueue is driven by backend failures: either brief and intermittent, or a sustained outage producing a burst. Pop is a rapid-fire drain, typically after the backend recovers, throttled by the caller. The two phases rarely overlap significantly. During a pure enqueue burst there is no dead data (nothing has been popped), so compaction has nothing to reclaim and should be a no-op. During a drain burst, pops create dead data but no new enqueues are arriving.
+
+**Key consequence: pops do not currently trigger compaction.** `needsCompaction()` is only checked in `writeRecord`. The drain phase never stalls for compaction, which is correct for latency. But it also means dead data from a completed drain sits unreclaimd until the next enqueue triggers pressure. If a new enqueue burst arrives before compaction has run, it hits the stall.
+
+**The clean-storage invariant.** If the queue is fully compacted before an enqueue burst, the burst writes only new live data, stays within maxSegments, and never triggers compaction at all. The stall during enqueue is a symptom of carrying dead data into the burst because the previous drain left it behind. Fix the drain phase, enqueue phase fixes itself.
+
+**Background compaction fits poorly here.** LittleFS is not concurrent: a background compaction task would still serialize against foreground I/O, adding context-switch overhead without real parallelism. During an active burst (enqueue or drain) there is no gain. The productive window is idle time between phases. Compaction during that window can be driven by the application, which already knows when the backend has recovered and the drain has finished. `compactFull()` called at that boundary is the right mechanism.
+
+## Planned work
+
+**1. Recalibrate profiler constants.** Run 4 shows actual latency ~69x simMaxLatency (4861ms / 70.5ms) for write-heavy compaction, not the assumed 100x. The x100 factor was derived when listFiles and per-record readAt dominated; now that writeFile dominates, the model is conservative. Measure individual op costs on device (writeFile fixed cost, writeFile per-KB, readFile, removeFile) and update `littleFsSimLatency()` before the next latency optimisation round.
+
+**2. Idle/drain-boundary compaction hook.** Dead data is created during drain (pops) but compaction currently waits until the next enqueue triggers write-path pressure. The next enqueue burst then inherits the stall -- exactly the wrong phase. The fix is to compact at the boundary after drain completes, not reactively during enqueue. Add a `compactIdle(maxSteps)` entry point the application can call when it knows the drain is done and the backend has recovered. This is lower risk than compacting on every pop (which could make drain latency unpredictable) and directly implements the clean-storage invariant: store is clean before the next enqueue burst, so the burst never stalls. The existing `compactFull()` is almost this; the missing piece is (a) a step budget so it can be called safely with a time constraint, and (b) documentation/guidance for callers.
+
+**3. Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]). This is feasible within the current 4-range limit when range count is 1-2 (the split stays within budget); at 3-4 ranges the split is blocked and falls back to full-range compaction. Gate on `(currentRangeCount + 2) <= kManifestMaxRanges` before committing a split. No manifest format change needed for the common case. Address this after the idle-compaction hook; if the hook keeps storage clean, the worst-case enqueue stall may already be acceptable.
+
+## Future work
+
+**Configurable kManifestMaxRanges.** The current manifest format (30B fixed + 4x8B = 62B) fits within the LittleFS 64-byte inline threshold. For devices with larger flash (e.g. 16MB) queueing megabytes of data, compaction latency scales with queue size and can become a data-loss mechanism: if the store cannot compact fast enough, QueueFull drops records. More ranges (e.g. 8 ranges = 94B) enable more subrange splits and tighter per-step latency bounds at scale. Make `kManifestMaxRanges` a config field with default 4. Deferred: touches the manifest binary format, requires a version bump, and expands the test matrix significantly.
+
+**Cost-aware compaction strategy.** Score ranges by `bytes_reclaimed / estimated_compaction_ms`, where estimated cost is derived from the latency model (readFile x readFileUs + writeFile x writeFileUs + ...). Naturally avoids large nearly-live ranges when stall budget is tight. Lower priority while HighestDeadRatio continues to perform well in practice.
