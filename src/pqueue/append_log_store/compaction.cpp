@@ -97,21 +97,57 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
 }
 
 Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
-    // Reject unknown ranges immediately, before any preflight work.
+#ifdef ARDUINO
+    const std::uint32_t t_start = millis();
+    std::uint32_t ms_exist = 0, ms_pre_scan = 0, ms_pre_size = 0;
+    std::uint32_t ms_rotate = 0, ms_resolve = 0, ms_collect = 0;
+    std::uint32_t ms_pack = 0, ms_write = 0, ms_publish = 0;
+    std::uint32_t ms_cleanup = 0, ms_replace = 0;
+    std::uint32_t eff_s = range.startGen, eff_e = range.endGen;
+    std::uint32_t hypo_e = range.endGen;
+    bool did_rotate = false;
+    std::uint32_t n_live = 0, n_in = 0, n_out = 0;
+    auto logLine = [&](const char* status) {
+        Serial.printf(
+            "[compactRange] req=[%u,%u] hypoEnd=%u eff=[%u,%u] rotate=%u "
+            "liveRecs=%u inSegs=%u outSegs=%u "
+            "exist_ms=%u pre_scan_ms=%u pre_size_ms=%u "
+            "rotate_ms=%u resolve_ms=%u collect_ms=%u "
+            "pack_ms=%u write_ms=%u publish_ms=%u "
+            "cleanup_ms=%u replace_ms=%u total_ms=%u %s\n",
+            range.startGen, range.endGen, hypo_e, eff_s, eff_e,
+            static_cast<unsigned>(did_rotate),
+            n_live, n_in, n_out,
+            ms_exist, ms_pre_scan, ms_pre_size,
+            ms_rotate, ms_resolve, ms_collect,
+            ms_pack, ms_write, ms_publish,
+            ms_cleanup, ms_replace, millis() - t_start, status);
+        Serial.flush();
+    };
+    #define CR_T0(var) const std::uint32_t _t0_##var = millis()
+    #define CR_T1(var) var = millis() - _t0_##var
+#else
+    #define CR_T0(var)
+    #define CR_T1(var)
+#endif
+
+    // Phase: range existence check.
+    CR_T0(ms_exist);
     {
         bool found = false;
         for (const auto& r : manifestRanges_) {
             if (r.startGen == range.startGen && r.endGen == range.endGen) { found = true; break; }
         }
-        if (!found) return Status::noOp();
+        if (!found) {
+            CR_T1(ms_exist);
+#ifdef ARDUINO
+            logLine("noOp(notFound)");
+#endif
+            return Status::noOp();
+        }
     }
+    CR_T1(ms_exist);
 
-    // Rotate-before-compact: when the target is the last manifest range and the active
-    // tail is contiguous with it, seal the tail into the range first. This prevents
-    // generation gap fragmentation: without the rotate, compaction output gens are
-    // numerically above the former tail gen, making the former tail an un-mergeable
-    // orphan range that accumulates until range pressure triggers a massive compaction.
-    // Only rotate when the tail will merge (not add a new range), preserving range count.
     const bool selectedIsLastRange =
         !manifestRanges_.empty() &&
         range.startGen == manifestRanges_.back().startGen &&
@@ -122,21 +158,22 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         manifestRanges_.back().endGen + 1 == activeGeneration_;
     const bool wouldRotate = selectedIsLastRange && tailCanMergeWithLastRange;
 
-    // Preflight: compute usefulness on the hypothetical effective range (including the
-    // tail if we would rotate) WITHOUT mutating store state. This ensures we never
-    // rotate and then return noOp — which would be a state-mutating no-op.
     const std::uint32_t hypoStartGen = range.startGen;
     const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : range.endGen;
+#ifdef ARDUINO
+    hypo_e = hypoEndGen;
+#endif
 
-    // Gather live record sizes from RAM (no disk read needed for preflight).
+    // Phase: preflight live scan (RAM only).
+    CR_T0(ms_pre_scan);
     std::vector<std::uint32_t> hypoPayloadBytes;
     for (const auto& sr : records_) {
         if (sr.segmentGeneration >= hypoStartGen && sr.segmentGeneration <= hypoEndGen) {
             hypoPayloadBytes.push_back(sr.payloadBytes);
         }
     }
+    CR_T1(ms_pre_scan);
 
-    // Bin-pack live records to estimate output segment count.
     std::uint32_t hypoOutputSegs = 0;
     if (!hypoPayloadBytes.empty()) {
         std::uint32_t segBytes = kSegmentHeaderBytes;
@@ -153,19 +190,20 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     const std::uint32_t hypoInputSegs = hypoEndGen - hypoStartGen + 1;
 
-    // Compute hypothetical input bytes (sealed segments from disk + active tail from RAM).
+    // Phase: preflight fileSize per input generation.
+    CR_T0(ms_pre_size);
     std::uint32_t hypoInputBytes = 0;
     for (std::uint32_t gen = hypoStartGen; gen <= hypoEndGen; ++gen) {
         if (gen == activeGeneration_) {
             hypoInputBytes += activeSegmentBytes_;
         } else {
             std::uint64_t sz = 0;
-            fs()->fileSize(segmentName(gen), sz); // missing file == 0 bytes, not an error
+            fs()->fileSize(segmentName(gen), sz);
             hypoInputBytes += static_cast<std::uint32_t>(sz);
         }
     }
+    CR_T1(ms_pre_size);
 
-    // Compute hypothetical live bytes (what would be written if compaction ran).
     std::uint32_t hypoLiveBytes = 0;
     if (!hypoPayloadBytes.empty()) {
         hypoLiveBytes = hypoOutputSegs * kSegmentHeaderBytes;
@@ -175,23 +213,40 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     }
     const bool hypoHasDeadBytes = hypoLiveBytes < hypoInputBytes;
 
-    // Apply no-op gate before any mutation. Dead range (no live records) is always useful.
     if (!hypoPayloadBytes.empty()) {
-        if (hypoOutputSegs > hypoInputSegs) return Status::noOp();
-        if (hypoOutputSegs == hypoInputSegs && !hypoHasDeadBytes) return Status::noOp();
+        if (hypoOutputSegs > hypoInputSegs) {
+#ifdef ARDUINO
+            logLine("noOp(wouldExpand)");
+#endif
+            return Status::noOp();
+        }
+        if (hypoOutputSegs == hypoInputSegs && !hypoHasDeadBytes) {
+#ifdef ARDUINO
+            logLine("noOp(noDead)");
+#endif
+            return Status::noOp();
+        }
     }
 
-    // Compaction is useful. Rotate first if needed (only when range has live records;
-    // dead-range removal produces no output so there is no generation gap to prevent).
-    // RangeLimitExceeded is unreachable here: rotateSegment() merges the contiguous
-    // tail into the last range before checking the limit, so count stays the same.
+    // Phase: rotateSegment.
+    CR_T0(ms_rotate);
     if (wouldRotate && !hypoPayloadBytes.empty()) {
         Status rotSt = rotateSegment();
-        if (!rotSt.ok()) return rotSt;
+        if (!rotSt.ok()) {
+            CR_T1(ms_rotate);
+#ifdef ARDUINO
+            logLine("err(rotate)");
+#endif
+            return rotSt;
+        }
+#ifdef ARDUINO
+        did_rotate = true;
+#endif
     }
+    CR_T1(ms_rotate);
 
-    // Re-resolve effective range: the rotate above may have extended the last range
-    // by merging the former tail into it (e.g. {1,59} + tail-60 → {1,60}).
+    // Phase: re-resolve effective range.
+    CR_T0(ms_resolve);
     CompactionRange effectiveRange = range;
     for (const auto& r : manifestRanges_) {
         if (r.startGen <= range.startGen && range.startGen <= r.endGen) {
@@ -199,17 +254,38 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             break;
         }
     }
-
     auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
         [&](const ManifestRange& r) {
             return r.startGen == effectiveRange.startGen && r.endGen == effectiveRange.endGen;
         });
-    if (it == manifestRanges_.end()) return Status::noOp();
+    CR_T1(ms_resolve);
+    if (it == manifestRanges_.end()) {
+#ifdef ARDUINO
+        eff_s = effectiveRange.startGen; eff_e = effectiveRange.endGen;
+        logLine("noOp(lostRange)");
+#endif
+        return Status::noOp();
+    }
     const std::size_t rangeIdx = static_cast<std::size_t>(it - manifestRanges_.begin());
+#ifdef ARDUINO
+    eff_s = effectiveRange.startGen; eff_e = effectiveRange.endGen;
+    n_in  = effectiveRange.endGen - effectiveRange.startGen + 1;
+#endif
 
+    // Phase: collectLiveRecords.
+    CR_T0(ms_collect);
     std::vector<CompactionLiveRecord> liveRecords;
     Status st = collectLiveRecords(effectiveRange, liveRecords);
-    if (!st.ok()) return st;
+    CR_T1(ms_collect);
+    if (!st.ok()) {
+#ifdef ARDUINO
+        logLine("err(collect)");
+#endif
+        return st;
+    }
+#ifdef ARDUINO
+    n_live = static_cast<std::uint32_t>(liveRecords.size());
+#endif
 
     if (liveRecords.empty()) {
         const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
@@ -220,12 +296,26 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         md.tailGeneration = activeGeneration_;
         md.nextGeneration = nextGeneration_;
         if (outputSegCount) *outputSegCount = 0;
+        CR_T0(ms_publish);
         st = publishManifest(md);
-        if (!st.ok()) return st;
+        CR_T1(ms_publish);
+        if (!st.ok()) {
+#ifdef ARDUINO
+            logLine("err(publish/dead)");
+#endif
+            return st;
+        }
+        CR_T0(ms_cleanup);
         for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+        CR_T1(ms_cleanup);
+#ifdef ARDUINO
+        logLine("ok(dead)");
+#endif
         return Status::success();
     }
 
+    // Phase: pack output segments (in-memory bin-packing).
+    CR_T0(ms_pack);
     struct OutputSeg {
         std::uint32_t gen;
         std::vector<std::size_t> indices;
@@ -246,8 +336,12 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             segBytes += recBytes;
         }
     }
+    CR_T1(ms_pack);
 
     if (outputSegCount) *outputSegCount = static_cast<std::uint32_t>(outputSegs.size());
+#ifdef ARDUINO
+    n_out = static_cast<std::uint32_t>(outputSegs.size());
+#endif
 
     const std::uint32_t firstNewGen = outputSegs.front().gen;
     const std::uint32_t lastNewGen  = outputSegs.back().gen;
@@ -255,6 +349,8 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     std::vector<SegmentRecord> replacements;
     replacements.reserve(liveRecords.size());
 
+    // Phase: write output segment files.
+    CR_T0(ms_write);
     for (const auto& seg : outputSegs) {
         std::uint32_t writeOffset = kSegmentHeaderBytes;
         std::string segData = serializeSegmentHeader(seg.gen, liveRecords[seg.indices.front()].sequence);
@@ -270,17 +366,22 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
         }
         st = writeSegmentFileTracked(segmentName(seg.gen), segData, SegmentWriteDisposition::MustBeNew);
-        if (!st.ok()) return st;
+        if (!st.ok()) {
+            CR_T1(ms_write);
+#ifdef ARDUINO
+            logLine("err(write)");
+#endif
+            return st;
+        }
     }
+    CR_T1(ms_write);
 
     std::vector<ManifestRange> newRanges = manifestRanges_;
     newRanges[rangeIdx] = {firstNewGen, lastNewGen};
-    // Merge with following range if contiguous.
     if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
         newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
     }
-    // Merge with preceding range if contiguous.
     if (rangeIdx > 0 && newRanges[rangeIdx - 1].endGen + 1 == newRanges[rangeIdx].startGen) {
         newRanges[rangeIdx - 1].endGen = newRanges[rangeIdx].endGen;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
@@ -293,13 +394,24 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
 
+    // Phase: publishManifest.
+    CR_T0(ms_publish);
     st = publishManifest(md);
-    if (!st.ok()) return st;
+    CR_T1(ms_publish);
+    if (!st.ok()) {
+#ifdef ARDUINO
+        logLine("err(publish)");
+#endif
+        return st;
+    }
 
-    // publishManifest cleans one dangling segment. Clean up all remaining
-    // input segments (now dangling) beyond the one it already handled.
+    // Phase: cleanup dangling input segments.
+    CR_T0(ms_cleanup);
     for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+    CR_T1(ms_cleanup);
 
+    // Phase: update in-RAM records to point at new segment generations.
+    CR_T0(ms_replace);
     for (auto& r : records_) {
         if (r.segmentGeneration < effectiveRange.startGen ||
             r.segmentGeneration > effectiveRange.endGen) continue;
@@ -307,8 +419,22 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             if (rep.sequence == r.sequence) { r = rep; break; }
         }
     }
+    CR_T1(ms_replace);
+
+#ifdef ARDUINO
+    logLine("ok");
+#endif
+
+#undef CR_T0
+#undef CR_T1
+
     return Status::success();
 }
+
+#ifndef ARDUINO
+// Silence unused-macro warnings on Posix where CR_T0/CR_T1 expand to nothing
+// and are #undef-ed inside compactRange above.
+#endif
 
 Status AppendLogStore::compactOneSegment() {
     auto rangeOpt = chooseCompactionRange();
