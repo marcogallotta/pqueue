@@ -299,17 +299,40 @@ merge with the output range until it is itself compacted. Range count can reach 
 workload. This is bounded: dead-range elimination reclaims the orphan once its records are
 popped, and range count never reaches 4.
 
+## On-device run 2 (burst=500/pop=90%/rec=492, rotate-before-compact)
+
+Run after rotate-before-compact landed. Observed:
+
+  [compact] outSegs=54 latency=131384ms
+  [compact] outSegs=24 latency=64853ms
+
+Root cause: the hot-path selector (chooseHighestDeadRatio) returns an entire manifest
+range as the compaction unit. A range spanning 54 output segments requires roughly 378
+readAt() calls (54 segs x 7 records each) plus 54 writeFile() calls. Each LittleFS I/O
+is 50-300ms. Total: ~130 seconds for one compaction call.
+
+This is a selector policy problem, not a store problem. compactRange() is correct to
+compact whatever range it is handed. The selector must not hand it a range that produces
+more than a bounded number of output segments in the hot path.
+
+Hot-path I/O improvements also landed during this run:
+- checkAndCompact now uses logical segment count (sum of range widths + 1 for tail)
+  instead of segmentStats().size(), eliminating per-generation fileSize() calls from
+  the rising-edge check.
+- SegmentWriteDisposition::MustBeNew added: createSegment() and compaction output writes
+  skip the fileSize() probe that was hitting non-existent files at 2-3s each on LittleFS.
+These helped latency of individual small compactions but did not address the 54-segment job.
+
 ## Next steps
 
-**On-device validation.** Rerun burst=500/pop=90%/rec=492 (the workload that produced the
-30-second stall) to confirm the stall is gone and measure actual worst-case latency. The
-arduino test at tests/arduino/test_pqueue_compaction/test_main.cpp is ready; it uses the
-corrected usefulness gate and the store now has rotate-before-compact.
+**Bound the hot-path compaction window.** The selector must cap predicted output segments
+at a hard budget (e.g. 8). If the best candidate range would exceed the budget, pick a
+bounded subrange (window of input segments) inside it instead of the whole range.
+compactRange() already accepts arbitrary CompactionRange values -- the fix is entirely in
+the selector/test harness. compactFull() can still do unbounded work during maintenance.
 
-**Final strategy selection.** Pick one of HighestDeadRatio or CostBenefit. Both pass all
-recoverable workloads and are behaviourally identical in the sim at both scaled and real-world
-parameters. Either is acceptable; HighestDeadRatio is slightly simpler to reason about.
-Deferred until the on-device run confirms the stall is gone.
+**Final strategy selection.** Deferred until the bounded window lands and on-device
+latency is confirmed acceptable.
 
 **Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based
 strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0):
