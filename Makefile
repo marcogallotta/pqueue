@@ -9,6 +9,8 @@ LDFLAGS := -lcurl
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
 TEST_TARGET := $(BUILD_DIR)/pqueue-tests
+COV_DIR := $(BUILD_DIR)/coverage
+COV_TARGET := $(COV_DIR)/pqueue-tests-cov
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
 SIM_TARGET := $(BUILD_DIR)/pqueue-compaction-sim
@@ -57,7 +59,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool profiling sim docs clean .FORCE
+.PHONY: all test tests run-tests repair-tool profiling sim docs coverage clean .FORCE
 
 all: test
 
@@ -98,6 +100,22 @@ $(TEST_TARGET): $(OBJ)
 $(OBJ_DIR)/%.o: %.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+COV_OBJ := $(patsubst %.cpp,$(COV_DIR)/obj/%.o,$(TEST_SRC))
+
+coverage: $(COV_TARGET)
+	./$(COV_TARGET) || true
+	gcovr --root . --object-directory $(COV_DIR)/obj \
+	      --filter src/ --html-details $(COV_DIR)/html/index.html
+	@echo "Report: $(COV_DIR)/html/index.html"
+
+$(COV_TARGET): $(COV_OBJ)
+	@mkdir -p $(dir $@)
+	$(CXX) $^ -o $@ $(LDFLAGS) --coverage
+
+$(COV_DIR)/obj/%.o: %.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -O0 --coverage -c $< -o $@
 
 clean:
 	rm -rf $(BUILD_DIR)
