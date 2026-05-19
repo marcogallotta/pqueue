@@ -1,7 +1,5 @@
 #include "pqueue_append_log_support.h"
 
-#ifndef ARDUINO
-
 using namespace pqueue::append_log_detail;
 
 namespace {
@@ -852,5 +850,3 @@ TEST_CASE("compaction: orphan tail range is eliminated after its records are all
     }
     CHECK_EQ(store.manifestRanges().size(), 0U);
 }
-
-#endif // !ARDUINO

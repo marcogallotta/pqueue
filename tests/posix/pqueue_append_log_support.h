@@ -75,12 +75,17 @@ inline void resetSpool() {
     std::filesystem::create_directories(kSpoolDir);
 }
 
-inline void plantManifest(const pqueue::append_log_detail::ManifestData& md) {
+inline void plantManifest(const pqueue::append_log_detail::ManifestData& md, char slot = 'a') {
     using namespace pqueue::append_log_detail;
     std::vector<std::uint8_t> bytes;
     serialiseManifest(md, bytes);
-    std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+    std::ofstream f(manifestSlotPath(slot), std::ios::binary | std::ios::trunc);
     f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+inline void corruptSlot(char slot) {
+    std::ofstream f(manifestSlotPath(slot), std::ios::binary | std::ios::trunc);
+    f.write("GARBAGE", 7);
 }
 
 inline void plantSegment(std::uint32_t gen, std::uint32_t firstSeq = 0, const std::string& body = "") {
