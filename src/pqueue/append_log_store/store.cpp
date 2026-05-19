@@ -328,16 +328,19 @@ Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t sta
 }
 
 Status AppendLogStore::rotateSegment() {
+#ifdef ARDUINO
+    const std::uint32_t t_rot_start = millis();
+#endif
     const std::uint32_t oldTailGen = activeGeneration_;
     const std::uint32_t newGen    = nextGeneration_;
 
-    // Build new full-range list: promote current tail to a closed range, then
-    // merge with the preceding range if contiguous. Check limit before any I/O.
     std::vector<ManifestRange> newRanges = manifestRanges_;
+    bool merged = false;
     if (oldTailGen != 0) {
         ManifestRange r{oldTailGen, oldTailGen};
         if (!newRanges.empty() && newRanges.back().endGen + 1 == r.startGen) {
             newRanges.back().endGen = r.endGen;
+            merged = true;
         } else {
             newRanges.push_back(r);
         }
@@ -355,11 +358,18 @@ Status AppendLogStore::rotateSegment() {
     manifest.ranges         = std::move(newRanges);
     manifest.tailGeneration = newGen;
     manifest.nextGeneration = newGen + 1;
+#ifdef ARDUINO
+    const std::uint32_t t_pub = millis();
+#endif
     st = publishManifest(manifest);
+#ifdef ARDUINO
+    const std::uint32_t ms_pub = millis() - t_pub;
+    Serial.printf("[rotate] oldTail=%u newTail=%u merged=%u publish_ms=%u total_ms=%u\n",
+        oldTailGen, newGen, static_cast<unsigned>(merged), ms_pub, millis() - t_rot_start);
+    Serial.flush();
+#endif
     if (!st.ok()) return st;
 
-    // RAM updated only after durable manifest publish.
-    // publishManifest -> applyManifestToRam already set activeGenerations_ and nextGeneration_.
     activeGeneration_    = newGen;
     activeSegmentBytes_  = kSegmentHeaderBytes;
     return Status::success();
@@ -484,7 +494,19 @@ Status AppendLogStore::readIndexFromDisk(FileStoreIndex& out) {
 }
 
 Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& record) {
+#ifdef ARDUINO
+    const std::uint32_t t_wr_start = millis();
+    std::uint32_t ms_ensure = 0, ms_compact = 0, ms_rotate = 0, ms_ensure_seg = 0, ms_append = 0;
+    bool did_rotate = false, did_compact = false;
+#endif
+
+#ifdef ARDUINO
+    { const std::uint32_t _t = millis();
+#endif
     Status st = ensureMounted();
+#ifdef ARDUINO
+    ms_ensure = millis() - _t; }
+#endif
     if (!st.ok()) return st;
 
     if (record.size() > config_.maxRecordBytes) {
@@ -501,10 +523,10 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 
     const std::uint32_t eventBytes = kEnqueueOverheadBytes + static_cast<std::uint32_t>(record.size());
 
-    // maxTotalBytes enforcement: compact until footprint fits or nothing left to reclaim.
-    // minFreeBytes is the hard floor; maxTotalBytes is a per-queue soft cap enforced here
-    // rather than in canEnqueue() so that compaction gets a chance to make room first.
     if (config_.maxTotalBytes > 0) {
+#ifdef ARDUINO
+        const std::uint32_t _tc = millis();
+#endif
         while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) > config_.maxTotalBytes) {
             Status compact = compactOneSegment();
             if (!compact.ok()) return diagnostic(Severity::Error, compact, "writeRecord");
@@ -513,11 +535,15 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
                     Status::failure(StatusCode::QueueFull, "queue footprint limit reached"),
                     "writeRecord");
             }
+#ifdef ARDUINO
+            did_compact = true;
+#endif
         }
+#ifdef ARDUINO
+        ms_compact = millis() - _tc;
+#endif
     }
 
-    // Hard FS floor: canEnqueue() no longer requires free space for the record itself
-    // (only the minFreeBytes reserve), so writeRecord is authoritative here.
     if (config_.minFreeBytes > 0) {
         const std::uint64_t free = freeBytes();
         const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
@@ -528,31 +554,61 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
         }
     }
 
-    // Ensure we have an active segment, rotating or compacting if needed
     if (activeSegmentBytes_ > kSegmentHeaderBytes &&
         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes) {
         if (needsCompaction()) {
-            st = compactOneSegment();
-            if (!st.ok()) return diagnostic(Severity::Error, st, "writeRecord");
+            Status cst = compactOneSegment();
+            if (!cst.ok()) return diagnostic(Severity::Error, cst, "writeRecord");
+#ifdef ARDUINO
+            did_compact = true;
+#endif
         }
         if (activeSegmentBytes_ > kSegmentHeaderBytes &&
             activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes) {
-            st = rotateSegment();
-            if (!st.ok()) return diagnostic(Severity::Error, st, "writeRecord");
+#ifdef ARDUINO
+            const std::uint32_t _tr = millis();
+#endif
+            Status rst = rotateSegment();
+#ifdef ARDUINO
+            ms_rotate = millis() - _tr;
+            did_rotate = true;
+#endif
+            if (!rst.ok()) return diagnostic(Severity::Error, rst, "writeRecord");
         }
     }
-    st = ensureActiveSegment(sequence);
-    if (!st.ok()) return diagnostic(Severity::Error, st, "writeRecord");
 
-    // payloadOffset is computed after segment exists so activeSegmentBytes_ is valid
+#ifdef ARDUINO
+    { const std::uint32_t _t = millis();
+#endif
+    Status est = ensureActiveSegment(sequence);
+#ifdef ARDUINO
+    ms_ensure_seg = millis() - _t; }
+#endif
+    if (!est.ok()) return diagnostic(Severity::Error, est, "writeRecord");
+
     const std::uint32_t payloadOffset = activeSegmentBytes_ + kEnqueueHeaderBytes;
-
     const std::string eventData = serializeEnqueueEvent(sequence, record);
 
-    st = appendEnqueueEventBytes(eventData);
-    if (!st.ok()) {
-        return diagnostic(Severity::Error, st, "writeRecord");
+#ifdef ARDUINO
+    { const std::uint32_t _t = millis();
+#endif
+    Status ast = appendEnqueueEventBytes(eventData);
+#ifdef ARDUINO
+    ms_append = millis() - _t; }
+#endif
+    if (!ast.ok()) return diagnostic(Severity::Error, ast, "writeRecord");
+
+#ifdef ARDUINO
+    const std::uint32_t ms_total = millis() - t_wr_start;
+    if (ms_total > 50) {
+        Serial.printf("[writeRecord] seq=%u recBytes=%u rotate=%u compact=%u "
+            "ensure_ms=%u compact_ms=%u rotate_ms=%u ensure_seg_ms=%u append_ms=%u total_ms=%u\n",
+            sequence, static_cast<unsigned>(record.size()),
+            static_cast<unsigned>(did_rotate), static_cast<unsigned>(did_compact),
+            ms_ensure, ms_compact, ms_rotate, ms_ensure_seg, ms_append, ms_total);
+        Serial.flush();
     }
+#endif
 
     pendingRecord_.sequence = sequence;
     pendingRecord_.segmentGeneration = activeGeneration_;
