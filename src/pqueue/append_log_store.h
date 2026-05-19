@@ -25,6 +25,7 @@ struct AppendLogConfig {
     std::uint32_t maxTotalBytes = 128 * 1024; // 0 = unlimited
     std::uint32_t minFreeBytes = 32 * 1024;
     std::uint8_t maxSegments = 16;
+    std::uint8_t maxOutputSegments = 8; // max output segments per compactOneSegment call
     std::size_t maxRecordBytes = 4096;
     EventOptions events;
 };
@@ -51,6 +52,7 @@ public:
         std::uint32_t endGen   = 0;
     };
     std::optional<CompactionRange> chooseCompactionRange() const;
+    CompactionRange narrowRange(const CompactionRange& range, std::uint8_t maxOutputSegs) const;
 
     struct CompactionLiveRecord {
         std::uint32_t sequence = 0;

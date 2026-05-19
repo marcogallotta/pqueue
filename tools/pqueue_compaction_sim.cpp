@@ -108,27 +108,6 @@ public:
 };
 
 // 2. Cost-benefit ratio: maximise dead bytes reclaimed per live byte copied.
-class CostBenefit : public Strategy {
-public:
-    const char* name() const override { return "CostBenefit"; }
-    std::optional<pqueue::AppendLogStore::CompactionRange> choose(
-        const std::vector<RangeStat>& stats, std::uint32_t) override
-    {
-        if (stats.empty()) return std::nullopt;
-        const RangeStat* best = nullptr;
-        float bestScore = 0.0f;
-        for (const auto& rs : stats) {
-            if (rs.deadBytes() == 0) continue;
-            float score = rs.liveBytes > 0
-                ? static_cast<float>(rs.deadBytes()) / static_cast<float>(rs.liveBytes)
-                : static_cast<float>(rs.deadBytes());
-            if (score > bestScore) { bestScore = score; best = &rs; }
-        }
-        if (!best) return std::nullopt;
-        return best->range;
-    }
-};
-
 // 3. Range-consolidation-first: prefer ranges whose compaction would reduce range count
 //    by merging with an adjacent range (contiguous generation numbers).
 class RangeConsolidation : public Strategy {
@@ -465,7 +444,6 @@ static void printRow(const char* name, const SimMetrics& m) {
 int main() {
     std::vector<std::unique_ptr<Strategy>> strategies;
     strategies.push_back(std::make_unique<HighestDeadRatio>());
-    strategies.push_back(std::make_unique<CostBenefit>());
     strategies.push_back(std::make_unique<RangeConsolidation>());
     strategies.push_back(std::make_unique<DeferUntilPressure>());
     strategies.push_back(std::make_unique<MinLiveBytesCopied>());

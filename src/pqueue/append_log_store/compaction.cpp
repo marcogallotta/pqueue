@@ -452,10 +452,60 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 // and are #undef-ed inside compactRange above.
 #endif
 
+AppendLogStore::CompactionRange AppendLogStore::narrowRange(
+    const CompactionRange& range, std::uint8_t maxOutputSegs) const
+{
+    const auto allStats = segmentStats();
+    std::vector<SegmentStat> segs;
+    for (const auto& s : allStats) {
+        if (s.generation >= range.startGen && s.generation <= range.endGen)
+            segs.push_back(s);
+    }
+    if (segs.empty()) return range;
+    std::sort(segs.begin(), segs.end(),
+        [](const SegmentStat& a, const SegmentStat& b) { return a.generation < b.generation; });
+
+    const auto predictOut = [&](std::uint32_t liveBytes) -> std::uint32_t {
+        if (liveBytes == 0) return 0;
+        return (liveBytes + config_.maxSegmentBytes - 1) / config_.maxSegmentBytes;
+    };
+
+    // Only narrow when the full range exceeds the output budget.
+    std::uint32_t totalRangeLive = 0;
+    for (const auto& s : segs) totalRangeLive += s.liveBytes;
+    if (predictOut(totalRangeLive) <= maxOutputSegs) return range;
+
+    if (predictOut(segs[0].liveBytes) > maxOutputSegs) {
+        // Even a single segment exceeds budget -- compact it anyway (minimum unit).
+        return {segs[0].generation, segs[0].generation};
+    }
+
+    CompactionRange best = {segs[0].generation, segs[0].generation};
+    float bestDead = -1.0f;
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        std::uint32_t live = 0, total = 0;
+        for (std::size_t j = i; j < segs.size(); ++j) {
+            live  += segs[j].liveBytes;
+            total += segs[j].totalBytes;
+            if (predictOut(live) > maxOutputSegs) break;
+            const float dr = total > 0
+                ? static_cast<float>(total - live) / static_cast<float>(total) : 0.0f;
+            if (dr > bestDead) {
+                bestDead = dr;
+                best = {segs[i].generation, segs[j].generation};
+            }
+        }
+    }
+    return best;
+}
+
 Status AppendLogStore::compactOneSegment() {
     auto rangeOpt = chooseCompactionRange();
     if (!rangeOpt) return Status::noOp();
-    return compactRange(*rangeOpt);
+    const CompactionRange range = config_.maxOutputSegments > 0
+        ? narrowRange(*rangeOpt, config_.maxOutputSegments)
+        : *rangeOpt;
+    return compactRange(range);
 }
 
 Status AppendLogStore::compactFull() {
