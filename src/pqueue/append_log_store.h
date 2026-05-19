@@ -143,6 +143,18 @@ private:
     // rotate/compaction output/cleanup. Lets segmentStats() avoid fileSize() calls.
     std::unordered_map<std::uint32_t, std::uint32_t> sealedSegmentBytes_;
 
+    // Cached manifest slot state: after a successful publishManifest(), remember
+    // which slot was written and its epoch so the next call can skip the 2x fileSize
+    // + 2x readFile probe. Cleared on mount/format to force a fresh read from disk.
+    const char* cachedWrittenSlot_ = nullptr; // points to one of the kManifest* constants
+    std::uint32_t cachedWrittenEpoch_ = 0;
+
+#ifdef ARDUINO
+    // Scratch timing set by publishManifest(), read by its callers for consolidated logs.
+    std::uint32_t dbgLastProbeMs_ = 0;
+    std::uint32_t dbgLastWriteMs_ = 0;
+#endif
+
     // Logical active segment order (matches replay order from scanSegments)
     std::vector<std::uint32_t> activeGenerations_;
 

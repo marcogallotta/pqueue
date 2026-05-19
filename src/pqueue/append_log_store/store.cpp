@@ -155,6 +155,8 @@ Status AppendLogStore::scanSegments() {
     records_.clear();
     activeGenerations_.clear();
     sealedSegmentBytes_.clear();
+    cachedWrittenSlot_ = nullptr;
+    cachedWrittenEpoch_ = 0;
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
@@ -360,21 +362,24 @@ Status AppendLogStore::rotateSegment() {
     if (oldTailGen != 0) sealedSegmentBytes_[oldTailGen] = activeSegmentBytes_;
 
     const std::uint32_t baseSeq = records_.empty() ? 0 : records_.back().sequence + 1;
+#ifdef ARDUINO
+    const std::uint32_t t_create = millis();
+#endif
     Status st = createSegment(newGen, baseSeq);
+#ifdef ARDUINO
+    const std::uint32_t ms_create = millis() - t_create;
+#endif
     if (!st.ok()) return st;
 
     ManifestData manifest;
     manifest.ranges         = std::move(newRanges);
     manifest.tailGeneration = newGen;
     manifest.nextGeneration = newGen + 1;
-#ifdef ARDUINO
-    const std::uint32_t t_pub = millis();
-#endif
     st = publishManifest(manifest);
 #ifdef ARDUINO
-    const std::uint32_t ms_pub = millis() - t_pub;
-    Serial.printf("[rotate] oldTail=%u newTail=%u merged=%u publish_ms=%u total_ms=%u\n",
-        oldTailGen, newGen, static_cast<unsigned>(merged), ms_pub, millis() - t_rot_start);
+    Serial.printf("[rotate] old=%u new=%u merged=%u create_ms=%u probe_ms=%u write_ms=%u total_ms=%u\n",
+        oldTailGen, newGen, static_cast<unsigned>(merged),
+        ms_create, dbgLastProbeMs_, dbgLastWriteMs_, millis() - t_rot_start);
     Serial.flush();
 #endif
     if (!st.ok()) return st;
@@ -611,7 +616,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 
 #ifdef ARDUINO
     const std::uint32_t ms_total = millis() - t_wr_start;
-    if (ms_total > 50) {
+    if (ms_total > 500) {
         Serial.printf("[writeRecord] seq=%u recBytes=%u rotate=%u compact=%u "
             "ensure_ms=%u compact_ms=%u rotate_ms=%u ensure_seg_ms=%u append_ms=%u total_ms=%u\n",
             sequence, static_cast<unsigned>(record.size()),
@@ -755,8 +760,11 @@ Status AppendLogStore::format() {
     f->removeFile(kManifestSlotB);
     manifestRanges_.clear();
     activeGenerations_.clear();
+    sealedSegmentBytes_.clear();
     records_.clear();
     hasPendingEnqueue_ = false;
+    cachedWrittenSlot_ = nullptr;
+    cachedWrittenEpoch_ = 0;
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
