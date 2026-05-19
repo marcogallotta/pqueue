@@ -258,70 +258,58 @@ The root problem is that compaction output generations are numerically above the
 generation, creating a gap that prevents range merging and causes permanent fragmentation
 after every compaction pass.
 
-### Two fixes required
+### Current state
 
-**Fix 1 -- compaction usefulness gate (safe, in progress).** The trigger currently
-treats range pressure as unconditionally useful:
-
-  bool useful = pressure;
-
-This causes compaction to fire even when the selected range has 0% dead bytes and
-outputSegs == inputSegs (no structural improvement possible). The correct predicate:
-compaction is useful only if it improves state, meaning:
+**Compaction usefulness gate (test_main.cpp).** The checkAndCompact trigger treats a
+compaction as useful only if it produces a structural improvement:
 
   - the range is fully dead (all records popped), or
   - dead bytes > 0 and predicted outputSegs <= inputSegs, or
-  - predicted outputSegs < inputSegs (structural consolidation, even with low dead ratio)
+  - predicted outputSegs < inputSegs (structural consolidation, even at low dead ratio)
 
-Predicted output segment count can be estimated cheaply from segmentStats() liveBytes
-without reading records: ceil(liveBytes / maxSegmentBytes).
+Predicted output segment count is estimated from segmentStats() liveBytes without reading
+records: ceil(liveBytes / maxSegmentBytes). Compaction is skipped if predicted outputSegs >
+inputSegs (would worsen range count) or predicted outputSegs == inputSegs with no dead bytes
+(pure no-op). This gate lives entirely in test_main.cpp and does not touch the store.
 
-Compaction must be rejected if:
-  - predicted outputSegs > inputSegs (would worsen range count), or
-  - predicted outputSegs == inputSegs and dead bytes == 0 (pure no-op)
+**Rotate-before-compact (store).** When the selected range is the last manifest range and
+the active tail is contiguous with it, compactRange() seals the tail into the compaction
+input before writing output. This keeps output generations contiguous with whatever follows,
+preventing the orphan-tail gap that caused the 30-second stall.
 
-This fix is local to the trigger in test_main.cpp and does not touch the store.
+The design is preflight-before-rotate: usefulness is evaluated on the hypothetical extended
+range (including the tail) using only in-memory record sizes and sealed-segment file sizes,
+without mutating state. If the hypothetical compaction would be a no-op, the function returns
+noOp immediately and the rotate does not fire. Only if useful does rotateSegment() run, after
+which the effective range is re-resolved from the manifest to pick up the extended endpoint.
 
-**Fix 2 -- generation gap in the store (needs invariant analysis first).** The
-structural fix is to ensure compaction output remains contiguous with the active segment,
-eliminating the fragmentation entirely. The candidate approach is to rotate (seal) the
-active segment before compaction writes its output, so its generation is included in the
-compacted range and the output generations start from a point contiguous with whatever
-follows.
+RangeLimitExceeded is structurally unreachable on the rotate path: rotateSegment() merges the
+contiguous tail into the last manifest range before checking the limit, so range count is
+unchanged.
 
-Before implementing this, the following invariants must be written down and verified
-against scanSegments() and cleanup:
+After compaction, cleanupOneDanglingSegment() is called inputSegCount - 1 additional times
+beyond the one implicit in publishManifest. This drains the former-tail segment (now dangling)
+promptly; without it, the dangling file inflates totalOnDiskBytes_ and blocks subsequent writes.
 
-  1. What is the intended logical replay order after compaction produces ranges with
-     generation numbers greater than the (former) active generation?
-  2. Is manifest order authoritative over numeric generation order in scanSegments()?
-  3. After rotate-before-compact, the active is sealed and included in the compaction
-     input. Output gens then start at nextGeneration_, which is contiguous with new
-     enqueue gens. Does this hold after remount?
-  4. Does cleanupOneDanglingSegment treat compaction-output segments (numeric-new but
-     logically replacing old data) safely?
-
-The impl doc notes that isLastSegment is determined by manifest position, not numeric
-generation -- this is the key invariant that would make fix 2 safe. But this must be
-verified explicitly against the code before proceeding.
+**Residual fragmentation.** Rotate-before-compact prevents the catastrophic case where range
+count hits kManifestMaxRanges=4 after every compact cycle. It does not prevent all
+fragmentation: when the orphan tail (the sealed former-active at generation T+1, numerically
+below the output range) later receives live records, it forms a range {T+1,T+1} that cannot
+merge with the output range until it is itself compacted. Range count can reach 3 in a mixed
+workload. This is bounded: dead-range elimination reclaims the orphan once its records are
+popped, and range count never reaches 4.
 
 ## Next steps
 
-**1. Implement fix 1 (gate).** Add the predicted-output-segment check to the
-checkAndCompact trigger in test_main.cpp. Rerun burst=500/pop=90%/rec=492, 15 cycles
-to confirm fix 1 eliminates the 30-second stalls and measures actual worst-case stall
-under correct operation.
+**On-device validation.** Rerun burst=500/pop=90%/rec=492 (the workload that produced the
+30-second stall) to confirm the stall is gone and measure actual worst-case latency. The
+arduino test at tests/arduino/test_pqueue_compaction/test_main.cpp is ready; it uses the
+corrected usefulness gate and the store now has rotate-before-compact.
 
-**2. Analyse and implement fix 2 (store).** Write down the replay and cleanup invariants
-listed above, verify against scanSegments() and cleanupOneDanglingSegment(), then
-implement rotate-before-compact in the store. Rerun the on-device test to confirm range
-fragmentation is gone.
-
-**3. Final strategy selection.** Pick one of HighestDeadRatio or CostBenefit. Both pass
-all recoverable workloads and are behaviourally identical in the sim at both scaled and
-real-world parameters. Either is acceptable; HighestDeadRatio is slightly simpler to
-reason about. Deferred until fixes 1 and 2 are complete and a clean measurement of
-worst-case stall is available.
+**Final strategy selection.** Pick one of HighestDeadRatio or CostBenefit. Both pass all
+recoverable workloads and are behaviourally identical in the sim at both scaled and real-world
+parameters. Either is acceptable; HighestDeadRatio is slightly simpler to reason about.
+Deferred until the on-device run confirms the stall is gone.
 
 **Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based
 strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0):

@@ -97,18 +97,123 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
 }
 
 Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
+    // Reject unknown ranges immediately, before any preflight work.
+    {
+        bool found = false;
+        for (const auto& r : manifestRanges_) {
+            if (r.startGen == range.startGen && r.endGen == range.endGen) { found = true; break; }
+        }
+        if (!found) return Status::noOp();
+    }
+
+    // Rotate-before-compact: when the target is the last manifest range and the active
+    // tail is contiguous with it, seal the tail into the range first. This prevents
+    // generation gap fragmentation: without the rotate, compaction output gens are
+    // numerically above the former tail gen, making the former tail an un-mergeable
+    // orphan range that accumulates until range pressure triggers a massive compaction.
+    // Only rotate when the tail will merge (not add a new range), preserving range count.
+    const bool selectedIsLastRange =
+        !manifestRanges_.empty() &&
+        range.startGen == manifestRanges_.back().startGen &&
+        range.endGen   == manifestRanges_.back().endGen;
+    const bool tailCanMergeWithLastRange =
+        activeSegmentBytes_ > kSegmentHeaderBytes &&
+        !manifestRanges_.empty() &&
+        manifestRanges_.back().endGen + 1 == activeGeneration_;
+    const bool wouldRotate = selectedIsLastRange && tailCanMergeWithLastRange;
+
+    // Preflight: compute usefulness on the hypothetical effective range (including the
+    // tail if we would rotate) WITHOUT mutating store state. This ensures we never
+    // rotate and then return noOp — which would be a state-mutating no-op.
+    const std::uint32_t hypoStartGen = range.startGen;
+    const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : range.endGen;
+
+    // Gather live record sizes from RAM (no disk read needed for preflight).
+    std::vector<std::uint32_t> hypoPayloadBytes;
+    for (const auto& sr : records_) {
+        if (sr.segmentGeneration >= hypoStartGen && sr.segmentGeneration <= hypoEndGen) {
+            hypoPayloadBytes.push_back(sr.payloadBytes);
+        }
+    }
+
+    // Bin-pack live records to estimate output segment count.
+    std::uint32_t hypoOutputSegs = 0;
+    if (!hypoPayloadBytes.empty()) {
+        std::uint32_t segBytes = kSegmentHeaderBytes;
+        hypoOutputSegs = 1;
+        for (const std::uint32_t pay : hypoPayloadBytes) {
+            const std::uint32_t recBytes = kEnqueueOverheadBytes + pay;
+            if (segBytes + recBytes > config_.maxSegmentBytes) {
+                ++hypoOutputSegs;
+                segBytes = kSegmentHeaderBytes;
+            }
+            segBytes += recBytes;
+        }
+    }
+
+    const std::uint32_t hypoInputSegs = hypoEndGen - hypoStartGen + 1;
+
+    // Compute hypothetical input bytes (sealed segments from disk + active tail from RAM).
+    std::uint32_t hypoInputBytes = 0;
+    for (std::uint32_t gen = hypoStartGen; gen <= hypoEndGen; ++gen) {
+        if (gen == activeGeneration_) {
+            hypoInputBytes += activeSegmentBytes_;
+        } else {
+            std::uint64_t sz = 0;
+            const Status szSt = fs()->fileSize(segmentName(gen), sz);
+            if (!szSt.ok()) return szSt;
+            hypoInputBytes += static_cast<std::uint32_t>(sz);
+        }
+    }
+
+    // Compute hypothetical live bytes (what would be written if compaction ran).
+    std::uint32_t hypoLiveBytes = 0;
+    if (!hypoPayloadBytes.empty()) {
+        hypoLiveBytes = hypoOutputSegs * kSegmentHeaderBytes;
+        for (const std::uint32_t pay : hypoPayloadBytes) {
+            hypoLiveBytes += kEnqueueOverheadBytes + pay;
+        }
+    }
+    const bool hypoHasDeadBytes = hypoLiveBytes < hypoInputBytes;
+
+    // Apply no-op gate before any mutation. Dead range (no live records) is always useful.
+    if (!hypoPayloadBytes.empty()) {
+        if (hypoOutputSegs > hypoInputSegs) return Status::noOp();
+        if (hypoOutputSegs == hypoInputSegs && !hypoHasDeadBytes) return Status::noOp();
+    }
+
+    // Compaction is useful. Rotate first if needed (only when range has live records;
+    // dead-range removal produces no output so there is no generation gap to prevent).
+    // RangeLimitExceeded is unreachable here: rotateSegment() merges the contiguous
+    // tail into the last range before checking the limit, so count stays the same.
+    if (wouldRotate && !hypoPayloadBytes.empty()) {
+        Status rotSt = rotateSegment();
+        if (!rotSt.ok()) return rotSt;
+    }
+
+    // Re-resolve effective range: the rotate above may have extended the last range
+    // by merging the former tail into it (e.g. {1,59} + tail-60 → {1,60}).
+    CompactionRange effectiveRange = range;
+    for (const auto& r : manifestRanges_) {
+        if (r.startGen <= range.startGen && range.startGen <= r.endGen) {
+            effectiveRange = {r.startGen, r.endGen};
+            break;
+        }
+    }
+
     auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
         [&](const ManifestRange& r) {
-            return r.startGen == range.startGen && r.endGen == range.endGen;
+            return r.startGen == effectiveRange.startGen && r.endGen == effectiveRange.endGen;
         });
     if (it == manifestRanges_.end()) return Status::noOp();
     const std::size_t rangeIdx = static_cast<std::size_t>(it - manifestRanges_.begin());
 
     std::vector<CompactionLiveRecord> liveRecords;
-    Status st = collectLiveRecords(range, liveRecords);
+    Status st = collectLiveRecords(effectiveRange, liveRecords);
     if (!st.ok()) return st;
 
     if (liveRecords.empty()) {
+        const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
         std::vector<ManifestRange> newRanges = manifestRanges_;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
         ManifestData md;
@@ -116,7 +221,10 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         md.tailGeneration = activeGeneration_;
         md.nextGeneration = nextGeneration_;
         if (outputSegCount) *outputSegCount = 0;
-        return publishManifest(md);
+        st = publishManifest(md);
+        if (!st.ok()) return st;
+        for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+        return Status::success();
     }
 
     struct OutputSeg {
@@ -140,31 +248,6 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         }
     }
 
-    const std::size_t inputSegCount = static_cast<std::size_t>(range.endGen - range.startGen + 1);
-
-    // Compute total live bytes across all output segments.
-    std::uint32_t totalLiveBytes = 0;
-    for (const auto& seg : outputSegs) {
-        totalLiveBytes += kSegmentHeaderBytes;
-        for (std::size_t idx : seg.indices) {
-            totalLiveBytes += kEnqueueOverheadBytes +
-                static_cast<std::uint32_t>(liveRecords[idx].payload.size());
-        }
-    }
-    // Compute total input bytes from disk.
-    std::uint32_t totalInputBytes = 0;
-    for (std::uint32_t gen = range.startGen; gen <= range.endGen; ++gen) {
-        std::uint64_t sz = 0;
-        Status sizeSt = fs()->fileSize(segmentName(gen), sz);
-        if (!sizeSt.ok()) return sizeSt;
-        totalInputBytes += static_cast<std::uint32_t>(sz);
-    }
-    const bool hasDeadBytes = totalLiveBytes < totalInputBytes;
-
-    // Never allow compaction to increase segment count — that worsens manifest pressure.
-    if (outputSegs.size() > inputSegCount) return Status::noOp();
-    // Same-count compaction is only useful when dead bytes exist to reclaim.
-    if (outputSegs.size() == inputSegCount && !hasDeadBytes) return Status::noOp();
     if (outputSegCount) *outputSegCount = static_cast<std::uint32_t>(outputSegs.size());
 
     const std::uint32_t firstNewGen = outputSegs.front().gen;
@@ -209,11 +292,18 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     md.tailGeneration = activeGeneration_;
     md.nextGeneration = lastNewGen + 1;
 
+    const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
+
     st = publishManifest(md);
     if (!st.ok()) return st;
 
+    // publishManifest cleans one dangling segment. Clean up all remaining
+    // input segments (now dangling) beyond the one it already handled.
+    for (std::uint32_t i = 1; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+
     for (auto& r : records_) {
-        if (r.segmentGeneration < range.startGen || r.segmentGeneration > range.endGen) continue;
+        if (r.segmentGeneration < effectiveRange.startGen ||
+            r.segmentGeneration > effectiveRange.endGen) continue;
         for (const auto& rep : replacements) {
             if (rep.sequence == r.sequence) { r = rep; break; }
         }
