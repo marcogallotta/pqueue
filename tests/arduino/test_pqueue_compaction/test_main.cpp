@@ -174,19 +174,29 @@ void test_compaction_burst_workload() {
     pqueue::AppendLogStore store(cfg);
     TEST_ASSERT_TRUE_MESSAGE(store.mount().ok(), "AppendLogStore mount failed");
 
-    std::uint32_t nextSeq       = 1;
-    std::uint32_t queueSize     = 0;
-    std::uint32_t deadlocks     = 0;
-    std::uint32_t capExhausted  = 0;
-    std::uint32_t compactions   = 0;
-    std::uint32_t noOps         = 0;
-    std::uint32_t maxOutSegs    = 0;
-    std::uint32_t maxLatencyMs  = 0;
-    std::uint32_t prevSegCount  = 0;
+    std::uint32_t nextSeq        = 1;
+    std::uint32_t queueSize      = 0;
+    std::uint32_t deadlocks      = 0;
+    std::uint32_t capExhausted   = 0;
+    std::uint32_t compactions    = 0;
+    std::uint32_t noOps          = 0;
+    std::uint32_t maxOutSegs     = 0;
+    std::uint32_t maxLatencyMs   = 0;
+    std::uint32_t prevSegCount   = 0;
     std::uint32_t prevRangeCount = 0;
 
+    // Per-cycle accumulators (ms).
+    std::uint32_t t_wr = 0, t_widx = 0, t_ridx = 0;
+    std::uint32_t t_check = 0, t_stats = 0, t_compact = 0;
+    std::uint32_t t_enq = 0, t_pop = 0;
+
     auto tryCompact = [&]() {
+        std::uint32_t t0;
+
+        t0 = millis();
         const auto rangeStats = buildRangeStats(store);
+        t_stats += millis() - t0;
+
         const auto chosen = chooseHighestDeadRatio(rangeStats);
         if (!chosen) return;
 
@@ -205,9 +215,10 @@ void test_compaction_burst_workload() {
 
         ++compactions;
         std::uint32_t outSegs = 0;
-        const std::uint32_t t0 = millis();
+        t0 = millis();
         const auto st = store.compactRange(target, &outSegs);
         const std::uint32_t elapsed = millis() - t0;
+        t_compact += elapsed;
 
         if (st.ok() && !st.isNoOp()) {
             maxOutSegs   = std::max(maxOutSegs, outSegs);
@@ -219,32 +230,48 @@ void test_compaction_burst_workload() {
     };
 
     auto checkAndCompact = [&]() {
-        // Logical count: sealed gens from manifest + 1 for active tail.
-        // Avoids fileSize() per generation that segmentStats() would trigger.
+        const std::uint32_t t0 = millis();
         const auto& ranges = store.manifestRanges();
-        std::uint32_t logicalSegCount = 1; // active tail always exists
+        std::uint32_t logicalSegCount = 1;
         for (const auto& r : ranges) logicalSegCount += r.endGen - r.startGen + 1;
         const std::uint32_t rangeCount = static_cast<std::uint32_t>(ranges.size());
         const bool changed  = logicalSegCount != prevSegCount || rangeCount != prevRangeCount;
         const bool pressure = rangeCount >= kRangePressureTrigger;
         if (changed) {
             bool useful = false;
-            for (const auto& rs : buildRangeStats(store)) {
+            std::uint32_t ts = millis();
+            const auto rs2 = buildRangeStats(store);
+            t_stats += millis() - ts;
+            for (const auto& rs : rs2) {
                 if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
                 if (pressure && rs.wouldConsolidate())   { useful = true; break; }
             }
             if (useful) tryCompact();
         }
-        prevSegCount  = logicalSegCount;
+        prevSegCount   = logicalSegCount;
         prevRangeCount = rangeCount;
+        t_check += millis() - t0;
     };
 
     for (std::uint32_t cycle = 0; cycle < kCycles; ++cycle) {
+        t_wr = t_widx = t_ridx = 0;
+        t_check = t_stats = t_compact = 0;
+        t_enq = t_pop = 0;
+        const std::uint32_t t_cycle = millis();
+
+        const std::uint32_t t_enq0 = millis();
         for (std::uint32_t i = 0; i < kBurstSize; ++i) {
+            std::uint32_t t0;
+
+            t0 = millis();
             const auto st = store.writeRecord(nextSeq, makePayload(nextSeq));
+            t_wr += millis() - t0;
+
             if (st.ok()) {
                 pqueue::FileStoreIndex dummy;
+                t0 = millis();
                 store.writeIndex(dummy);
+                t_widx += millis() - t0;
                 ++nextSeq;
                 ++queueSize;
             } else {
@@ -257,23 +284,43 @@ void test_compaction_burst_workload() {
             }
             checkAndCompact();
         }
+        t_enq = millis() - t_enq0;
 
         const std::uint32_t toPop =
             static_cast<std::uint32_t>(static_cast<float>(queueSize) * kPopRatio);
+        const std::uint32_t t_pop0 = millis();
         for (std::uint32_t i = 0; i < toPop; ++i) {
+            std::uint32_t t0;
             pqueue::FileStoreIndex idx;
-            if (store.readIndex(idx).ok() && idx.count > 0) {
+            t0 = millis();
+            const bool ok = store.readIndex(idx).ok() && idx.count > 0;
+            t_ridx += millis() - t0;
+            if (ok) {
                 idx.head++;
                 idx.count--;
+                t0 = millis();
                 store.writeIndex(idx);
+                t_widx += millis() - t0;
                 --queueSize;
             }
             checkAndCompact();
         }
+        t_pop = millis() - t_pop0;
 
-        Serial.printf("[cycle %2u] queueSize=%u ranges=%u\n",
+        const std::uint32_t t_total = millis() - t_cycle;
+        const std::uint32_t segs = [&]() {
+            std::uint32_t s = 1;
+            for (const auto& r : store.manifestRanges()) s += r.endGen - r.startGen + 1;
+            return s;
+        }();
+
+        Serial.printf(
+            "[cycle %2u] q=%u ranges=%u segs=%u total=%u enq=%u pop=%u "
+            "check=%u stats=%u compact=%u wr=%u widx=%u ridx=%u\n",
             cycle, queueSize,
-            static_cast<unsigned>(store.manifestRanges().size()));
+            static_cast<unsigned>(store.manifestRanges().size()),
+            segs, t_total, t_enq, t_pop,
+            t_check, t_stats, t_compact, t_wr, t_widx, t_ridx);
         Serial.flush();
     }
 
