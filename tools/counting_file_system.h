@@ -8,6 +8,24 @@
 #include "pqueue/file_system.h"
 #include "pqueue/status.h"
 
+// Per-operation simulated latency in microseconds (posix only, ignored on Arduino).
+// Intended for profiling: set values proportional to real LittleFS observed timings
+// so posix runs reflect relative I/O costs without requiring on-device hardware.
+//
+// writeFile: fixed create/metadata cost + per-KB of data written.
+// listFiles: base cost + per-file cost scaled by directory size.
+// All other ops: flat per-call cost.
+struct FsLatency {
+    std::uint32_t readFileUs        = 0;
+    std::uint32_t readAtUs          = 0;
+    std::uint32_t writeFileFixedUs  = 0;  // fixed overhead per writeFile call
+    std::uint32_t writeFilePerKbUs  = 0;  // additional cost per KB of data
+    std::uint32_t writeAtUs         = 0;
+    std::uint32_t removeFileUs      = 0;
+    std::uint32_t listFilesBaseUs   = 0;  // base cost regardless of file count
+    std::uint32_t listFilesPerFileUs = 0; // additional cost per file in directory
+};
+
 struct FsCounters {
     std::uint64_t mount = 0;
     std::uint64_t readFile = 0;
@@ -33,6 +51,8 @@ struct FsCounters {
     std::uint32_t msListFiles  = 0;
 #endif
 
+    std::uint64_t simLatencyUs = 0;  // accumulated simulated latency
+
     void reset() { *this = FsCounters{}; }
 
     std::uint64_t metadataOps() const {
@@ -47,6 +67,12 @@ public:
 
     const FsCounters& counters() const { return counters_; }
     void resetCounters() { counters_.reset(); }
+    void setLatency(const FsLatency& lat) { latency_ = lat; }
+
+private:
+    void accumulate(std::uint32_t us) { counters_.simLatencyUs += us; }
+
+public:
 
     pqueue::Status mount(const std::string& basePath) override {
         ++counters_.mount;
@@ -63,6 +89,7 @@ public:
         counters_.msReadFile += millis() - _t;
 #endif
         if (st.ok()) counters_.bytesRead += out.size();
+        accumulate(latency_.readFileUs);
         return st;
     }
 
@@ -76,6 +103,7 @@ public:
 #ifdef ARDUINO
         counters_.msWriteFile += millis() - _t;
 #endif
+        accumulate(latency_.writeFileFixedUs + static_cast<std::uint32_t>(data.size() / 1024 + 1) * latency_.writeFilePerKbUs);
         return st;
     }
 
@@ -89,6 +117,7 @@ public:
         counters_.msReadAt += millis() - _t;
 #endif
         if (st.ok()) counters_.bytesRead += out.size();
+        accumulate(latency_.readAtUs);
         return st;
     }
 
@@ -102,6 +131,7 @@ public:
 #ifdef ARDUINO
         counters_.msWriteAt += millis() - _t;
 #endif
+        accumulate(latency_.writeAtUs);
         return st;
     }
 
@@ -132,6 +162,7 @@ public:
 #ifdef ARDUINO
         counters_.msRemoveFile += millis() - _t;
 #endif
+        accumulate(latency_.removeFileUs);
         return st;
     }
 
@@ -149,6 +180,7 @@ public:
 #ifdef ARDUINO
         counters_.msListFiles += millis() - _t;
 #endif
+        accumulate(latency_.listFilesBaseUs + static_cast<std::uint32_t>(out.size()) * latency_.listFilesPerFileUs);
         return st;
     }
 
@@ -174,4 +206,5 @@ public:
 private:
     std::shared_ptr<pqueue::FileSystem> inner_;
     FsCounters counters_;
+    FsLatency  latency_;
 };

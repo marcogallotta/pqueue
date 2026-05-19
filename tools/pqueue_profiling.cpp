@@ -391,19 +391,38 @@ pqueue::AppendLogStore::CompactionRange narrowCompactRange(
 
 } // namespace
 
+// LittleFS observed timings scaled down 100x for fast simulation.
+// readFile and readAt both model open+read+close on LittleFS (~50ms each).
+// writeFile: ~200ms fixed metadata/GC cost + ~75ms per KB of data written.
+// listFiles: ~100ms base + ~12.5ms per file in the directory.
+inline FsLatency littleFsSimLatency() {
+    FsLatency lat;
+    lat.readFileUs        = 500;   // ~50ms on device
+    lat.readAtUs          = 500;   // ~50ms on device
+    lat.writeFileFixedUs  = 2000;  // ~200ms fixed create/metadata cost
+    lat.writeFilePerKbUs  = 750;   // ~75ms per KB written
+    lat.writeAtUs         = 200;   // ~20ms on device
+    lat.removeFileUs      = 240;   // ~24ms on device
+    lat.listFilesBaseUs   = 1000;  // ~100ms base cost
+    lat.listFilesPerFileUs = 125;  // ~12.5ms per file (1100ms / 80 files typical)
+    return lat;
+}
+
 CompactionBurstResult scenarioCompactionBurst(
     std::uint32_t burstSize,
     std::uint32_t payloadBytes,
     std::uint32_t cycles,
     std::uint32_t maxOutputSegs = 8,
     float deadRatioTrigger = 0.10f,
-    std::uint32_t rangePressureTrigger = 3)
+    std::uint32_t rangePressureTrigger = 3,
+    FsLatency latency = {})
 {
     constexpr std::uint32_t kMaxSegmentBytes = 4096;
     constexpr std::uint32_t kMaxTotalBytes   = 1024 * 1024;
 
     auto memFs    = std::make_shared<MemoryFileSystem>();
     auto counting = std::make_shared<CountingFileSystem>(memFs);
+    counting->setLatency(latency);
 
     pqueue::AppendLogConfig cfg;
     cfg.basePath        = "/compact_prof";
@@ -459,14 +478,14 @@ CompactionBurstResult scenarioCompactionBurst(
         const auto target = cstat ? narrowCompactRange(*chosen, *cstat, store, kMaxSegmentBytes, maxOutputSegs) : *chosen;
 
         std::uint32_t outSegs = 0;
-        const auto t0 = Clock::now();
+        const std::uint64_t simBefore = counting->counters().simLatencyUs;
         const auto st = store.compactRange(target, &outSegs);
-        const auto us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
+        const std::uint64_t simDelta = counting->counters().simLatencyUs - simBefore;
 
         if (st.ok() && !st.isNoOp()) {
             ++result.compactions;
             result.maxOutSegs   = std::max(result.maxOutSegs, outSegs);
-            result.maxLatencyUs = std::max(result.maxLatencyUs, static_cast<std::uint64_t>(us));
+            result.maxLatencyUs = std::max(result.maxLatencyUs, simDelta);
         } else {
             ++result.noOps;
         }
@@ -509,7 +528,7 @@ CompactionBurstResult scenarioCompactionBurst(
 void printCompactionBurstResult(const CompactionBurstResult& r) {
     std::printf("compaction_burst  burst=%u payload=%uB cycles=%u\n",
         r.burstSize, r.payloadBytes, r.cycles);
-    std::printf("  compactions=%-4u noOps=%-4u maxOutSegs=%-3u maxLatency=%.1fms\n",
+    std::printf("  compactions=%-4u noOps=%-4u maxOutSegs=%-3u simMaxLatency=%.1fms\n",
         r.compactions, r.noOps, r.maxOutSegs,
         static_cast<double>(r.maxLatencyUs) / 1000.0);
     std::printf("  deadlocks=%-4u capExhausted=%-4u finalQ=%-4u\n",
@@ -596,7 +615,8 @@ int main(int argc, char** argv) {
     const std::uint32_t records = argc >= 3 ? static_cast<std::uint32_t>(std::strtoul(argv[2], nullptr, 10)) : 500;
     const std::uint32_t payloadBytes = argc >= 4 ? static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10)) : 256;
 
-    if (mode != "queue" && mode != "validate" && mode != "outbox" && mode != "all" && mode != "compaction") {
+    if (mode != "queue" && mode != "validate" && mode != "outbox" && mode != "all"
+        && mode != "compaction" && mode != "compaction-sim") {
         usage(argv[0]);
         return 2;
     }
@@ -614,9 +634,10 @@ int main(int argc, char** argv) {
         results.push_back(scenarioHttpOutboxDrainBacklog(records, payloadBytes));
     }
 
-    if (mode == "compaction") {
+    if (mode == "compaction" || mode == "compaction-sim") {
         const std::uint32_t cycles = argc >= 5 ? static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 10)) : 3;
-        printCompactionBurstResult(scenarioCompactionBurst(records, payloadBytes, cycles));
+        const FsLatency latency = (mode == "compaction-sim") ? littleFsSimLatency() : FsLatency{};
+        printCompactionBurstResult(scenarioCompactionBurst(records, payloadBytes, cycles, 8, 0.10f, 3, latency));
         return 0;
     }
 

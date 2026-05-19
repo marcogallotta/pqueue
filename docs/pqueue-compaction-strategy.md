@@ -158,18 +158,34 @@ MaxLatency=82580ms was dominated by cleanup (77216ms) and preflight fileSize (16
 
 MaxLatency dropped from 82s to 10.6s. 0 deadlocks. O(1) cleanup and sealedSegmentBytes_ preflight confirmed working (pre_size_ms=0 throughout). MaxOutSegs=8 matches the kMaxOutputSegs budget. This run predates the collectLiveRecords bulk-read fix; a re-run is needed to confirm the new MaxLatency.
 
-### Posix profiler
+### Posix profiler (preferred iteration method)
 
-`tools/pqueue_profiling.cpp` has a `compaction` mode that runs the burst workload against an in-memory FS for fast iteration:
+`tools/pqueue_profiling.cpp` has two compaction modes. Both run against an in-memory FS and complete in under a second. **Use these to iterate on performance before running on-device.**
 
+  make -j12 profiling
   ./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles>
-  ./build/pqueue-profiling compaction 500 492 3
+  ./build/pqueue-profiling compaction-sim <burst> <payloadBytes> <cycles>
 
-On memory FS: maxLatency=0.2ms, readAt=0 (all reads via readFile), confirming the bulk-read optimization is active.
+`compaction` reports wall-clock latency and I/O op counts. Use it to verify correctness and track op counts (readFile, readAt, writeFile, listFiles, removeFile).
+
+`compaction-sim` accumulates a simulated latency counter using per-op LittleFS cost estimates (no actual sleeping -- just arithmetic). Use it to predict on-device MaxLatency before flashing.
+
+Simulated latency model (in `littleFsSimLatency()`, scaled 100x from observed device timings):
+
+  readFile/readAt: 500us   (~50ms on device, open+read+close)
+  writeFile:       2000us fixed + 750us/KB  (~200ms + ~75ms/KB on device)
+  writeAt:         200us   (~20ms on device)
+  removeFile:      240us   (~24ms on device)
+  listFiles:       1000us base + 125us/file (~100ms + ~12.5ms/file on device)
+
+writeFile and listFiles are modelled with variable costs because directory size and data size affect LittleFS GC pressure and scan time.
+
+Run 3 pre-collectLiveRecords: simMaxLatency=100ms x 100 = ~10s (matches measured 10652ms).
+Run 3 post-collectLiveRecords: simMaxLatency=82ms x 100 = ~8.2s (predicted Run 4 result).
 
 ## Outstanding
 
-**Run 4 (on-device).** Re-run burst=500/pop=90%/rec=492B after collectLiveRecords bulk-read fix to confirm MaxLatency improvement on real LittleFS. collect_ms was ~2.7s in Run 2; expected to drop significantly.
+**Run 4 (on-device).** Re-run burst=500/pop=90%/rec=492B after collectLiveRecords bulk-read fix. Predicted MaxLatency: ~8.2s (down from 10.6s in Run 3). Profiler simMaxLatency=82ms x 100 is the baseline; on-device result validates the model.
 
 **Final strategy selection.** HighestDeadRatio and CostBenefit are functionally identical across all tested workloads. Pick one and remove the other from the sim.
 
