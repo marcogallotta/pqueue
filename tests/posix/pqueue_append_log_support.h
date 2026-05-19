@@ -96,6 +96,32 @@ inline void plantSegment(std::uint32_t gen, std::uint32_t firstSeq = 0, const st
     f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
 }
 
+struct SegmentSpec {
+    std::uint32_t gen;
+    std::uint32_t firstSeq = 0;
+    std::string body;
+};
+
+struct LayoutSpec {
+    std::uint32_t epoch = 1;
+    std::vector<pqueue::append_log_detail::ManifestRange> ranges;
+    std::uint32_t tail = 0;
+    std::uint32_t next = 0;
+    std::vector<SegmentSpec> segments;
+};
+
+inline void plantLayout(const LayoutSpec& spec) {
+    resetSpool();
+    pqueue::append_log_detail::ManifestData md;
+    md.epoch = spec.epoch;
+    md.ranges = spec.ranges;
+    md.tailGeneration = spec.tail;
+    md.nextGeneration = spec.next;
+    plantManifest(md);
+    for (const auto& seg : spec.segments)
+        plantSegment(seg.gen, seg.firstSeq, seg.body);
+}
+
 inline void storeEnqueue(pqueue::AppendLogStore& store, std::uint32_t seq, const std::string& payload) {
     CHECK(store.writeRecord(seq, payload).ok());
     pqueue::FileStoreIndex idx;

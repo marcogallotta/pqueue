@@ -30,16 +30,17 @@ TEST_CASE("rollover: range limit exceeded returns failure") {
     // Verify that rotateSegment() fails cleanly when promoting the current tail
     // would push the range count past kManifestMaxRanges (4).
     // Setup: plant a manifest with 4 non-contiguous full ranges and tail=9.
-    resetSpool();
-
     const std::uint32_t maxSeg =
         kSegmentHeaderBytes + kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
 
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1,1},{3,3},{5,5},{7,7}}; md.tailGeneration = 9; md.nextGeneration = 10;
-    plantManifest(md);
-    for (std::uint32_t gen : {1u, 3u, 5u, 7u, 9u})
-        plantSegment(gen);
+    plantLayout({
+        .ranges = {{1,1},{3,3},{5,5},{7,7}}, .tail = 9, .next = 10,
+        .segments = {
+            {.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}},
+            {.gen=5,.firstSeq=0,.body={}},{.gen=7,.firstSeq=0,.body={}},
+            {.gen=9,.firstSeq=0,.body={}},
+        },
+    });
 
     auto storeCfg = makeStoreConfig();
     storeCfg.maxSegmentBytes = maxSeg;

@@ -23,11 +23,7 @@ void checkTracking(pqueue::AppendLogStore& store) {
 TEST_CASE("compaction: chooseCompactionRange returns nullopt with only tail (critical)") {
     // A store with only a tail segment and no full ranges must not offer the
     // tail for compaction — selecting it would violate the torn-tail invariant.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.tailGeneration = 1; md.nextGeneration = 2;
-    plantManifest(md);
-    plantSegment(1);
+    plantLayout({.ranges={}, .tail = 1, .next = 2, .segments = {{.gen=1,.firstSeq=0,.body={}}}});
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -84,12 +80,10 @@ TEST_CASE("compaction: collectLiveRecords excludes popped records") {
 TEST_CASE("compaction: compactOneSegment removes dead range without writing a new segment") {
     // gen=1 (full range, header only — no records): dead range.
     // gen=4 (non-contiguous tail) prevents rotate-before-compact from extending the range.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 4; md.nextGeneration = 5;
-    plantManifest(md);
-    plantSegment(1);                                    // dead: header only
-    plantSegment(4, 1, serializeEnqueueEvent(1, "c")); // non-contiguous tail
+    plantLayout({
+        .ranges = {{1, 1}}, .tail = 4, .next = 5,
+        .segments = {{.gen=1,.firstSeq=0,.body={}}, {.gen=4, .firstSeq=1, .body=serializeEnqueueEvent(1, "c")}},
+    });
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -181,15 +175,13 @@ TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
 TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output would not reduce segment count") {
     // range {1,1} = 1 input; seq=1 popped, seq=2+3 live require 2 output at maxSegmentBytes=50;
     // 2 > 1 → no-op. Non-contiguous tail (gen=5) prevents rotate-before-compact.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 5; md.nextGeneration = 6;
-    plantManifest(md);
-    plantSegment(1, 1,
-        serializeEnqueueEvent(1, "a") +
-        serializeEnqueueEvent(2, "b") +
-        serializeEnqueueEvent(3, "c"));
-    plantSegment(5, 4);
+    plantLayout({
+        .ranges = {{1, 1}}, .tail = 5, .next = 6,
+        .segments = {
+            {.gen=1, .firstSeq=1, .body=serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")+serializeEnqueueEvent(3,"c")},
+            {.gen=5, .firstSeq=4, .body={}},
+        },
+    });
 
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 50;
@@ -225,21 +217,22 @@ TEST_CASE("cleanup: compactOneSegment deletes old segment files and preserves li
     expectRecords(store, {{2,"b"},{3,"c"}});
 }
 
-TEST_CASE("cleanup: dangling segment from failed publish is deleted on next successful publish") {
-    // The next successful publishManifest must delete a dangling segment that was
-    // written before a crash but never made it into a manifest.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 3;
-    plantManifest(md);
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a") + serializeEnqueueEvent(2, "b"));
-    plantSegment(2, 3);                                      // tail
-    plantSegment(3, 1, serializeEnqueueEvent(1, "a"));       // dangling
+TEST_CASE("cleanup: dangling segment is removed on mount") {
+    // A segment whose generation is not referenced by the manifest is cleaned up
+    // during mount (scanSegments → cleanupAllDanglingSegments).
+    plantLayout({
+        .ranges = {{1, 1}}, .tail = 2, .next = 3,
+        .segments = {
+            {.gen=1, .firstSeq=1, .body=serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")},
+            {.gen=2, .firstSeq=3, .body={}},                          // tail
+            {.gen=3, .firstSeq=1, .body=serializeEnqueueEvent(1,"a")},// dangling
+        },
+    });
 
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
     pqueue::AppendLogStore store(cfg);
-    CHECK(store.mount().ok()); // cleanup on mount removes dangling gen=3
+    CHECK(store.mount().ok());
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
     CHECK(std::filesystem::exists(segmentPath(1)));
     CHECK(std::filesystem::exists(segmentPath(2)));
@@ -250,14 +243,14 @@ TEST_CASE("compaction: dangling segment from failed publish is harmless on remou
     // Simulates a crash after the compacted segment was written but before the manifest
     // publish succeeded. The winning manifest still points at the original segments;
     // the dangling file is ignored and all records are intact.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 3;
-    plantManifest(md);
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a") + serializeEnqueueEvent(2, "b"));
-    plantSegment(2, 3);                                              // tail
-    plantSegment(3, 1, serializeEnqueueEvent(1, "a") +
-                       serializeEnqueueEvent(2, "b"));               // dangling compaction output
+    plantLayout({
+        .ranges = {{1, 1}}, .tail = 2, .next = 3,
+        .segments = {
+            {.gen=1, .firstSeq=1, .body=serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")},
+            {.gen=2, .firstSeq=3, .body={}},                                         // tail
+            {.gen=3, .firstSeq=1, .body=serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")}, // dangling
+        },
+    });
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -273,11 +266,10 @@ TEST_CASE("compaction: dangling segment from failed publish is harmless on remou
 }
 
 TEST_CASE("compaction: compactFull removes multiple dead ranges in one call") {
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}, {3, 3}}; md.tailGeneration = 5; md.nextGeneration = 6;
-    plantManifest(md);
-    plantSegment(1); plantSegment(3); plantSegment(5); // header only → both ranges dead
+    plantLayout({
+        .ranges = {{1,1},{3,3}}, .tail = 5, .next = 6,
+        .segments = {{.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}},{.gen=5,.firstSeq=0,.body={}}},  // header only → both ranges dead
+    });
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -315,14 +307,15 @@ TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not origina
 TEST_CASE("compaction: multi-segment output compacts range when output count < input count") {
     // range {1,3} = 3 input segments; records 1,2 popped → 4 live records fit in 2 output
     // segments. 2 < 3 → compaction proceeds with multi-segment output.
-    resetSpool();
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a") + serializeEnqueueEvent(2, "b"));
-    plantSegment(2, 3, serializeEnqueueEvent(3, "c") + serializeEnqueueEvent(4, "d"));
-    plantSegment(3, 5, serializeEnqueueEvent(5, "e") + serializeEnqueueEvent(6, "f"));
-    plantSegment(4, 7, serializePopEvent(1) + serializePopEvent(2));
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 3}}; md.tailGeneration = 4; md.nextGeneration = 5;
-    plantManifest(md);
+    plantLayout({
+        .ranges = {{1, 3}}, .tail = 4, .next = 5,
+        .segments = {
+            {1, 1, serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")},
+            {2, 3, serializeEnqueueEvent(3,"c")+serializeEnqueueEvent(4,"d")},
+            {3, 5, serializeEnqueueEvent(5,"e")+serializeEnqueueEvent(6,"f")},
+            {4, 7, serializePopEvent(1)+serializePopEvent(2)},
+        },
+    });
 
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -375,13 +368,14 @@ TEST_CASE("compaction: multi-segment output is no-op when output count equals in
     // range {1,2} = 2 input segments; seq=1 popped, seq=2+3+4 live require 3 output
     // segments at maxSegmentBytes=50; 3 > 2 → no-op. Non-contiguous tail (gen=5) prevents
     // rotate-before-compact.
-    resetSpool();
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a") + serializeEnqueueEvent(2, "b"));
-    plantSegment(2, 3, serializeEnqueueEvent(3, "c") + serializeEnqueueEvent(4, "d"));
-    plantSegment(5, 5);
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 2}}; md.tailGeneration = 5; md.nextGeneration = 6;
-    plantManifest(md);
+    plantLayout({
+        .ranges = {{1, 2}}, .tail = 5, .next = 6,
+        .segments = {
+            {1, 1, serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")},
+            {2, 3, serializeEnqueueEvent(3,"c")+serializeEnqueueEvent(4,"d")},
+            {.gen=5, .firstSeq=5, .body={}},
+        },
+    });
 
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 50;

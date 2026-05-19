@@ -344,15 +344,12 @@ Status AppendLogStore::rotateSegment() {
     const std::uint32_t newGen    = nextGeneration_;
 
     std::vector<ManifestRange> newRanges = manifestRanges_;
-    bool merged = false;
     if (oldTailGen != 0) {
         ManifestRange r{oldTailGen, oldTailGen};
-        if (!newRanges.empty() && newRanges.back().endGen + 1 == r.startGen) {
+        if (!newRanges.empty() && newRanges.back().endGen + 1 == r.startGen)
             newRanges.back().endGen = r.endGen;
-            merged = true;
-        } else {
+        else
             newRanges.push_back(r);
-        }
     }
     if (newRanges.size() > kManifestMaxRanges) {
         return Status::failure(StatusCode::RangeLimitExceeded,

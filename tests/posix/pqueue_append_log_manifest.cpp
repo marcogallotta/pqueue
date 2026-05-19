@@ -1,5 +1,7 @@
 #include "pqueue_append_log_support.h"
 
+#include <functional>
+
 using namespace pqueue::append_log_detail;
 
 namespace {
@@ -86,231 +88,97 @@ TEST_CASE("manifest: corrupted CRC is rejected") {
     CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
 }
 
-TEST_CASE("manifest: wrong magic is rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf[0] ^= 0xFF;
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+TEST_CASE("manifest: structural byte violations are rejected") {
+    ManifestData base;
+    base.epoch = 1; base.nextGeneration = 1; base.tailGeneration = 0;
+    auto run = [&](const char* label, auto mutate) {
+        CAPTURE(label);
+        std::vector<uint8_t> buf;
+        serialiseManifest(base, buf);
+        mutate(buf);
+        ManifestData out;
+        CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+    };
+    run("wrong magic",       [](auto& b){ b[0] ^= 0xFF; });
+    run("wrong version",     [](auto& b){ b[4] = 0x02; });
+    run("wrong headerBytes", [](auto& b){ b[6] = 0xFF; });
+    run("wrong footer",      [](auto& b){ b[b.size()-1] ^= 0xFF; });
+    run("rangeCount > 4",    [](auto& b){ b[16] = 0x05; });
+    run("buffer too small",  [](auto& b){ b.pop_back(); });
+    run("trailing bytes",    [](auto& b){ b.push_back(0x00); });
 }
 
-TEST_CASE("manifest: wrong version is rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf[4] = 0x02;
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: wrong headerBytes is rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf[6] = 0xFF;
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: wrong footer is rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf[buf.size() - 1] ^= 0xFF;
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: rangeCount > 4 is rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf[16] = 0x05;
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: tailGen==0 with non-zero rangeCount is rejected") {
-    ManifestData m;
-    m.epoch = 2; m.nextGeneration = 5; m.tailGeneration = 4;
-    m.ranges = {{1, 3}};
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-
-    // tailGeneration at offset 26 (after 1 range)
-    buf[26] = 0x00; buf[27] = 0x00; buf[28] = 0x00; buf[29] = 0x00;
-
-    const uint32_t newCrc = crc32(0, buf.data(), 30);
-    buf[30] = static_cast<uint8_t>((newCrc      ) & 0xFF);
-    buf[31] = static_cast<uint8_t>((newCrc >>  8) & 0xFF);
-    buf[32] = static_cast<uint8_t>((newCrc >> 16) & 0xFF);
-    buf[33] = static_cast<uint8_t>((newCrc >> 24) & 0xFF);
-
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: buffer too small returns false") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size() - 1, out));
-    CHECK_FALSE(parseManifest(buf.data(), 0, out));
-}
-
-TEST_CASE("manifest: trailing bytes rejected") {
-    ManifestData m;
-    m.epoch = 1; m.nextGeneration = 1; m.tailGeneration = 0;
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-    buf.push_back(0x00);
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: startGen == 0 in range is rejected") {
-    ManifestData m;
-    m.epoch = 2; m.nextGeneration = 5; m.tailGeneration = 4;
-    m.ranges = {{1, 3}};
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-
-    buf[18] = 0x00; buf[19] = 0x00; buf[20] = 0x00; buf[21] = 0x00; // startGen = 0
-    recomputeManifestCrc(buf);
-
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
-}
-
-TEST_CASE("manifest: endGen < startGen in range is rejected") {
-    ManifestData m;
-    m.epoch = 2; m.nextGeneration = 5; m.tailGeneration = 4;
-    m.ranges = {{3, 5}};
-    std::vector<uint8_t> buf;
-    serialiseManifest(m, buf);
-
-    buf[22] = 0x01; buf[23] = 0x00; buf[24] = 0x00; buf[25] = 0x00; // endGen = 1 < startGen = 3
-    recomputeManifestCrc(buf);
-
-    ManifestData out;
-    CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+TEST_CASE("manifest: semantic field violations are rejected") {
+    // CRC is recomputed so the parser reaches semantic checks.
+    // 1-range manifest byte offsets: tailGen=[26..29], startGen=[18..21], endGen=[22..25].
+    // base.ranges = {{3,5}} so that endGen=1 < startGen=3 in the last case.
+    ManifestData base;
+    base.epoch = 2; base.nextGeneration = 5; base.tailGeneration = 4;
+    base.ranges = {{3, 5}};
+    auto run = [&](const char* label, auto mutate) {
+        CAPTURE(label);
+        std::vector<uint8_t> buf;
+        serialiseManifest(base, buf);
+        mutate(buf);
+        ManifestData out;
+        CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
+    };
+    run("tailGen==0 with ranges", [](auto& b){ b[26]=b[27]=b[28]=b[29]=0; recomputeManifestCrc(b); });
+    run("startGen == 0",          [](auto& b){ b[18]=b[19]=b[20]=b[21]=0; recomputeManifestCrc(b); });
+    run("endGen < startGen",      [](auto& b){ b[22]=1; b[23]=b[24]=b[25]=0; recomputeManifestCrc(b); });
 }
 
 // --- Manifest publish tests ---
 
-TEST_CASE("manifest-publish: first publish writes slot A with epoch 1") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    CHECK(store.publishManifest(md).ok());
-
-    ManifestData slotA, slotB;
-    CHECK(readManifestSlot('a', slotA));
-    CHECK_EQ(slotA.epoch, 1U);
-    CHECK_FALSE(readManifestSlot('b', slotB));
+TEST_CASE("manifest-publish: slot election") {
+    // Each row: pre-seed slots via writeManifestSlotDirect, then publish once,
+    // and verify both slot epochs (0 = absent/not checked).
+    struct Case {
+        const char* label;
+        std::function<void()> setup;
+        bool expectAPresent; uint32_t expectAEpoch;
+        bool expectBPresent; uint32_t expectBEpoch;
+    };
+    const Case cases[] = {
+        {"fresh (no slots)",   [](){},                                                               true,1,  false,0},
+        {"A=1 B=absent",       [](){ writeManifestSlotDirect('a', 1); },                            true,1,  true, 2},
+        {"A=absent B=5",       [](){ writeManifestSlotDirect('b', 5); },                            true,6,  true, 5},
+        {"A=7 B=3 (B lower)",  [](){ writeManifestSlotDirect('a',7); writeManifestSlotDirect('b',3); }, true,7, true,8},
+    };
+    ManifestData md; md.nextGeneration = 1; md.tailGeneration = 0;
+    for (const auto& [label, setup, expectAPresent, expectAEpoch, expectBPresent, expectBEpoch] : cases) {
+        CAPTURE(label);
+        cleanSpool();
+        pqueue::AppendLogStore store(makeStoreConfig());
+        REQUIRE(store.mount().ok());
+        setup();
+        CHECK(store.publishManifest(md).ok());
+        ManifestData slotA, slotB;
+        CHECK_EQ(readManifestSlot('a', slotA), expectAPresent);
+        CHECK_EQ(readManifestSlot('b', slotB), expectBPresent);
+        if (expectAPresent) CHECK_EQ(slotA.epoch, expectAEpoch);
+        if (expectBPresent) CHECK_EQ(slotB.epoch, expectBEpoch);
+    }
 }
 
-TEST_CASE("manifest-publish: second publish writes slot B; A valid B missing") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    REQUIRE(store.publishManifest(md).ok()); // writes A, epoch=1
-    REQUIRE(store.publishManifest(md).ok()); // writes B, epoch=2
-
-    ManifestData slotA, slotB;
-    CHECK(readManifestSlot('a', slotA)); CHECK_EQ(slotA.epoch, 1U);
-    CHECK(readManifestSlot('b', slotB)); CHECK_EQ(slotB.epoch, 2U);
-}
-
-TEST_CASE("manifest-publish: A missing B valid writes slot A") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    writeManifestSlotDirect('b', 5);
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    CHECK(store.publishManifest(md).ok()); // A missing → writes A, epoch=6
-
-    ManifestData slotA, slotB;
-    CHECK(readManifestSlot('a', slotA)); CHECK_EQ(slotA.epoch, 6U);
-    CHECK(readManifestSlot('b', slotB)); CHECK_EQ(slotB.epoch, 5U);
-}
-
-TEST_CASE("manifest-publish: both valid writes lower-epoch slot") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    writeManifestSlotDirect('a', 7);
-    writeManifestSlotDirect('b', 3);
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    CHECK(store.publishManifest(md).ok()); // B is lower → overwrite B with epoch=8
-
-    ManifestData slotA, slotB;
-    CHECK(readManifestSlot('a', slotA)); CHECK_EQ(slotA.epoch, 7U);
-    CHECK(readManifestSlot('b', slotB)); CHECK_EQ(slotB.epoch, 8U);
-}
-
-
-TEST_CASE("manifest-publish: corrupt A, absent B returns DataCorrupt") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    corruptSlot('a');
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    const auto st = store.publishManifest(md);
-    CHECK_FALSE(st.ok());
-    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
-}
-
-TEST_CASE("manifest-publish: absent A, corrupt B returns DataCorrupt") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    corruptSlot('b');
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    const auto st = store.publishManifest(md);
-    CHECK_FALSE(st.ok());
-    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
-}
-
-TEST_CASE("manifest-publish: both slots corrupt returns DataCorrupt") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    corruptSlot('a');
-    corruptSlot('b');
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    const auto st = store.publishManifest(md);
-    CHECK_FALSE(st.ok());
-    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+TEST_CASE("manifest-publish: corrupt slots return DataCorrupt") {
+    struct Case { const char* label; std::function<void()> setup; };
+    const Case cases[] = {
+        {"corrupt A absent B", [](){ corruptSlot('a'); }},
+        {"absent A corrupt B", [](){ corruptSlot('b'); }},
+        {"both corrupt",       [](){ corruptSlot('a'); corruptSlot('b'); }},
+    };
+    ManifestData md; md.nextGeneration = 1; md.tailGeneration = 0;
+    for (const auto& [label, setup] : cases) {
+        CAPTURE(label);
+        cleanSpool();
+        pqueue::AppendLogStore store(makeStoreConfig());
+        REQUIRE(store.mount().ok());
+        setup();
+        const auto st = store.publishManifest(md);
+        CHECK_FALSE(st.ok());
+        CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
+    }
 }
 
 TEST_CASE("manifest-publish: corrupt slot A is treated as missing; slot B wins election") {
@@ -352,77 +220,36 @@ TEST_CASE("manifest-publish: corrupt slot B leaves slot A as the valid winner") 
 
 // --- Manifest read tests ---
 
-TEST_CASE("manifest-read: both slots missing returns false") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    ManifestData out;
-    CHECK_FALSE(store.readManifest(out));
-}
-
-TEST_CASE("manifest-read: slot A valid, slot B missing returns A") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    writeManifestSlotDirect('a', 3);
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 3U);
-}
-
-TEST_CASE("manifest-read: slot A missing, slot B valid returns B") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    writeManifestSlotDirect('b', 5);
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 5U);
-}
-
-TEST_CASE("manifest-read: both valid, A higher epoch wins") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    writeManifestSlotDirect('a', 9);
-    writeManifestSlotDirect('b', 4);
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 9U);
-}
-
-TEST_CASE("manifest-read: both valid, B higher epoch wins") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    writeManifestSlotDirect('a', 2);
-    writeManifestSlotDirect('b', 8);
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 8U);
-}
-
-
-TEST_CASE("manifest-read: corrupt slot A, valid slot B returns B") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    corruptSlot('a');
-    writeManifestSlotDirect('b', 4);
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 4U);
-}
-
-TEST_CASE("manifest-read: valid slot A, corrupt slot B returns A") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-    writeManifestSlotDirect('a', 2);
-    corruptSlot('b');
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 2U);
+TEST_CASE("manifest-read: slot election") {
+    struct Case {
+        const char* label;
+        std::function<void()> setup;
+        bool found;
+        uint32_t epoch;
+    };
+    const Case cases[] = {
+        {"both missing",        [](){},                                                                    false, 0},
+        {"A valid B missing",   [](){ writeManifestSlotDirect('a', 3); },                                  true,  3},
+        {"A missing B valid",   [](){ writeManifestSlotDirect('b', 5); },                                  true,  5},
+        {"both valid A higher", [](){ writeManifestSlotDirect('a', 9); writeManifestSlotDirect('b', 4); }, true,  9},
+        {"both valid B higher", [](){ writeManifestSlotDirect('a', 2); writeManifestSlotDirect('b', 8); }, true,  8},
+        {"corrupt A valid B",   [](){ corruptSlot('a'); writeManifestSlotDirect('b', 4); },                true,  4},
+        {"valid A corrupt B",   [](){ writeManifestSlotDirect('a', 2); corruptSlot('b'); },                true,  2},
+    };
+    for (const auto& [label, setup, found, epoch] : cases) {
+        CAPTURE(label);
+        cleanSpool();
+        pqueue::AppendLogStore store(makeStoreConfig());
+        REQUIRE(store.mount().ok());
+        setup();
+        ManifestData out;
+        if (found) {
+            CHECK(store.readManifest(out));
+            CHECK_EQ(out.epoch, epoch);
+        } else {
+            CHECK_FALSE(store.readManifest(out));
+        }
+    }
 }
 
 TEST_CASE("manifest-read: higher-epoch slot with corrupt CRC loses to valid lower-epoch slot") {
