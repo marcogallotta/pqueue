@@ -269,7 +269,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             segData += serializeEnqueueEvent(lr.sequence, lr.payload);
             writeOffset += kEnqueueOverheadBytes + sr.payloadBytes;
         }
-        st = writeSegmentFileTracked(segmentName(seg.gen), segData);
+        st = writeSegmentFileTracked(segmentName(seg.gen), segData, SegmentWriteDisposition::MustBeNew);
         if (!st.ok()) return st;
     }
 

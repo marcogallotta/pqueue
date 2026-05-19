@@ -137,7 +137,8 @@ void test_compaction_burst_workload() {
     std::uint32_t noOps         = 0;
     std::uint32_t maxOutSegs    = 0;
     std::uint32_t maxLatencyMs  = 0;
-    std::uint32_t prevSegCount = 0;
+    std::uint32_t prevSegCount  = 0;
+    std::uint32_t prevRangeCount = 0;
 
     auto tryCompact = [&]() {
         const auto rangeStats = buildRangeStats(store);
@@ -166,9 +167,9 @@ void test_compaction_burst_workload() {
         std::uint32_t logicalSegCount = 1; // active tail always exists
         for (const auto& r : ranges) logicalSegCount += r.endGen - r.startGen + 1;
         const std::uint32_t rangeCount = static_cast<std::uint32_t>(ranges.size());
-        const bool newSeg   = logicalSegCount > prevSegCount;
+        const bool changed  = logicalSegCount != prevSegCount || rangeCount != prevRangeCount;
         const bool pressure = rangeCount >= kRangePressureTrigger;
-        if (newSeg || pressure) {
+        if (changed) {
             bool useful = false;
             for (const auto& rs : buildRangeStats(store)) {
                 if (rs.deadRatio() >= kDeadRatioTrigger) { useful = true; break; }
@@ -176,7 +177,8 @@ void test_compaction_burst_workload() {
             }
             if (useful) tryCompact();
         }
-        prevSegCount = logicalSegCount;
+        prevSegCount  = logicalSegCount;
+        prevRangeCount = rangeCount;
     };
 
     for (std::uint32_t cycle = 0; cycle < kCycles; ++cycle) {

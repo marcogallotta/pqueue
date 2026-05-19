@@ -99,10 +99,13 @@ private:
     Status emit(Event event) const;
     Status diagnostic(Severity severity, Status status, const char* operation) const;
 
+    enum class SegmentWriteDisposition { MustBeNew, MayOverwrite };
+
     std::string segmentName(std::uint32_t generation) const;
     bool isSegmentName(const std::string& name, std::uint32_t& generationOut) const;
     std::uint32_t appendGrowthBytes(std::uint32_t recordSize) const;
-    Status writeSegmentFileTracked(const std::string& name, const std::string& data);
+    Status writeSegmentFileTracked(const std::string& name, const std::string& data,
+                                   SegmentWriteDisposition disposition = SegmentWriteDisposition::MayOverwrite);
 
     Status createSegment(std::uint32_t generation, std::uint32_t startSeq);
     Status rotateSegment();

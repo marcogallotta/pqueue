@@ -324,7 +324,7 @@ Status AppendLogStore::scanSegments() {
 
 Status AppendLogStore::createSegment(std::uint32_t generation, std::uint32_t startSeq) {
     const std::string headerBytes = serializeSegmentHeader(generation, startSeq);
-    return writeSegmentFileTracked(segmentName(generation), headerBytes);
+    return writeSegmentFileTracked(segmentName(generation), headerBytes, SegmentWriteDisposition::MustBeNew);
 }
 
 Status AppendLogStore::rotateSegment() {
@@ -445,13 +445,12 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     return Status::success();
 }
 
-Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const std::string& data) {
+Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const std::string& data,
+                                                SegmentWriteDisposition disposition) {
     std::uint64_t oldSize = 0;
-    // fileSize failure (file absent or I/O error) leaves oldSize = 0. If the file is
-    // genuinely absent this is correct. If fileSize fails for another reason but writeFile
-    // succeeds below, tracking would drift — but in practice both operations hit the same
-    // underlying storage, so writeFile would also fail and we'd return early.
-    fs()->fileSize(name, oldSize);
+    if (disposition == SegmentWriteDisposition::MayOverwrite) {
+        fs()->fileSize(name, oldSize);
+    }
     Status st = fs()->writeFile(name, data);
     if (!st.ok()) return st;
     const auto newSz = static_cast<std::uint32_t>(data.size());
