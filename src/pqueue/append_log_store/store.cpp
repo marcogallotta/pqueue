@@ -767,6 +767,7 @@ Status AppendLogStore::format() {
     cachedWrittenEpoch_ = 0;
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
+    totalOnDiskBytes_ = 0;
     nextGeneration_ = 1;
     nextSequence_ = 0;
     mounted_ = true;
