@@ -110,6 +110,26 @@ inline void storePop(pqueue::AppendLogStore& store) {
     CHECK(store.writeIndex(idx).ok());
 }
 
+inline void expectRecord(pqueue::AppendLogStore& store, std::uint32_t seq, const std::string& payload) {
+    std::string out;
+    CHECK(store.readRecord(seq, out).ok());
+    CHECK_EQ(out, payload);
+}
+
+inline void expectRecords(pqueue::AppendLogStore& store,
+    std::initializer_list<std::pair<std::uint32_t, std::string>> expected) {
+    for (const auto& [seq, payload] : expected)
+        expectRecord(store, seq, payload);
+}
+
+inline void expectRecordsAfterRemount(const pqueue::AppendLogConfig& cfg,
+    std::initializer_list<std::pair<std::uint32_t, std::string>> expected) {
+    pqueue::AppendLogStore store(cfg);
+    REQUIRE(store.mount().ok());
+    for (const auto& [seq, payload] : expected)
+        expectRecord(store, seq, payload);
+}
+
 class FaultInjectingFs final : public pqueue::FileSystem {
 public:
     explicit FaultInjectingFs(std::shared_ptr<pqueue::FileSystem> inner)

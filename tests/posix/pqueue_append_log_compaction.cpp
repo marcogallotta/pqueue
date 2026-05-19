@@ -57,8 +57,7 @@ TEST_CASE("compaction: chooseCompactionRange returns single full range") {
 }
 
 TEST_CASE("compaction: chooseCompactionRange selects oldest full range") {
-    // Two non-contiguous full ranges {1,1} and {3,3} with tail=5.
-    // The oldest (first in manifest order) must be selected.
+    // Two non-contiguous full ranges: the oldest must be selected.
     resetSpool();
     ManifestData md;
     md.epoch = 1; md.ranges = {{1, 1}, {3, 3}}; md.tailGeneration = 5; md.nextGeneration = 6;
@@ -130,14 +129,13 @@ TEST_CASE("compaction: collectLiveRecords excludes popped records") {
 
 TEST_CASE("compaction: compactOneSegment removes dead range without writing a new segment") {
     // gen=1 (full range, header only — no records): dead range.
-    // gen=4 (tail, non-contiguous with gen=1) has seq=1 "c".
-    // Non-contiguous tail prevents rotate-before-compact from extending the range.
+    // gen=4 (non-contiguous tail) prevents rotate-before-compact from extending the range.
     resetSpool();
     ManifestData md;
     md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 4; md.nextGeneration = 5;
     plantManifest(md);
-    plantSegment(1);                                          // dead: header only
-    plantSegment(4, 1, serializeEnqueueEvent(1, "c"));       // non-contiguous tail
+    plantSegment(1);                                    // dead: header only
+    plantSegment(4, 1, serializeEnqueueEvent(1, "c")); // non-contiguous tail
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -145,16 +143,13 @@ TEST_CASE("compaction: compactOneSegment removes dead range without writing a ne
 
     CHECK(store.compactOneSegment().ok());
 
-    CHECK_FALSE(std::filesystem::exists(segmentPath(5))); // no new segment (nextGen=5)
+    CHECK_FALSE(std::filesystem::exists(segmentPath(5))); // no new segment
     CHECK_FALSE(store.chooseCompactionRange().has_value());
-
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "c");
+    expectRecord(store, 1, "c");
 }
 
 TEST_CASE("compaction: compactOneSegment is no-op under segment-count pressure when all ranges are live") {
-    // needsCompaction() fires because activeGenerations_.size() > maxSegments.
-    // All records are live — no dead bytes — so compactOneSegment() must return no-op.
+    // needsCompaction() fires due to segment count; all records live → no-op.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -164,17 +159,13 @@ TEST_CASE("compaction: compactOneSegment is no-op under segment-count pressure w
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3); 2 gens > maxSegments=1
+    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail; 2 gens > maxSegments=1
 
     const auto st = store.compactOneSegment();
     CHECK(st.ok());
     CHECK(st.isNoOp());
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
-
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    expectRecords(store, {{1,"a"},{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("compaction: compactOneSegment is no-op when 1-in-1-out with no dead bytes") {
@@ -187,25 +178,15 @@ TEST_CASE("compaction: compactOneSegment is no-op when 1-in-1-out with no dead b
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3); no dead bytes
+    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3)
 
     const auto st = store.compactOneSegment();
     CHECK(st.ok());
     CHECK(st.isNoOp());
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
 
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-
-    {
-        pqueue::AppendLogStore store2(cfg);
-        CHECK(store2.mount().ok());
-        CHECK(store2.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-        CHECK(store2.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-        CHECK(store2.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-    }
+    expectRecords(store, {{1,"a"},{2,"b"},{3,"c"}});
+    expectRecordsAfterRemount(cfg, {{1,"a"},{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("compaction: compactOneSegment preserves live records in FIFO order") {
@@ -217,15 +198,13 @@ TEST_CASE("compaction: compactOneSegment preserves live records in FIFO order") 
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full (seq=1,2), gen=2 tail (seq=3)
+    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
     storePop(store);             // dead bytes in gen=1
 
     CHECK(store.compactOneSegment().ok());
 
     CHECK(std::filesystem::exists(segmentPath(3)));
-    std::string out;
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    expectRecords(store, {{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
@@ -242,11 +221,7 @@ TEST_CASE("compaction: compactOneSegment preserves rewritten payload") {
     storeEnqueue(store, 3, "w"); // rotation: gen=1 full, gen=2 tail
 
     CHECK(store.compactOneSegment().ok());
-
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "z");
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "y");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "w");
+    expectRecords(store, {{1,"z"},{2,"y"},{3,"w"}});
 }
 
 TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output would not reduce segment count") {
@@ -275,7 +250,7 @@ TEST_CASE("compaction: compactOneSegment is no-op when multi-segment output woul
 
 // --- Stage 7: cleanup tests ---
 
-TEST_CASE("cleanup: compactOneSegment deletes old segment file after publish") {
+TEST_CASE("cleanup: compactOneSegment deletes old segment files and preserves live records") {
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -293,15 +268,12 @@ TEST_CASE("cleanup: compactOneSegment deletes old segment file after publish") {
     CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
     CHECK(std::filesystem::exists(segmentPath(3)));
     CHECK(std::filesystem::exists(segmentPath(4)));
-
-    std::string out;
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    expectRecords(store, {{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("cleanup: dangling segment from failed publish is deleted on next successful publish") {
-    // The next successful publishManifest (triggered by compactOneSegment) must delete
-    // a dangling segment that was written before a crash but never made it into a manifest.
+    // The next successful publishManifest must delete a dangling segment that was
+    // written before a crash but never made it into a manifest.
     resetSpool();
     ManifestData md;
     md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 3;
@@ -317,31 +289,6 @@ TEST_CASE("cleanup: dangling segment from failed publish is deleted on next succ
     CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
     CHECK(std::filesystem::exists(segmentPath(1)));
     CHECK(std::filesystem::exists(segmentPath(2)));
-}
-
-TEST_CASE("cleanup: referenced segment is never deleted (critical)") {
-    resetSpool();
-    auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
-    pqueue::AppendLogStore store(cfg);
-    CHECK(store.mount().ok());
-
-    storeEnqueue(store, 1, "a");
-    storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail
-    storePop(store);
-
-    // rotate-before-compact seals gen=2; output=gen=4, new tail=gen=3.
-    CHECK(store.compactOneSegment().ok());
-
-    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
-    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
-    CHECK(std::filesystem::exists(segmentPath(3)));
-    CHECK(std::filesystem::exists(segmentPath(4)));
-
-    std::string out;
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
 }
 
 TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
@@ -374,32 +321,10 @@ TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
     CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
 }
 
-TEST_CASE("compaction: remount after compactOneSegment reads records from new segment") {
-    resetSpool();
-    auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
-    {
-        pqueue::AppendLogStore store(cfg);
-        CHECK(store.mount().ok());
-        storeEnqueue(store, 1, "a");
-        storeEnqueue(store, 2, "b");
-        storeEnqueue(store, 3, "c");
-        CHECK(store.compactOneSegment().ok());
-    }
-    {
-        pqueue::AppendLogStore store(cfg);
-        CHECK(store.mount().ok());
-        std::string out;
-        CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-        CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-    }
-}
-
 TEST_CASE("compaction: dangling segment from failed publish is harmless on remount (critical)") {
     // Simulates a crash after the compacted segment was written but before the manifest
-    // publish succeeded. On remount the winning manifest still points at the original
-    // segments; the dangling file is ignored and all records are intact.
+    // publish succeeded. The winning manifest still points at the original segments;
+    // the dangling file is ignored and all records are intact.
     resetSpool();
     ManifestData md;
     md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 3;
@@ -411,10 +336,7 @@ TEST_CASE("compaction: dangling segment from failed publish is harmless on remou
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
-
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    expectRecords(store, {{1,"a"},{2,"b"}});
 
     // Rewrite to create dead bytes so the ratio selector still fires for gen=1.
     CHECK(store.rewriteRecord(1, "a").ok());
@@ -478,7 +400,7 @@ TEST_CASE("compaction: multi-segment output compacts range when output count < i
     plantManifest(md);
 
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70; // exactly 2 one-byte records per segment
+    cfg.maxSegmentBytes = 70;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
@@ -486,19 +408,15 @@ TEST_CASE("compaction: multi-segment output compacts range when output count < i
     CHECK(st.ok());
     CHECK_FALSE(st.isNoOp());
 
-    // rotate-before-compact seals tail gen=4 into range → {1,4}; new tail=gen=5, nextGen=6.
-    // Compact {1,4} → two output segs gen=6, gen=7. All 4 input segs cleaned.
+    // rotate-before-compact seals tail gen=4 → {1,4}; new tail=gen=5, nextGen=6.
+    // Compact {1,4} → two output segs gen=6, gen=7.
     CHECK(std::filesystem::exists(segmentPath(6)));
     CHECK(std::filesystem::exists(segmentPath(7)));
     REQUIRE_EQ(store.manifestRanges().size(), 1u);
     CHECK_EQ(store.manifestRanges()[0].startGen, 6u);
     CHECK_EQ(store.manifestRanges()[0].endGen,   7u);
 
-    std::string out;
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-    CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, "d");
-    CHECK(store.readRecord(5, out).ok()); CHECK_EQ(out, "e");
-    CHECK(store.readRecord(6, out).ok()); CHECK_EQ(out, "f");
+    expectRecords(store, {{3,"c"},{4,"d"},{5,"e"},{6,"f"}});
 }
 
 TEST_CASE("compaction: multi-segment output survives remount") {
@@ -524,16 +442,8 @@ TEST_CASE("compaction: multi-segment output survives remount") {
         CHECK(store.mount().ok());
         CHECK(store.compactOneSegment().ok());
     }
-    {
-        pqueue::AppendLogStore store(cfg);
-        CHECK(store.mount().ok());
-        std::string out;
-        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-        CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, "d");
-        CHECK(store.readRecord(5, out).ok()); CHECK_EQ(out, "e");
-        CHECK(store.readRecord(6, out).ok()); CHECK_EQ(out, "f");
-        CHECK(store.readRecord(7, out).ok()); CHECK_EQ(out, "g");
-    }
+
+    expectRecordsAfterRemount(cfg, {{3,"c"},{4,"d"},{5,"e"},{6,"f"},{7,"g"}});
 }
 
 TEST_CASE("compaction: multi-segment output is no-op when output count equals input count") {
@@ -570,7 +480,7 @@ TEST_CASE("totalOnDiskBytes tracking: matches actual file sizes after every oper
 
     storeEnqueue(store, 1, "a"); checkTracking(store);
     storeEnqueue(store, 2, "b"); checkTracking(store);
-    storeEnqueue(store, 3, "c"); checkTracking(store); // rotation: gen=1 full, gen=2 tail
+    storeEnqueue(store, 3, "c"); checkTracking(store);
 
     CHECK(store.rewriteRecord(1, "x").ok()); checkTracking(store);
     storePop(store);                         checkTracking(store);
@@ -585,9 +495,6 @@ TEST_CASE("totalOnDiskBytes tracking: matches actual file sizes after every oper
 }
 
 TEST_CASE("maxTotalBytes: enqueue blocked when footprint full and nothing to compact") {
-    // Two live records fill the active segment to exactly maxTotalBytes.
-    // A third enqueue would exceed it; compaction no-ops (no dead bytes); writeRecord
-    // must return QueueFull.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -601,16 +508,11 @@ TEST_CASE("maxTotalBytes: enqueue blocked when footprint full and nothing to com
     const auto st = store.writeRecord(3, "c");
     CHECK_FALSE(st.ok());
     CHECK_EQ(st.code, pqueue::StatusCode::QueueFull);
-    CHECK_FALSE(std::filesystem::exists(segmentPath(2))); // no rotation triggered
-
-    std::string out;
-    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "a");
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    expectRecords(store, {{1,"a"},{2,"b"}});
 }
 
 TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
-    // After a pop creates dead bytes in a full range, a subsequent enqueue that would
-    // exceed maxTotalBytes triggers compaction automatically and then succeeds.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -620,30 +522,19 @@ TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storePop(store); // POP overflows gen=1 → rotation; gen=1: 70b (full), gen=2: 40b (header+pop)
+    storePop(store); // POP overflows gen=1 → rotation; gen=1: 70b (full), gen=2: 40b
 
-    // footprint=110; +25 for enqueue=135 > 120 → compact gen=1 → gen=3(45b); then fits
+    // footprint=110; +25 for enqueue=135 > 120 → compact gen=1; then fits
     CHECK(store.writeRecord(3, "c").ok());
     pqueue::FileStoreIndex idx;
     CHECK(store.readIndex(idx).ok());
     CHECK(store.writeIndex(idx).ok());
 
-    std::string out;
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-
-    pqueue::AppendLogStore store2(cfg);
-    CHECK(store2.mount().ok());
-    CHECK(store2.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store2.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    expectRecords(store, {{2,"b"},{3,"c"}});
+    expectRecordsAfterRemount(cfg, {{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("maxTotalBytes: DropOldest evicts and retries when writeRecord returns QueueFull") {
-    // gen=1 holds a 50-byte record (94 bytes on disk); gen=2 is the tail (45 bytes).
-    // totalOnDisk=139 == maxTotalBytes. enqueue("c") triggers compaction, but gen=1 is
-    // fully live so it no-ops → writeRecord returns QueueFull. The DropOldest retry
-    // evicts "a" (POP lands in gen=2, no rotation), making gen=1 a dead range. The
-    // second writeRecord call compacts gen=1 away (94 bytes freed) and writes "c".
     resetSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 100;
@@ -651,9 +542,9 @@ TEST_CASE("maxTotalBytes: DropOldest evicts and retries when writeRecord returns
     cfg.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
     pqueue::Queue q(cfg);
 
-    REQUIRE(q.enqueue(std::string(50, 'a')).ok()); // gen=1: header(20) + event(74) = 94 bytes
-    REQUIRE(q.enqueue("b").ok());                   // 94+25>100 → rotate; gen=2: 20+25=45; total=139
-    CHECK(q.enqueue("c").ok());                     // canEnqueue passes; writeRecord→QueueFull→evict→retry
+    REQUIRE(q.enqueue(std::string(50, 'a')).ok());
+    REQUIRE(q.enqueue("b").ok());
+    CHECK(q.enqueue("c").ok());
 
     CHECK_EQ(q.stats().count, 2U);
     std::string out;
@@ -678,22 +569,19 @@ TEST_CASE("sequence exhaustion: writeRecord fails closed at UINT32_MAX") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("compaction: rotate-before-compact seals contiguous tail into last range") {
-    // Verifies that compactRange on the last manifest range seals the active tail into
-    // the compaction input when the tail is contiguous, preventing generation gap
-    // fragmentation. After compactOneSegment(), output must start at nextGeneration_
-    // after the rotate (gen=4, not gen=3), confirming tail=2 was sealed first.
+    // After compactOneSegment(), output must start at nextGeneration_ after the rotate
+    // (gen=4, not gen=3), confirming tail=2 was sealed into {1,2} first.
     resetSpool();
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70; // two 1-byte records per segment
+    cfg.maxSegmentBytes = 70;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b"); // gen=1 full → rotate; gen=2 tail
     storePop(store);             // dead bytes in gen=1
-    storeEnqueue(store, 3, "c"); // goes to gen=2 (still has room)
+    storeEnqueue(store, 3, "c"); // goes to gen=2
 
-    // State: ranges=[{1,1}], tail=2 (contiguous: 1+1==2)
     REQUIRE_EQ(store.manifestRanges().size(), 1U);
     REQUIRE_EQ(store.manifestRanges()[0].startGen, 1U);
     REQUIRE_EQ(store.manifestRanges()[0].endGen,   1U);
@@ -709,15 +597,10 @@ TEST_CASE("compaction: rotate-before-compact seals contiguous tail into last ran
     CHECK_EQ(store.tailGeneration(), 3U);
     CHECK(std::filesystem::exists(segmentPath(3)));
     CHECK(std::filesystem::exists(segmentPath(4)));
-
-    std::string out;
-    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "c");
+    expectRecords(store, {{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("compaction: rotate-before-compact remount preserves FIFO order (critical)") {
-    // After rotate-before-compact, the manifest has output gens numerically above the
-    // former tail gen. Verify that a fresh remount replays in correct FIFO order.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -730,26 +613,19 @@ TEST_CASE("compaction: rotate-before-compact remount preserves FIFO order (criti
         storeEnqueue(store, 3, "c");
         CHECK(store.compactOneSegment().ok());
     }
-    {
-        pqueue::AppendLogStore store2(cfg);
-        CHECK(store2.mount().ok());
-        std::string out;
-        CHECK(store2.readRecord(2, out).ok()); CHECK_EQ(out, "b");
-        CHECK(store2.readRecord(3, out).ok()); CHECK_EQ(out, "c");
-    }
+
+    expectRecordsAfterRemount(cfg, {{2,"b"},{3,"c"}});
 }
 
 TEST_CASE("compaction: rotate-before-compact does not fire for non-last range") {
-    // The selectedIsLastRange guard must prevent rotate even when the active tail IS
-    // contiguous with the last range. Setup: ranges=[{1,1},{3,4}], tail=5 (contiguous
-    // with last range: 4+1==5). chooseCompactionRange picks {1,1} (dead range), which
-    // is NOT the last range. Rotate must not fire despite the contiguous tail.
+    // selectedIsLastRange guard prevents rotate when compacting a non-last range,
+    // even if the active tail is contiguous with the last range.
     resetSpool();
     ManifestData md;
     md.epoch = 1; md.ranges = {{1, 1}, {3, 4}}; md.tailGeneration = 5; md.nextGeneration = 6;
     plantManifest(md);
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a")); // live record; will be popped to make dead
-    plantSegment(3); plantSegment(4); plantSegment(5); // last full range + tail: header only
+    plantSegment(1, 1, serializeEnqueueEvent(1, "a")); // will be popped to make dead
+    plantSegment(3); plantSegment(4); plantSegment(5); // last full range + tail
 
     pqueue::AppendLogStore store(makeStoreConfig());
     CHECK(store.mount().ok());
@@ -757,20 +633,20 @@ TEST_CASE("compaction: rotate-before-compact does not fire for non-last range") 
 
     CHECK(store.compactOneSegment().ok()); // dead-range removal of {1,1}
 
-    CHECK_FALSE(std::filesystem::exists(segmentPath(6))); // gen=6 only if tail was rotated
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6))); // gen=6 only if tail rotated
     CHECK(std::filesystem::exists(segmentPath(3)));
     CHECK(std::filesystem::exists(segmentPath(4)));
     CHECK(std::filesystem::exists(segmentPath(5)));
 }
 
 TEST_CASE("compaction: rotate-before-compact keeps range count bounded under mixed workload") {
-    // Regression for the generation gap fragmentation bug: without rotate-before-compact,
+    // Regression for generation gap fragmentation: without rotate-before-compact,
     // every compaction leaves an orphan-tail range, driving toward RangeLimitExceeded.
     // Range count must stay <= 3 across repeated burst/pop/compact cycles.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxSegments     = 200; // disable internal auto-compaction
+    cfg.maxSegments     = 200;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
@@ -782,7 +658,7 @@ TEST_CASE("compaction: rotate-before-compact keeps range count bounded under mix
         CHECK_LE(store.manifestRanges().size(), 3U);
     }
 
-    // Live window after 5 cycles of burst=12 pop=9 starting at seq=1: head=46, tail=seq.
+    // Live window after 5 cycles of burst=12 pop=9: head=46, tail=seq.
     for (std::uint32_t s = 46; s < seq; ++s) {
         std::string out;
         CHECK(store.readRecord(s, out).ok());
@@ -791,9 +667,6 @@ TEST_CASE("compaction: rotate-before-compact keeps range count bounded under mix
 }
 
 TEST_CASE("compaction: manifest state survives remount after rotate-before-compact") {
-    // Every rotate-before-compact writes two manifests (rotate + compact).
-    // Verify those writes are durable: a store remounted after each compact cycle sees
-    // the same live records and bounded range count.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
@@ -822,9 +695,6 @@ TEST_CASE("compaction: manifest state survives remount after rotate-before-compa
 }
 
 TEST_CASE("compaction: orphan tail range is eliminated after its records are all popped") {
-    // Rotate-before-compact may leave an orphan-tail range that receives live records
-    // in a subsequent burst. Once those records are popped, dead-range elimination
-    // must reclaim the range, recovering the store to zero sealed ranges.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
