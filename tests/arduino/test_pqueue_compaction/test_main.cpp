@@ -39,6 +39,7 @@ constexpr std::uint32_t kCycles            = 15;
 constexpr float         kDeadRatioTrigger  = 0.10f;
 constexpr std::uint32_t kRangePressureTrigger = 3;
 constexpr std::size_t   kRecordSize        = 492;
+constexpr std::uint32_t kMaxOutputSegs     = 8;
 
 // Generous upper bound -- this run is for measurement, not enforcement.
 // The previous run (burst=100/rec=150) measured up to 1090ms at MaxOutSegs=1.
@@ -114,6 +115,50 @@ std::optional<pqueue::AppendLogStore::CompactionRange> chooseHighestDeadRatio(
     return best->range;
 }
 
+// If the chosen range would produce more than kMaxOutputSegs output segments,
+// finds the contiguous window of input segments with the highest dead ratio
+// that fits within the budget. Single-segment windows always fit, so this
+// always returns a valid (possibly single-segment) subrange.
+pqueue::AppendLogStore::CompactionRange narrowRange(
+    const pqueue::AppendLogStore::CompactionRange& range,
+    const RangeStat& rs,
+    const pqueue::AppendLogStore& store
+) {
+    if (rs.predictedOutputSegs() <= kMaxOutputSegs) return range;
+
+    const auto allSegs = store.segmentStats();
+    std::vector<pqueue::AppendLogStore::SegmentStat> segs;
+    for (const auto& ss : allSegs) {
+        if (ss.generation >= range.startGen && ss.generation <= range.endGen)
+            segs.push_back(ss);
+    }
+    std::sort(segs.begin(), segs.end(),
+        [](const auto& a, const auto& b) { return a.generation < b.generation; });
+
+    pqueue::AppendLogStore::CompactionRange best = {segs.front().generation, segs.front().generation};
+    float bestDeadRatio = -1.0f;
+
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        std::uint32_t liveBytes = 0, totalBytes = 0;
+        for (std::size_t j = i; j < segs.size(); ++j) {
+            liveBytes  += segs[j].liveBytes;
+            totalBytes += segs[j].totalBytes;
+            const std::uint32_t outSegs = liveBytes == 0 ? 0u
+                : (liveBytes + kMaxSegmentBytes - 1) / kMaxSegmentBytes;
+            if (outSegs > kMaxOutputSegs) break;
+            const float dr = totalBytes > 0
+                ? static_cast<float>(totalBytes - liveBytes) / static_cast<float>(totalBytes)
+                : 0.0f;
+            if (dr > bestDeadRatio) {
+                bestDeadRatio = dr;
+                best = {segs[i].generation, segs[j].generation};
+            }
+        }
+    }
+
+    return best;
+}
+
 void test_compaction_burst_workload() {
     Serial.flush();
     formatAndUnmountLittleFs();
@@ -145,10 +190,23 @@ void test_compaction_burst_workload() {
         const auto chosen = chooseHighestDeadRatio(rangeStats);
         if (!chosen) return;
 
+        const RangeStat* chosenStat = nullptr;
+        for (const auto& rs : rangeStats) {
+            if (rs.range.startGen == chosen->startGen && rs.range.endGen == chosen->endGen) {
+                chosenStat = &rs;
+                break;
+            }
+        }
+        const auto target = chosenStat ? narrowRange(*chosen, *chosenStat, store) : *chosen;
+        if (target.startGen != chosen->startGen || target.endGen != chosen->endGen) {
+            Serial.printf("[narrow] [%u,%u]->>[%u,%u]\n",
+                chosen->startGen, chosen->endGen, target.startGen, target.endGen);
+        }
+
         ++compactions;
         std::uint32_t outSegs = 0;
         const std::uint32_t t0 = millis();
-        const auto st = store.compactRange(*chosen, &outSegs);
+        const auto st = store.compactRange(target, &outSegs);
         const std::uint32_t elapsed = millis() - t0;
 
         if (st.ok() && !st.isNoOp()) {

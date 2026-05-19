@@ -323,13 +323,31 @@ Hot-path I/O improvements also landed during this run:
   skip the fileSize() probe that was hitting non-existent files at 2-3s each on LittleFS.
 These helped latency of individual small compactions but did not address the 54-segment job.
 
+## Bounded compaction window (test_main.cpp)
+
+**Implementation.** narrowRange() in test_main.cpp caps the hot-path compaction unit at
+kMaxOutputSegs=8 predicted output segments. If chooseHighestDeadRatio returns a range
+whose predictedOutputSegs() exceeds the budget, narrowRange() retrieves per-segment stats
+(store.segmentStats()), filters to the chosen range, and runs an O(n^2) sliding window
+over the sorted generations. For each (i,j) window it accumulates liveBytes and stops
+expanding when the next segment would push ceil(liveBytes/maxSegmentBytes) above the
+budget. The window with the highest dead ratio within the budget is returned. A single
+segment always fits (liveBytes <= maxSegmentBytes), so the function always returns a
+valid subrange.
+
+The original compaction target is passed to store.compactRange() unchanged when it
+already fits within the budget; narrowRange() is a no-op in that case.
+
+A [narrow] log line is printed when the range is actually shrunk, showing the original
+and narrowed generation bounds.
+
+The store and compactRange() are unchanged; narrowRange() is entirely in the test harness.
+
 ## Next steps
 
-**Bound the hot-path compaction window.** The selector must cap predicted output segments
-at a hard budget (e.g. 8). If the best candidate range would exceed the budget, pick a
-bounded subrange (window of input segments) inside it instead of the whole range.
-compactRange() already accepts arbitrary CompactionRange values -- the fix is entirely in
-the selector/test harness. compactFull() can still do unbounded work during maintenance.
+**On-device run 3 (burst=500/pop=90%/rec=492, bounded window).** Run the test to verify
+kMaxOutputSegs=8 eliminates the 130-second stall. Expected: MaxLatency drops to under
+a few seconds; no deadlocks; no capacity exhaustion.
 
 **Final strategy selection.** Deferred until the bounded window lands and on-device
 latency is confirmed acceptable.
