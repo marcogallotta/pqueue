@@ -160,8 +160,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             hypoInputBytes += activeSegmentBytes_;
         } else {
             std::uint64_t sz = 0;
-            const Status szSt = fs()->fileSize(segmentName(gen), sz);
-            if (!szSt.ok()) return szSt;
+            fs()->fileSize(segmentName(gen), sz); // missing file == 0 bytes, not an error
             hypoInputBytes += static_cast<std::uint32_t>(sz);
         }
     }
