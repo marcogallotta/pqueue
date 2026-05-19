@@ -23,6 +23,15 @@ struct FsCounters {
     std::uint64_t lockRelease = 0;
     std::uint64_t bytesRead = 0;
     std::uint64_t bytesWritten = 0;
+#ifdef ARDUINO
+    std::uint32_t msFileSize   = 0;
+    std::uint32_t msReadAt     = 0;
+    std::uint32_t msWriteAt    = 0;
+    std::uint32_t msReadFile   = 0;
+    std::uint32_t msWriteFile  = 0;
+    std::uint32_t msRemoveFile = 0;
+    std::uint32_t msListFiles  = 0;
+#endif
 
     void reset() { *this = FsCounters{}; }
 
@@ -46,7 +55,13 @@ public:
 
     pqueue::Status readFile(const std::string& name, std::string& out) override {
         ++counters_.readFile;
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
         auto st = inner_->readFile(name, out);
+#ifdef ARDUINO
+        counters_.msReadFile += millis() - _t;
+#endif
         if (st.ok()) counters_.bytesRead += out.size();
         return st;
     }
@@ -54,12 +69,25 @@ public:
     pqueue::Status writeFile(const std::string& name, const std::string& data) override {
         ++counters_.writeFile;
         counters_.bytesWritten += data.size();
-        return inner_->writeFile(name, data);
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
+        auto st = inner_->writeFile(name, data);
+#ifdef ARDUINO
+        counters_.msWriteFile += millis() - _t;
+#endif
+        return st;
     }
 
     pqueue::Status readAt(const std::string& name, std::uint64_t offset, std::size_t size, std::string& out) override {
         ++counters_.readAt;
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
         auto st = inner_->readAt(name, offset, size, out);
+#ifdef ARDUINO
+        counters_.msReadAt += millis() - _t;
+#endif
         if (st.ok()) counters_.bytesRead += out.size();
         return st;
     }
@@ -67,7 +95,14 @@ public:
     pqueue::Status writeAt(const std::string& name, std::uint64_t offset, const std::string& data) override {
         ++counters_.writeAt;
         counters_.bytesWritten += data.size();
-        return inner_->writeAt(name, offset, data);
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
+        auto st = inner_->writeAt(name, offset, data);
+#ifdef ARDUINO
+        counters_.msWriteAt += millis() - _t;
+#endif
+        return st;
     }
 
     pqueue::Status resizeFile(const std::string& name, std::uint64_t size) override {
@@ -78,12 +113,26 @@ public:
 
     pqueue::Status fileSize(const std::string& name, std::uint64_t& out) override {
         ++counters_.fileSize;
-        return inner_->fileSize(name, out);
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
+        auto st = inner_->fileSize(name, out);
+#ifdef ARDUINO
+        counters_.msFileSize += millis() - _t;
+#endif
+        return st;
     }
 
     pqueue::Status removeFile(const std::string& name) override {
         ++counters_.removeFile;
-        return inner_->removeFile(name);
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
+        auto st = inner_->removeFile(name);
+#ifdef ARDUINO
+        counters_.msRemoveFile += millis() - _t;
+#endif
+        return st;
     }
 
     pqueue::Status renameFile(const std::string& fromName, const std::string& toName) override {
@@ -93,7 +142,14 @@ public:
 
     pqueue::Status listFiles(std::vector<std::string>& out) override {
         ++counters_.listFiles;
-        return inner_->listFiles(out);
+#ifdef ARDUINO
+        const std::uint32_t _t = millis();
+#endif
+        auto st = inner_->listFiles(out);
+#ifdef ARDUINO
+        counters_.msListFiles += millis() - _t;
+#endif
+        return st;
     }
 
     pqueue::Status tryAcquireLockFile(const std::string& name, const std::string& contents) override {

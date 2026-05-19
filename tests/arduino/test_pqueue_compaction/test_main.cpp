@@ -13,6 +13,7 @@
 #include "pqueue/append_log_store.h"
 #include "pqueue/file_store.h"
 #include "pqueue/status.h"
+#include "counting_file_system.h"
 
 // On-device compaction validation.
 //
@@ -163,6 +164,8 @@ void test_compaction_burst_workload() {
     Serial.flush();
     formatAndUnmountLittleFs();
 
+    auto countingFs = std::make_shared<CountingFileSystem>(pqueue::makeLittleFsFileSystem());
+
     pqueue::AppendLogConfig cfg;
     cfg.basePath        = kBasePath;
     cfg.backend         = pqueue::StorageBackend::LittleFS;
@@ -170,6 +173,7 @@ void test_compaction_burst_workload() {
     cfg.maxSegments     = kMaxSegments;
     cfg.maxTotalBytes   = kMaxTotalBytes;
     cfg.minFreeBytes    = 0;
+    cfg.fileSystem      = countingFs;
 
     pqueue::AppendLogStore store(cfg);
     TEST_ASSERT_TRUE_MESSAGE(store.mount().ok(), "AppendLogStore mount failed");
@@ -304,6 +308,7 @@ void test_compaction_burst_workload() {
         t_wr = t_widx = t_ridx = 0;
         t_check = t_stats = t_compact = 0;
         t_enq = t_pop = 0;
+        countingFs->resetCounters();
         const std::uint32_t t_cycle = millis();
 
         const std::uint32_t t_enq0 = millis();
@@ -368,6 +373,20 @@ void test_compaction_burst_workload() {
             static_cast<unsigned>(store.manifestRanges().size()),
             segs, t_total, t_enq, t_pop,
             t_check, t_stats, t_compact, t_wr, t_widx, t_ridx);
+        {
+            const auto& c = countingFs->counters();
+            Serial.printf(
+                "[fs] fileSize n=%u ms=%u readFile n=%u ms=%u writeFile n=%u bytes=%u ms=%u "
+                "readAt n=%u bytes=%u ms=%u writeAt n=%u bytes=%u ms=%u "
+                "removeFile n=%u ms=%u listFiles n=%u ms=%u\n",
+                static_cast<unsigned>(c.fileSize),   c.msFileSize,
+                static_cast<unsigned>(c.readFile),   c.msReadFile,
+                static_cast<unsigned>(c.writeFile),  static_cast<unsigned>(c.bytesWritten), c.msWriteFile,
+                static_cast<unsigned>(c.readAt),     static_cast<unsigned>(c.bytesRead),    c.msReadAt,
+                static_cast<unsigned>(c.writeAt),    static_cast<unsigned>(c.bytesWritten), c.msWriteAt,
+                static_cast<unsigned>(c.removeFile), c.msRemoveFile,
+                static_cast<unsigned>(c.listFiles),  c.msListFiles);
+        }
         Serial.flush();
     }
 
