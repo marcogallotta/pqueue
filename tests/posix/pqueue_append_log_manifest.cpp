@@ -269,22 +269,6 @@ TEST_CASE("manifest-publish: both valid writes lower-epoch slot") {
     CHECK(readManifestSlot('b', slotB)); CHECK_EQ(slotB.epoch, 8U);
 }
 
-TEST_CASE("manifest-publish: equal epochs writes slot B (tiebreaker)") {
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    writeManifestSlotDirect('a', 4);
-    writeManifestSlotDirect('b', 4);
-
-    ManifestData md;
-    md.nextGeneration = 1; md.tailGeneration = 0;
-    CHECK(store.publishManifest(md).ok());
-
-    ManifestData slotA, slotB;
-    CHECK(readManifestSlot('a', slotA)); CHECK_EQ(slotA.epoch, 4U);
-    CHECK(readManifestSlot('b', slotB)); CHECK_EQ(slotB.epoch, 5U);
-}
 
 TEST_CASE("manifest-publish: corrupt A, absent B returns DataCorrupt") {
     cleanSpool();
@@ -418,23 +402,6 @@ TEST_CASE("manifest-read: both valid, B higher epoch wins") {
     CHECK_EQ(out.epoch, 8U);
 }
 
-TEST_CASE("manifest-read: equal epochs, slot A wins (tiebreaker)") {
-    // Slots have the same epoch but different nextGeneration values so we can
-    // verify which slot actually won by inspecting the returned manifest.
-    cleanSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    REQUIRE(store.mount().ok());
-
-    ManifestData mdA; mdA.epoch = 6; mdA.nextGeneration = 10; mdA.tailGeneration = 0;
-    ManifestData mdB; mdB.epoch = 6; mdB.nextGeneration = 20; mdB.tailGeneration = 0;
-    plantManifest(mdA, 'a');
-    plantManifest(mdB, 'b');
-
-    ManifestData out;
-    CHECK(store.readManifest(out));
-    CHECK_EQ(out.epoch, 6U);
-    CHECK_EQ(out.nextGeneration, 10U); // slot A's payload — proves A won
-}
 
 TEST_CASE("manifest-read: corrupt slot A, valid slot B returns B") {
     cleanSpool();

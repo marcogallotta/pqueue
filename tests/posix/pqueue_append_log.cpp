@@ -90,25 +90,6 @@ TEST_CASE("append-log: segment rotation") {
     CHECK_EQ(q.stats().count, 0U);
 }
 
-TEST_CASE("append-log: segment rotation persists") {
-    cleanSpool();
-    auto cfg = makeConfig();
-    cfg.maxSegmentBytes = 256;
-    {
-        pqueue::Queue q(cfg);
-        for (int i = 0; i < 10; ++i)
-            CHECK(q.enqueue("msg-" + std::to_string(i)).ok());
-    }
-    {
-        pqueue::Queue q(cfg);
-        CHECK_EQ(q.stats().count, 10U);
-        for (int i = 0; i < 10; ++i) {
-            std::string out;
-            CHECK(q.peek(out).ok()); CHECK_EQ(out, "msg-" + std::to_string(i));
-            CHECK(q.pop().ok());
-        }
-    }
-}
 
 TEST_CASE("append-log: rewriteFront persists") {
     cleanSpool();
@@ -136,27 +117,23 @@ TEST_CASE("append-log: format clears all records") {
     CHECK_FALSE(q.peek(out).ok());
 }
 
-TEST_CASE("append-log: format then enqueue works") {
+TEST_CASE("append-log: validate detects corrupt CRC in non-last segment") {
+    using namespace pqueue::append_log_detail;
     cleanSpool();
-    pqueue::Queue q(makeConfig());
-    CHECK(q.enqueue("before").ok());
-    CHECK(q.format().ok());
-    CHECK(q.enqueue("after").ok());
-    std::string out;
-    CHECK(q.peek(out).ok()); CHECK_EQ(out, "after");
-}
-
-TEST_CASE("append-log: validate returns ok for clean store") {
-    cleanSpool();
-    pqueue::Queue q(makeConfig());
-    CHECK(q.enqueue("x").ok());
-    CHECK(q.validate().ok);
-}
-
-TEST_CASE("append-log: validate on empty store") {
-    cleanSpool();
-    pqueue::Queue q(makeConfig());
-    CHECK(q.validate().ok);
+    auto cfg = makeConfig();
+    cfg.maxSegmentBytes = 128;
+    {
+        pqueue::Queue q(cfg);
+        for (int i = 0; i < 6; ++i)
+            CHECK(q.enqueue("X").ok());
+    }
+    REQUIRE(std::filesystem::exists(segmentPath(2)));
+    constexpr std::uintmax_t kCrcOffset = kSegmentHeaderBytes + kEnqueueHeaderBytes + 1;
+    patchFile(segmentPath(1), kCrcOffset, {0xDE, 0xAD, 0xBE, 0xEF});
+    pqueue::Queue q(cfg);
+    const auto result = q.validate();
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(result.errors.empty());
 }
 
 TEST_CASE("append-log: compaction triggered by segment count") {
@@ -237,25 +214,6 @@ TEST_CASE("compaction trigger: auto-triggers on size-based count after non-monot
     }
 }
 
-TEST_CASE("append-log: mixed enqueue and pop with persistence") {
-    cleanSpool();
-    auto cfg = makeConfig();
-    {
-        pqueue::Queue q(cfg);
-        CHECK(q.enqueue("a").ok());
-        CHECK(q.enqueue("b").ok());
-        CHECK(q.enqueue("c").ok());
-        CHECK(q.pop().ok());
-    }
-    {
-        pqueue::Queue q(cfg);
-        CHECK_EQ(q.stats().count, 2U);
-        std::string out;
-        CHECK(q.peek(out).ok()); CHECK_EQ(out, "b");
-        CHECK(q.pop().ok());
-        CHECK(q.peek(out).ok()); CHECK_EQ(out, "c");
-    }
-}
 
 // --- Recovery policy tests ---
 

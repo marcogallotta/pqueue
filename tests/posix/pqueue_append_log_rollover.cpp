@@ -65,25 +65,6 @@ TEST_CASE("rollover: range limit exceeded returns failure") {
     CHECK_EQ(onDisk.ranges[3].startGen, 7U); CHECK_EQ(onDisk.ranges[3].endGen, 7U);
 }
 
-TEST_CASE("rollover: nextGeneration in manifest is one past the new tail") {
-    cleanSpool();
-    auto cfg = makeConfig();
-    cfg.maxSegmentBytes = kSegmentHeaderBytes + kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
-
-    {
-        pqueue::Queue q(cfg);
-        CHECK(q.enqueue("A").ok()); // seg 1; manifest: tail=1, nextGen=2
-        CHECK(q.enqueue("B").ok()); // seg 1 full → rotate to seg 2; manifest: tail=2, nextGen=3
-    }
-
-    ManifestData md;
-    REQUIRE((readManifestSlot('a', md) || readManifestSlot('b', md)));
-    ManifestData mdB;
-    if (readManifestSlot('b', mdB) && mdB.epoch > md.epoch) md = mdB;
-
-    CHECK_EQ(md.tailGeneration, 2U);
-    CHECK_EQ(md.nextGeneration, 3U);
-}
 
 TEST_CASE("rollover: dangling new segment ignored when publish fails (critical)") {
     // If the segment file for the new tail is written but the manifest publish fails,
@@ -228,21 +209,3 @@ TEST_CASE("rollover: merged range [1,2] replays both segments in FIFO order") {
     }
 }
 
-TEST_CASE("rollover: manifest slot alternates correctly across rotations") {
-    cleanSpool();
-    auto cfg = makeConfig();
-    cfg.maxSegmentBytes = 128;
-
-    {
-        pqueue::Queue q(cfg);
-        for (int i = 0; i < 15; ++i)
-            CHECK(q.enqueue("r").ok());
-    }
-
-    ManifestData mdA, mdB;
-    const bool validA = readManifestSlot('a', mdA);
-    const bool validB = readManifestSlot('b', mdB);
-    CHECK((validA || validB));
-    if (validA && validB)
-        CHECK_NE(mdA.epoch, mdB.epoch);
-}

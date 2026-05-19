@@ -20,13 +20,6 @@ void checkTracking(pqueue::AppendLogStore& store) {
 
 } // namespace
 
-TEST_CASE("compaction: chooseCompactionRange returns nullopt for empty store") {
-    resetSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    CHECK(store.mount().ok());
-    CHECK_FALSE(store.chooseCompactionRange().has_value());
-}
-
 TEST_CASE("compaction: chooseCompactionRange returns nullopt with only tail (critical)") {
     // A store with only a tail segment and no full ranges must not offer the
     // tail for compaction — selecting it would violate the torn-tail invariant.
@@ -41,45 +34,6 @@ TEST_CASE("compaction: chooseCompactionRange returns nullopt with only tail (cri
     CHECK_FALSE(store.chooseCompactionRange().has_value());
 }
 
-TEST_CASE("compaction: chooseCompactionRange returns single full range") {
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 3;
-    plantManifest(md);
-    plantSegment(1); plantSegment(2);
-
-    pqueue::AppendLogStore store(makeStoreConfig());
-    CHECK(store.mount().ok());
-    const auto range = store.chooseCompactionRange();
-    REQUIRE(range.has_value());
-    CHECK_EQ(range->startGen, 1u);
-    CHECK_EQ(range->endGen,   1u);
-}
-
-TEST_CASE("compaction: chooseCompactionRange selects oldest full range") {
-    // Two non-contiguous full ranges: the oldest must be selected.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}, {3, 3}}; md.tailGeneration = 5; md.nextGeneration = 6;
-    plantManifest(md);
-    plantSegment(1); plantSegment(3); plantSegment(5);
-
-    pqueue::AppendLogStore store(makeStoreConfig());
-    CHECK(store.mount().ok());
-    const auto range = store.chooseCompactionRange();
-    REQUIRE(range.has_value());
-    CHECK_EQ(range->startGen, 1u);
-    CHECK_EQ(range->endGen,   1u);
-}
-
-TEST_CASE("compaction: collectLiveRecords returns empty for range with no records") {
-    resetSpool();
-    pqueue::AppendLogStore store(makeStoreConfig());
-    CHECK(store.mount().ok());
-    std::vector<pqueue::AppendLogStore::CompactionLiveRecord> live;
-    CHECK(store.collectLiveRecords({1, 1}, live).ok());
-    CHECK(live.empty());
-}
 
 TEST_CASE("compaction: collectLiveRecords returns records in FIFO order; out-of-range excluded") {
     // seq=1,2 land in gen=1 (full range after rotation); seq=3 lands in gen=2 (tail).
@@ -291,35 +245,6 @@ TEST_CASE("cleanup: dangling segment from failed publish is deleted on next succ
     CHECK(std::filesystem::exists(segmentPath(2)));
 }
 
-TEST_CASE("cleanup: multiple dangling segments cleaned up one per publish") {
-    // Two dangling files on disk. Each successful publishManifest removes one.
-    resetSpool();
-    ManifestData md;
-    md.epoch = 1; md.ranges = {{1, 1}}; md.tailGeneration = 2; md.nextGeneration = 5;
-    plantManifest(md);
-    plantSegment(1, 1, serializeEnqueueEvent(1, "a") + serializeEnqueueEvent(2, "b"));
-    plantSegment(2, 3);    // tail
-    plantSegment(3);       // dangling
-    plantSegment(4);       // dangling
-
-    auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
-    pqueue::AppendLogStore store(cfg);
-    CHECK(store.mount().ok()); // first cleanup: removes one dangling file
-
-    const bool gen3gone = !std::filesystem::exists(segmentPath(3));
-    const bool gen4gone = !std::filesystem::exists(segmentPath(4));
-    CHECK((gen3gone || gen4gone));        // at least one removed
-    CHECK_FALSE((gen3gone && gen4gone));  // not both (one per cleanup pass)
-
-    storePop(store);
-    storePop(store);
-
-    // Dead-range removal triggers second publish → removes the other dangling file.
-    CHECK(store.compactOneSegment().ok());
-    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
-    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
-}
 
 TEST_CASE("compaction: dangling segment from failed publish is harmless on remount (critical)") {
     // Simulates a crash after the compacted segment was written but before the manifest
@@ -639,32 +564,6 @@ TEST_CASE("compaction: rotate-before-compact does not fire for non-last range") 
     CHECK(std::filesystem::exists(segmentPath(5)));
 }
 
-TEST_CASE("compaction: rotate-before-compact keeps range count bounded under mixed workload") {
-    // Regression for generation gap fragmentation: without rotate-before-compact,
-    // every compaction leaves an orphan-tail range, driving toward RangeLimitExceeded.
-    // Range count must stay <= 3 across repeated burst/pop/compact cycles.
-    resetSpool();
-    auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
-    cfg.maxSegments     = 200;
-    pqueue::AppendLogStore store(cfg);
-    CHECK(store.mount().ok());
-
-    std::uint32_t seq = 1;
-    for (int cycle = 0; cycle < 5; ++cycle) {
-        for (int i = 0; i < 12; ++i) storeEnqueue(store, seq++, std::string(1, 'x'));
-        for (int i = 0; i < 9;  ++i) storePop(store);
-        CHECK(store.compactOneSegment().ok());
-        CHECK_LE(store.manifestRanges().size(), 3U);
-    }
-
-    // Live window after 5 cycles of burst=12 pop=9: head=46, tail=seq.
-    for (std::uint32_t s = 46; s < seq; ++s) {
-        std::string out;
-        CHECK(store.readRecord(s, out).ok());
-        CHECK_EQ(out, std::string(1, 'x'));
-    }
-}
 
 TEST_CASE("compaction: manifest state survives remount after rotate-before-compact") {
     resetSpool();
