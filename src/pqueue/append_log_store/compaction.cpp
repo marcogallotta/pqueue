@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -62,16 +63,26 @@ std::optional<AppendLogStore::CompactionRange> AppendLogStore::chooseCompactionR
 Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
                                           std::vector<CompactionLiveRecord>& out) const {
     out.clear();
+
+    // Group live records by segment so we read each segment file once.
+    std::map<std::uint32_t, std::vector<const SegmentRecord*>> byGen;
     for (const SegmentRecord& sr : records_) {
-        if (sr.segmentGeneration < range.startGen || sr.segmentGeneration > range.endGen) {
-            continue;
-        }
-        CompactionLiveRecord lr;
-        lr.sequence = sr.sequence;
-        Status st = fs_->readAt(segmentName(sr.segmentGeneration),
-                                sr.payloadOffset, sr.payloadBytes, lr.payload);
+        if (sr.segmentGeneration >= range.startGen && sr.segmentGeneration <= range.endGen)
+            byGen[sr.segmentGeneration].push_back(&sr);
+    }
+
+    for (auto& [gen, recs] : byGen) {
+        std::string buf;
+        Status st = fs_->readFile(segmentName(gen), buf);
         if (!st.ok()) return st;
-        out.push_back(std::move(lr));
+        for (const SegmentRecord* sr : recs) {
+            if (sr->payloadOffset + sr->payloadBytes > buf.size())
+                return Status::failure(StatusCode::DataCorrupt, "payload out of bounds in segment");
+            CompactionLiveRecord lr;
+            lr.sequence = sr->sequence;
+            lr.payload  = buf.substr(sr->payloadOffset, sr->payloadBytes);
+            out.push_back(std::move(lr));
+        }
     }
     return Status::success();
 }
