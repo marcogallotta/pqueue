@@ -293,18 +293,20 @@ ScenarioResult scenarioHttpOutboxDrainBacklog(std::uint32_t records, std::uint32
 // ---------------------------------------------------------------------------
 
 struct CompactionBurstResult {
-    std::uint32_t burstSize    = 0;
-    std::uint32_t payloadBytes = 0;
-    std::uint32_t cycles       = 0;
-    std::uint32_t compactions  = 0;
-    std::uint32_t noOps        = 0;
-    std::uint32_t maxOutSegs   = 0;
-    std::uint64_t maxLatencyUs = 0;
-    std::uint32_t deadlocks    = 0;
-    std::uint32_t capExhausted = 0;
-    std::uint32_t finalQSize   = 0;
+    std::uint32_t burstSize      = 0;
+    std::uint32_t payloadBytes   = 0;
+    std::uint32_t cycles         = 0;
+    std::uint32_t maxOutSegsLimit = 0;
+    std::uint32_t maxInSegsLimit  = 0;
+    std::uint32_t compactions    = 0;
+    std::uint32_t noOps          = 0;
+    std::uint32_t maxOutSegs     = 0;
+    std::uint64_t maxLatencyUs   = 0;
+    std::uint32_t deadlocks      = 0;
+    std::uint32_t capExhausted   = 0;
+    std::uint32_t finalQSize     = 0;
     FsCounters    fs;
-    bool          ok           = true;
+    bool          ok             = true;
 };
 
 namespace {
@@ -435,9 +437,11 @@ CompactionBurstResult scenarioCompactionBurst(
 
     pqueue::AppendLogStore store(cfg);
     CompactionBurstResult result;
-    result.burstSize    = burstSize;
-    result.payloadBytes = payloadBytes;
-    result.cycles       = cycles;
+    result.burstSize       = burstSize;
+    result.payloadBytes    = payloadBytes;
+    result.cycles          = cycles;
+    result.maxOutSegsLimit = maxOutputSegs;
+    result.maxInSegsLimit  = 0;
 
     if (!store.mount().ok()) { result.ok = false; return result; }
 
@@ -526,8 +530,8 @@ CompactionBurstResult scenarioCompactionBurst(
 }
 
 void printCompactionBurstResult(const CompactionBurstResult& r) {
-    std::printf("compaction_burst  burst=%u payload=%uB cycles=%u\n",
-        r.burstSize, r.payloadBytes, r.cycles);
+    std::printf("compaction_burst  burst=%u payload=%uB cycles=%u maxOutSegs=%u maxInSegs=%u\n",
+        r.burstSize, r.payloadBytes, r.cycles, r.maxOutSegsLimit, r.maxInSegsLimit);
     std::printf("  compactions=%-4u noOps=%-4u maxOutSegs=%-3u simMaxLatency=%.1fms\n",
         r.compactions, r.noOps, r.maxOutSegs,
         static_cast<double>(r.maxLatencyUs) / 1000.0);

@@ -121,6 +121,7 @@ private:
     Status scanSegments();
 
     bool needsCompaction() const;
+    void cleanupInputSegments(const CompactionRange& effectiveRange);
     void cleanupOneDanglingSegment();
     void cleanupAllDanglingSegments();
 

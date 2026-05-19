@@ -324,7 +324,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             return st;
         }
         CR_T0(ms_cleanup);
-        cleanupAllDanglingSegments();
+        cleanupInputSegments(effectiveRange);
         CR_T1(ms_cleanup);
 #ifdef ARDUINO
         logLine("ok(dead)");
@@ -421,9 +421,9 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         return st;
     }
 
-    // Phase: cleanup dangling input segments.
+    // Phase: cleanup input segments (known retired range, no listFiles needed).
     CR_T0(ms_cleanup);
-    cleanupAllDanglingSegments();
+    cleanupInputSegments(effectiveRange);
     CR_T1(ms_cleanup);
 
     // Phase: update in-RAM records to point at new segment generations.
@@ -525,6 +525,39 @@ bool AppendLogStore::needsCompaction() const {
     if (free < config_.minFreeBytes) return true;
 
     return false;
+}
+
+void AppendLogStore::cleanupInputSegments(const CompactionRange& effectiveRange) {
+    auto f = fs();
+    if (!f) return;
+#ifdef ARDUINO
+    std::uint32_t nDeleted = 0, nFailed = 0, bytesFreed = 0;
+#endif
+    for (std::uint32_t gen = effectiveRange.startGen; gen <= effectiveRange.endGen; ++gen) {
+        const std::string name = segmentName(gen);
+        auto sit = sealedSegmentBytes_.find(gen);
+        const std::uint32_t sz = sit != sealedSegmentBytes_.end() ? sit->second : 0;
+#ifdef ARDUINO
+        if (sz == 0 && sit == sealedSegmentBytes_.end()) {
+            Serial.printf("[cleanup] warn: gen=%u not in sealedSegmentBytes_\n", gen);
+        }
+#endif
+        if (f->removeFile(name).ok()) {
+            totalOnDiskBytes_ -= sz;
+            sealedSegmentBytes_.erase(gen);
+#ifdef ARDUINO
+            ++nDeleted; bytesFreed += sz;
+#endif
+        }
+#ifdef ARDUINO
+        else { ++nFailed; }
+#endif
+    }
+#ifdef ARDUINO
+    Serial.printf("[cleanup] deleted=%u failed=%u bytes=%u range=[%u,%u]\n",
+        nDeleted, nFailed, bytesFreed, effectiveRange.startGen, effectiveRange.endGen);
+    Serial.flush();
+#endif
 }
 
 void AppendLogStore::cleanupOneDanglingSegment() {

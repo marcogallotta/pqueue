@@ -42,6 +42,10 @@ Tail dependency guard: rotate-before-compact is suppressed when the active tail 
 
 `collectLiveRecords()` groups live records by segment generation and reads each segment file once with `readFile`, slicing payloads by offset. This replaced one `readAt` call per live record. With 66 live records across 8 input segments: 66 readAt calls -> 8 readFile calls.
 
+### Targeted input-segment cleanup (store)
+
+After a compaction publishes its manifest, the retired input segment files are known exactly (effectiveRange.startGen..effectiveRange.endGen). `cleanupInputSegments()` removes them directly by name, using `sealedSegmentBytes_` for size accounting. This replaced `cleanupAllDanglingSegments()` which called `listFiles()` once per compaction and `fileSize()` once per file. With N files in the directory at compaction time, the old path cost ~100ms + 12.5ms/file on device; the new path pays only removeFile (~24ms) per retired input segment, with no directory scan.
+
 ## Simulator
 
 `tools/pqueue_compaction_sim.cpp`. Build: `make -j12 sim`. Run: `./build/pqueue-compaction-sim`. Full sweep in ~2 seconds (in-memory FS, early abort at 1000 failures).
@@ -99,10 +103,12 @@ MaxLatency dominated by cleanup (77216ms) and preflight fileSize (1601ms). Both 
 
 Confirmed: cleanup and preflight fixed. MaxLatency dominated by collect (per-record readAt). Now fixed via bulk readFile in collectLiveRecords.
 
-**Run 4 (pending):** Re-run burst=500/pop=90%/rec=492B after bulk-read fix. Predicted MaxLatency: ~8.2s (profiler simMaxLatency=82ms x 100).
+**Run 4 (pending):** Re-run burst=500/pop=90%/rec=492B after bulk-read fix + targeted cleanup. Predicted MaxLatency: ~7.1s (profiler simMaxLatency=70.5ms x 100).
 
 ## Outstanding
 
-**Run 4 (on-device).** Validate collectLiveRecords bulk-read improvement on real LittleFS.
+**Run 4 (on-device).** Validate collectLiveRecords bulk-read + targeted cleanup improvements on real LittleFS.
+
+**Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]), which is blocked by the 4-range limit and would need a range-count increase or a two-phase approach. Until then, `maxOutputSegments` only limits compaction when the full chosen range exceeds the budget -- it does not truly cap the compaction work unit.
 
 **Future idea: cost-aware strategy.** Score ranges by `bytes_reclaimed / estimated_compaction_ms`, where estimated cost is derived from the latency model (readFile x readFileUs + writeFile x writeFileUs + listFiles x listFilesBaseUs + ...). Naturally avoids large nearly-live ranges when stall budget is tight. The posix profiler's latency model provides the per-op constants without on-device guesswork.
