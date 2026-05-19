@@ -70,6 +70,41 @@ inline void cleanSpool() {
     std::filesystem::remove_all(kSpoolDir, ec);
 }
 
+inline void resetSpool() {
+    cleanSpool();
+    std::filesystem::create_directories(kSpoolDir);
+}
+
+inline void plantManifest(const pqueue::append_log_detail::ManifestData& md) {
+    using namespace pqueue::append_log_detail;
+    std::vector<std::uint8_t> bytes;
+    serialiseManifest(md, bytes);
+    std::ofstream f(manifestSlotPath('a'), std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+inline void plantSegment(std::uint32_t gen, std::uint32_t firstSeq = 0, const std::string& body = "") {
+    using namespace pqueue::append_log_detail;
+    std::string seg = serializeSegmentHeader(gen, firstSeq);
+    seg += body;
+    std::ofstream f(segmentPath(gen), std::ios::binary | std::ios::trunc);
+    f.write(seg.data(), static_cast<std::streamsize>(seg.size()));
+}
+
+inline void storeEnqueue(pqueue::AppendLogStore& store, std::uint32_t seq, const std::string& payload) {
+    CHECK(store.writeRecord(seq, payload).ok());
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    CHECK(store.writeIndex(idx).ok());
+}
+
+inline void storePop(pqueue::AppendLogStore& store) {
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    idx.head++;
+    CHECK(store.writeIndex(idx).ok());
+}
+
 class FaultInjectingFs final : public pqueue::FileSystem {
 public:
     explicit FaultInjectingFs(std::shared_ptr<pqueue::FileSystem> inner)
