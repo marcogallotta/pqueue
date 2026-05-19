@@ -218,8 +218,12 @@ void test_compaction_burst_workload() {
         // Step 3: choose + narrow.
         std::uint32_t ms_choose = 0, ms_compact = 0;
         std::uint32_t chosen_s = 0, chosen_e = 0, target_s = 0, target_e = 0;
+        std::uint32_t chosen_inSegs = 0, chosen_predOut = 0;
+        std::uint32_t chosen_live = 0, chosen_total = 0;
+        float chosen_dead = 0.0f;
         bool did_narrow = false, did_compact = false;
         std::uint32_t outSegs = 0;
+        bool compact_noop = false;
 
         if (useful) {
             const std::uint32_t t0_choose = millis();
@@ -232,6 +236,13 @@ void test_compaction_burst_workload() {
                     if (rs.range.startGen == chosen_s && rs.range.endGen == chosen_e) {
                         cstat = &rs; break;
                     }
+                }
+                if (cstat) {
+                    chosen_inSegs  = cstat->inputSegCount;
+                    chosen_predOut = cstat->predictedOutputSegs();
+                    chosen_live    = cstat->liveBytes;
+                    chosen_total   = cstat->totalBytes;
+                    chosen_dead    = cstat->deadRatio();
                 }
                 const auto tgt = cstat ? narrowRange(*chosen, *cstat, store) : *chosen;
                 target_s = tgt.startGen; target_e = tgt.endGen;
@@ -253,7 +264,19 @@ void test_compaction_burst_workload() {
                     did_compact  = true;
                 } else {
                     ++noOps;
+                    compact_noop = true;
                 }
+
+                Serial.printf(
+                    "[tryCompact] chosen=[%u,%u] target=[%u,%u] "
+                    "in=%u predOut=%u live=%u total=%u dead=%u%% "
+                    "choose_ms=%u compact_ms=%u outSegs=%u %s\n",
+                    chosen_s, chosen_e, target_s, target_e,
+                    chosen_inSegs, chosen_predOut, chosen_live, chosen_total,
+                    static_cast<unsigned>(chosen_dead * 100.0f + 0.5f),
+                    ms_choose, ms_compact, outSegs,
+                    compact_noop ? "noOp" : "ok");
+                Serial.flush();
             }
         }
 
