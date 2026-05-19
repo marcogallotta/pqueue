@@ -121,6 +121,10 @@ The original compaction target is passed to `store.compactRange()` unchanged whe
 
 The preflight loop in `compactRange()` uses `sealedSegmentBytes_.find(gen)` instead of `fs()->fileSize()` per segment. `sealedSegmentBytes_` is kept in sync with all segment I/O and provides O(1) lookup; the previous fileSize() path was ~21ms per call on LittleFS.
 
+### Bulk segment reads in collectLiveRecords (store)
+
+`collectLiveRecords()` groups live records by segment generation and reads each segment file once with `readFile`, then slices payloads out of the buffer by offset. This replaced one `readAt` call per live record (~100ms each on LittleFS). With 66 live records across 8 input segments, the old path made 66 `readAt` calls; the new path makes 8 `readFile` calls.
+
 ## On-device validation
 
 ### Run 1: burst=100/pop=90%/rec=150B (5 cycles, HighestDeadRatio)
@@ -152,9 +156,20 @@ MaxLatency=82580ms was dominated by cleanup (77216ms) and preflight fileSize (16
   Deadlocks: 0  CapExhausted: 0  FinalQueueSize: 56
   PASS
 
-MaxLatency dropped from 82s to 10.6s. 0 deadlocks. O(1) cleanup and sealedSegmentBytes_ preflight confirmed working (pre_size_ms=0 throughout). MaxOutSegs=8 matches the kMaxOutputSegs budget.
+MaxLatency dropped from 82s to 10.6s. 0 deadlocks. O(1) cleanup and sealedSegmentBytes_ preflight confirmed working (pre_size_ms=0 throughout). MaxOutSegs=8 matches the kMaxOutputSegs budget. This run predates the collectLiveRecords bulk-read fix; a re-run is needed to confirm the new MaxLatency.
+
+### Posix profiler
+
+`tools/pqueue_profiling.cpp` has a `compaction` mode that runs the burst workload against an in-memory FS for fast iteration:
+
+  ./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles>
+  ./build/pqueue-profiling compaction 500 492 3
+
+On memory FS: maxLatency=0.2ms, readAt=0 (all reads via readFile), confirming the bulk-read optimization is active.
 
 ## Outstanding
+
+**Run 4 (on-device).** Re-run burst=500/pop=90%/rec=492B after collectLiveRecords bulk-read fix to confirm MaxLatency improvement on real LittleFS. collect_ms was ~2.7s in Run 2; expected to drop significantly.
 
 **Final strategy selection.** HighestDeadRatio and CostBenefit are functionally identical across all tested workloads. Pick one and remove the other from the sim.
 

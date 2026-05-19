@@ -1,4 +1,7 @@
 #include "counting_file_system.h"
+#include "memory_file_system.h"
+#include "pqueue/append_log_store.h"
+#include "pqueue/append_log_common.h"
 #include "pqueue/queue.h"
 #include "pqueue/outbox.h"
 #include "pqueue/http/outbox.h"
@@ -285,6 +288,238 @@ ScenarioResult scenarioHttpOutboxDrainBacklog(std::uint32_t records, std::uint32
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Compaction burst scenario
+// ---------------------------------------------------------------------------
+
+struct CompactionBurstResult {
+    std::uint32_t burstSize    = 0;
+    std::uint32_t payloadBytes = 0;
+    std::uint32_t cycles       = 0;
+    std::uint32_t compactions  = 0;
+    std::uint32_t noOps        = 0;
+    std::uint32_t maxOutSegs   = 0;
+    std::uint64_t maxLatencyUs = 0;
+    std::uint32_t deadlocks    = 0;
+    std::uint32_t capExhausted = 0;
+    std::uint32_t finalQSize   = 0;
+    FsCounters    fs;
+    bool          ok           = true;
+};
+
+namespace {
+
+struct CompactRangeStat {
+    pqueue::AppendLogStore::CompactionRange range;
+    std::uint32_t totalBytes    = 0;
+    std::uint32_t liveBytes     = 0;
+    std::uint32_t inputSegCount = 0;
+    std::uint32_t deadBytes() const { return totalBytes > liveBytes ? totalBytes - liveBytes : 0; }
+    float deadRatio() const {
+        return totalBytes > 0 ? static_cast<float>(deadBytes()) / static_cast<float>(totalBytes) : 0.0f;
+    }
+    std::uint32_t predictedOutputSegs(std::uint32_t maxSegBytes) const {
+        if (liveBytes == 0) return 0;
+        return (liveBytes + maxSegBytes - 1) / maxSegBytes;
+    }
+};
+
+std::vector<CompactRangeStat> buildCompactRangeStats(const pqueue::AppendLogStore& store) {
+    const auto& ranges   = store.manifestRanges();
+    const auto  segStats = store.segmentStats();
+    std::vector<CompactRangeStat> result;
+    for (const auto& r : ranges) {
+        CompactRangeStat rs;
+        rs.range = {r.startGen, r.endGen};
+        for (const auto& ss : segStats) {
+            if (ss.generation >= r.startGen && ss.generation <= r.endGen) {
+                rs.totalBytes    += ss.totalBytes;
+                rs.liveBytes     += ss.liveBytes;
+                rs.inputSegCount += 1;
+            }
+        }
+        result.push_back(rs);
+    }
+    return result;
+}
+
+std::optional<pqueue::AppendLogStore::CompactionRange> chooseHighestDeadRatioCompact(
+    const std::vector<CompactRangeStat>& stats)
+{
+    if (stats.empty()) return std::nullopt;
+    auto best = std::max_element(stats.begin(), stats.end(),
+        [](const CompactRangeStat& a, const CompactRangeStat& b) {
+            return a.deadRatio() < b.deadRatio();
+        });
+    if (best->deadBytes() == 0) return std::nullopt;
+    return best->range;
+}
+
+pqueue::AppendLogStore::CompactionRange narrowCompactRange(
+    const pqueue::AppendLogStore::CompactionRange& range,
+    const CompactRangeStat& rs,
+    const pqueue::AppendLogStore& store,
+    std::uint32_t maxSegBytes,
+    std::uint32_t maxOutputSegs)
+{
+    if (rs.predictedOutputSegs(maxSegBytes) <= maxOutputSegs) return range;
+
+    const auto allSegs = store.segmentStats();
+    std::vector<pqueue::AppendLogStore::SegmentStat> segs;
+    for (const auto& ss : allSegs) {
+        if (ss.generation >= range.startGen && ss.generation <= range.endGen)
+            segs.push_back(ss);
+    }
+    std::sort(segs.begin(), segs.end(),
+        [](const auto& a, const auto& b) { return a.generation < b.generation; });
+
+    pqueue::AppendLogStore::CompactionRange best = {segs.front().generation, segs.front().generation};
+    float bestDead = -1.0f;
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        std::uint32_t live = 0, total = 0;
+        for (std::size_t j = i; j < segs.size(); ++j) {
+            live  += segs[j].liveBytes;
+            total += segs[j].totalBytes;
+            const std::uint32_t out = live == 0 ? 0u : (live + maxSegBytes - 1) / maxSegBytes;
+            if (out > maxOutputSegs) break;
+            const float dr = total > 0 ? static_cast<float>(total - live) / static_cast<float>(total) : 0.0f;
+            if (dr > bestDead) { bestDead = dr; best = {segs[i].generation, segs[j].generation}; }
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+CompactionBurstResult scenarioCompactionBurst(
+    std::uint32_t burstSize,
+    std::uint32_t payloadBytes,
+    std::uint32_t cycles,
+    std::uint32_t maxOutputSegs = 8,
+    float deadRatioTrigger = 0.10f,
+    std::uint32_t rangePressureTrigger = 3)
+{
+    constexpr std::uint32_t kMaxSegmentBytes = 4096;
+    constexpr std::uint32_t kMaxTotalBytes   = 1024 * 1024;
+
+    auto memFs    = std::make_shared<MemoryFileSystem>();
+    auto counting = std::make_shared<CountingFileSystem>(memFs);
+
+    pqueue::AppendLogConfig cfg;
+    cfg.basePath        = "/compact_prof";
+    cfg.backend         = pqueue::StorageBackend::Posix;
+    cfg.maxSegmentBytes = kMaxSegmentBytes;
+    cfg.maxSegments     = 200;
+    cfg.maxTotalBytes   = kMaxTotalBytes;
+    cfg.minFreeBytes    = 0;
+    cfg.fileSystem      = counting;
+
+    pqueue::AppendLogStore store(cfg);
+    CompactionBurstResult result;
+    result.burstSize    = burstSize;
+    result.payloadBytes = payloadBytes;
+    result.cycles       = cycles;
+
+    if (!store.mount().ok()) { result.ok = false; return result; }
+
+    const std::string payload(payloadBytes, 'x');
+    std::uint32_t nextSeq      = 1;
+    std::uint32_t queueSize    = 0;
+    std::uint32_t prevSegCount = 0;
+    std::uint32_t prevRangeCount = 0;
+
+    auto checkAndCompact = [&]() {
+        const auto& ranges = store.manifestRanges();
+        std::uint32_t logicalSegs = 1;
+        for (const auto& r : ranges) logicalSegs += r.endGen - r.startGen + 1;
+        const std::uint32_t rangeCount = static_cast<std::uint32_t>(ranges.size());
+        const bool changed  = logicalSegs != prevSegCount || rangeCount != prevRangeCount;
+        const bool pressure = rangeCount >= rangePressureTrigger;
+        prevSegCount   = logicalSegs;
+        prevRangeCount = rangeCount;
+        if (!changed) return;
+
+        const auto rangeStats = buildCompactRangeStats(store);
+        bool useful = false;
+        for (const auto& rs : rangeStats) {
+            if (rs.deadRatio() >= deadRatioTrigger) { useful = true; break; }
+            if (pressure && rs.predictedOutputSegs(kMaxSegmentBytes) < rs.inputSegCount) { useful = true; break; }
+        }
+        if (!useful) return;
+
+        const auto chosen = chooseHighestDeadRatioCompact(rangeStats);
+        if (!chosen) return;
+
+        const CompactRangeStat* cstat = nullptr;
+        for (const auto& rs : rangeStats) {
+            if (rs.range.startGen == chosen->startGen && rs.range.endGen == chosen->endGen) {
+                cstat = &rs; break;
+            }
+        }
+        const auto target = cstat ? narrowCompactRange(*chosen, *cstat, store, kMaxSegmentBytes, maxOutputSegs) : *chosen;
+
+        std::uint32_t outSegs = 0;
+        const auto t0 = Clock::now();
+        const auto st = store.compactRange(target, &outSegs);
+        const auto us = std::chrono::duration<double, std::micro>(Clock::now() - t0).count();
+
+        if (st.ok() && !st.isNoOp()) {
+            ++result.compactions;
+            result.maxOutSegs   = std::max(result.maxOutSegs, outSegs);
+            result.maxLatencyUs = std::max(result.maxLatencyUs, static_cast<std::uint64_t>(us));
+        } else {
+            ++result.noOps;
+        }
+    };
+
+    for (std::uint32_t cycle = 0; cycle < cycles; ++cycle) {
+        for (std::uint32_t i = 0; i < burstSize; ++i) {
+            const auto st = store.writeRecord(nextSeq, payload);
+            if (st.ok()) {
+                pqueue::FileStoreIndex dummy;
+                store.writeIndex(dummy);
+                ++nextSeq;
+                ++queueSize;
+            } else {
+                bool reclaimable = false;
+                for (const auto& rs : buildCompactRangeStats(store))
+                    if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
+                if (reclaimable) ++result.deadlocks;
+                else             ++result.capExhausted;
+            }
+            checkAndCompact();
+        }
+        const std::uint32_t toPop = static_cast<std::uint32_t>(static_cast<float>(queueSize) * 0.90f);
+        for (std::uint32_t i = 0; i < toPop; ++i) {
+            pqueue::FileStoreIndex idx;
+            if (store.readIndex(idx).ok() && idx.count > 0) {
+                idx.head++; idx.count--;
+                store.writeIndex(idx);
+                --queueSize;
+            }
+            checkAndCompact();
+        }
+    }
+
+    result.finalQSize = queueSize;
+    result.fs = counting->counters();
+    return result;
+}
+
+void printCompactionBurstResult(const CompactionBurstResult& r) {
+    std::printf("compaction_burst  burst=%u payload=%uB cycles=%u\n",
+        r.burstSize, r.payloadBytes, r.cycles);
+    std::printf("  compactions=%-4u noOps=%-4u maxOutSegs=%-3u maxLatency=%.1fms\n",
+        r.compactions, r.noOps, r.maxOutSegs,
+        static_cast<double>(r.maxLatencyUs) / 1000.0);
+    std::printf("  deadlocks=%-4u capExhausted=%-4u finalQ=%-4u\n",
+        r.deadlocks, r.capExhausted, r.finalQSize);
+    std::printf("  readFile=%-6lu readAt=%-6lu writeFile=%-6lu listFiles=%-6lu removeFile=%-6lu\n",
+        (unsigned long)r.fs.readFile, (unsigned long)r.fs.readAt, (unsigned long)r.fs.writeFile,
+        (unsigned long)r.fs.listFiles, (unsigned long)r.fs.removeFile);
+    if (!r.ok) std::printf("  FAILED: mount error\n");
+}
+
 void printHeader() {
     std::cout << std::left
               << std::setw(24) << "scenario"
@@ -361,7 +596,7 @@ int main(int argc, char** argv) {
     const std::uint32_t records = argc >= 3 ? static_cast<std::uint32_t>(std::strtoul(argv[2], nullptr, 10)) : 500;
     const std::uint32_t payloadBytes = argc >= 4 ? static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10)) : 256;
 
-    if (mode != "queue" && mode != "validate" && mode != "outbox" && mode != "all") {
+    if (mode != "queue" && mode != "validate" && mode != "outbox" && mode != "all" && mode != "compaction") {
         usage(argv[0]);
         return 2;
     }
@@ -377,6 +612,12 @@ int main(int argc, char** argv) {
     if (mode == "outbox" || mode == "all") {
         results.push_back(scenarioHttpOutboxOfflineSubmit(records, payloadBytes));
         results.push_back(scenarioHttpOutboxDrainBacklog(records, payloadBytes));
+    }
+
+    if (mode == "compaction") {
+        const std::uint32_t cycles = argc >= 5 ? static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 10)) : 3;
+        printCompactionBurstResult(scenarioCompactionBurst(records, payloadBytes, cycles));
+        return 0;
     }
 
     printHeader();

@@ -81,7 +81,7 @@ profiling: $(PROFILING_TARGET)
 
 $(PROFILING_TARGET): tools/pqueue_profiling.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -Itools $^ -o $@ $(LDFLAGS)
 
 sim: $(SIM_TARGET)
 
