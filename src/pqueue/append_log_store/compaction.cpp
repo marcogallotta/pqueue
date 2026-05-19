@@ -465,22 +465,74 @@ void AppendLogStore::cleanupOneDanglingSegment() {
     auto f = fs();
     if (!f) return;
 
+#ifdef ARDUINO
+    const std::uint32_t t_cl_start = millis();
+    std::uint32_t ms_list = 0, ms_scan = 0, ms_size = 0, ms_remove = 0;
+    std::uint32_t _t0 = millis();
+#endif
+
     std::vector<std::string> files;
     if (!f->listFiles(files).ok()) return;
+#ifdef ARDUINO
+    ms_list = millis() - _t0;
+    _t0 = millis();
+#endif
 
+    // Find the first dangling segment (not in activeGenerations_).
+    std::string dangling;
     for (const auto& name : files) {
         std::uint32_t gen = 0;
         if (!isSegmentName(name, gen)) continue;
         const bool live = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
                           != activeGenerations_.end();
-        if (live) continue;
-        std::uint64_t sz = 0;
-        f->fileSize(name, sz);
-        if (f->removeFile(name).ok()) {
-            totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
+        if (!live) { dangling = name; break; }
+    }
+#ifdef ARDUINO
+    ms_scan = millis() - _t0;
+#endif
+
+    if (dangling.empty()) {
+#ifdef ARDUINO
+        const std::uint32_t ms_total = millis() - t_cl_start;
+        if (ms_total > 50) {
+            Serial.printf("[cleanup] none list_ms=%u scan_ms=%u total_ms=%u\n",
+                ms_list, ms_scan, ms_total);
+            Serial.flush();
         }
+#endif
         return;
     }
+
+#ifdef ARDUINO
+    _t0 = millis();
+#endif
+    std::uint64_t sz = 0;
+    f->fileSize(dangling, sz);
+#ifdef ARDUINO
+    ms_size = millis() - _t0;
+    _t0 = millis();
+#endif
+    const bool removed = f->removeFile(dangling).ok();
+#ifdef ARDUINO
+    ms_remove = millis() - _t0;
+#endif
+    if (removed) {
+        totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
+    }
+
+#ifdef ARDUINO
+    const std::uint32_t ms_total = millis() - t_cl_start;
+    if (ms_total > 50 || removed) {
+        if (removed) {
+            Serial.printf("[cleanup] deleted=%s list_ms=%u scan_ms=%u size_ms=%u remove_ms=%u total_ms=%u\n",
+                dangling.c_str(), ms_list, ms_scan, ms_size, ms_remove, ms_total);
+        } else {
+            Serial.printf("[cleanup] rm-failed=%s list_ms=%u scan_ms=%u size_ms=%u remove_ms=%u total_ms=%u\n",
+                dangling.c_str(), ms_list, ms_scan, ms_size, ms_remove, ms_total);
+        }
+        Serial.flush();
+    }
+#endif
 }
 
 } // namespace pqueue

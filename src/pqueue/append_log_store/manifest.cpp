@@ -55,6 +55,12 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
         return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
     };
 
+#ifdef ARDUINO
+    const std::uint32_t t_pub_start = millis();
+    std::uint32_t ms_probe = 0, ms_serial = 0, ms_write = 0, ms_apply = 0, ms_cleanup = 0;
+    std::uint32_t _t0 = millis();
+#endif
+
     const bool existsA = fileExists(kManifestSlotA);
     const bool existsB = fileExists(kManifestSlotB);
     ManifestData mdA, mdB;
@@ -63,6 +69,9 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
 
     const char* writeSlot = chooseInactiveSlot(existsA, validA, mdA.epoch,
                                                 existsB, validB, mdB.epoch);
+#ifdef ARDUINO
+    ms_probe = millis() - _t0;
+#endif
     if (!writeSlot) {
         return Status::failure(StatusCode::DataCorrupt, "manifest slot(s) exist but none are valid");
     }
@@ -74,17 +83,40 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     ManifestData toWrite = manifest;
     toWrite.epoch = winningEpoch + 1;
 
+#ifdef ARDUINO
+    _t0 = millis();
+#endif
     std::vector<std::uint8_t> bytes;
     serialiseManifest(toWrite, bytes);
     const std::string data(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+#ifdef ARDUINO
+    ms_serial = millis() - _t0;
+    _t0 = millis();
+#endif
 
-    // Only the inactive slot is written. A partial write leaves that slot corrupt
-    // (fails CRC on next parse); the active slot remains the election winner on remount.
     Status st = f->writeFile(writeSlot, data);
+#ifdef ARDUINO
+    ms_write = millis() - _t0;
+#endif
     if (!st.ok()) return st;
 
+#ifdef ARDUINO
+    _t0 = millis();
+#endif
     applyManifestToRam(toWrite);
+#ifdef ARDUINO
+    ms_apply = millis() - _t0;
+    _t0 = millis();
+#endif
+
     cleanupOneDanglingSegment();
+#ifdef ARDUINO
+    ms_cleanup = millis() - _t0;
+    Serial.printf("[publishManifest] slot=%s probe_ms=%u serial_ms=%u write_ms=%u apply_ms=%u cleanup_ms=%u total_ms=%u\n",
+        writeSlot, ms_probe, ms_serial, ms_write, ms_apply, ms_cleanup, millis() - t_pub_start);
+    Serial.flush();
+#endif
+
     return Status::success();
 }
 
