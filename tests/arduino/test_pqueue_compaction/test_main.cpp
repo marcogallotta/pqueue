@@ -322,10 +322,18 @@ void test_compaction_burst_workload() {
             if (st.ok()) {
                 pqueue::FileStoreIndex dummy;
                 t0 = millis();
-                store.writeIndex(dummy);
+                const auto idxSt = store.writeIndex(dummy);
                 t_widx += millis() - t0;
-                ++nextSeq;
-                ++queueSize;
+                if (idxSt.ok()) {
+                    ++nextSeq;
+                    ++queueSize;
+                } else {
+                    Serial.printf("[enq] writeIndex failed: code=%d ranges=%u q=%u\n",
+                        static_cast<int>(idxSt.code()),
+                        static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
+                        queueSize);
+                    Serial.flush();
+                }
             } else {
                 bool reclaimable = false;
                 for (const auto& rs : buildRangeStats(store)) {
@@ -351,9 +359,17 @@ void test_compaction_burst_workload() {
                 idx.head++;
                 idx.count--;
                 t0 = millis();
-                store.writeIndex(idx);
+                const auto idxSt = store.writeIndex(idx);
                 t_widx += millis() - t0;
-                --queueSize;
+                if (idxSt.ok()) {
+                    --queueSize;
+                } else {
+                    Serial.printf("[pop] writeIndex failed: code=%d ranges=%u q=%u\n",
+                        static_cast<int>(idxSt.code()),
+                        static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
+                        queueSize);
+                    Serial.flush();
+                }
             }
             checkAndCompact();
         }
