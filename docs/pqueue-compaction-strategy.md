@@ -72,13 +72,13 @@ Compaction trigger: rising-edge on segment count (new segment written), fires if
 
 Simulated latency model (`littleFsSimLatency()`, scaled 100x from observed device timings):
 
-  readFile/readAt: 500us   (~50ms on device, open+read+close)
-  writeFile:       2000us fixed + 750us/KB  (~200ms + ~75ms/KB on device)
-  writeAt:         200us   (~20ms on device)
-  removeFile:      240us   (~24ms on device)
-  listFiles:       1000us base + 125us/file (~100ms + ~12.5ms/file on device)
+  readFile/readAt: 345us   (~35ms on device, open+read+close)
+  writeFile:       1380us fixed + 518us/KB  (~138ms + ~52ms/KB on device)
+  writeAt:         138us   (~14ms on device)
+  removeFile:      166us   (~17ms on device)
+  listFiles:       690us base + 86us/file  (~69ms + ~8.6ms/file on device)
 
-writeFile and listFiles use variable costs because data size and directory size affect LittleFS GC pressure and scan time. The model is calibrated: simMaxLatency x 100 matches measured on-device MaxLatency within ~10%.
+writeFile and listFiles use variable costs because data size and directory size affect LittleFS GC pressure and scan time. Calibrated from Run 4 (burst=500/pop=90%/rec=492B): simMaxLatency=48.6ms x 100 = 4860ms vs actual 4861ms. Prior constants overestimated by ~45% for write-heavy workloads; rescaled uniformly by 0.69. Individual op multipliers may differ -- next calibration round should measure ops independently.
 
 ## On-device validation
 
@@ -124,11 +124,9 @@ Enqueue is driven by backend failures: either brief and intermittent, or a susta
 
 ## Planned work
 
-**1. Recalibrate profiler constants.** Run 4 shows actual latency ~69x simMaxLatency (4861ms / 70.5ms) for write-heavy compaction, not the assumed 100x. The x100 factor was derived when listFiles and per-record readAt dominated; now that writeFile dominates, the model is conservative. Measure individual op costs on device (writeFile fixed cost, writeFile per-KB, readFile, removeFile) and update `littleFsSimLatency()` before the next latency optimisation round.
+**1. Idle/drain-boundary compaction hook.** Dead data is created during drain (pops) but compaction currently waits until the next enqueue triggers write-path pressure. The next enqueue burst then inherits the stall -- exactly the wrong phase. The fix is to compact at the boundary after drain completes, not reactively during enqueue. Add a `compactIdle(maxSteps)` entry point the application can call when it knows the drain is done and the backend has recovered. This is lower risk than compacting on every pop (which could make drain latency unpredictable) and directly implements the clean-storage invariant: store is clean before the next enqueue burst, so the burst never stalls. The existing `compactFull()` is almost this; the missing piece is (a) a step budget so it can be called safely with a time constraint, and (b) documentation/guidance for callers.
 
-**2. Idle/drain-boundary compaction hook.** Dead data is created during drain (pops) but compaction currently waits until the next enqueue triggers write-path pressure. The next enqueue burst then inherits the stall -- exactly the wrong phase. The fix is to compact at the boundary after drain completes, not reactively during enqueue. Add a `compactIdle(maxSteps)` entry point the application can call when it knows the drain is done and the backend has recovered. This is lower risk than compacting on every pop (which could make drain latency unpredictable) and directly implements the clean-storage invariant: store is clean before the next enqueue burst, so the burst never stalls. The existing `compactFull()` is almost this; the missing piece is (a) a step budget so it can be called safely with a time constraint, and (b) documentation/guidance for callers.
-
-**3. Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]). This is feasible within the current 4-range limit when range count is 1-2 (the split stays within budget); at 3-4 ranges the split is blocked and falls back to full-range compaction. Gate on `(currentRangeCount + 2) <= kManifestMaxRanges` before committing a split. No manifest format change needed for the common case. Address this after the idle-compaction hook; if the hook keeps storage clean, the worst-case enqueue stall may already be acceptable.
+**2. Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]). This is feasible within the current 4-range limit when range count is 1-2 (the split stays within budget); at 3-4 ranges the split is blocked and falls back to full-range compaction. Gate on `(currentRangeCount + 2) <= kManifestMaxRanges` before committing a split. No manifest format change needed for the common case. Address this after the idle-compaction hook; if the hook keeps storage clean, the worst-case enqueue stall may already be acceptable.
 
 ## Future work
 

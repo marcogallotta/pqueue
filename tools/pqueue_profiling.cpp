@@ -394,19 +394,23 @@ pqueue::AppendLogStore::CompactionRange narrowCompactRange(
 } // namespace
 
 // LittleFS observed timings scaled down 100x for fast simulation.
-// readFile and readAt both model open+read+close on LittleFS (~50ms each).
-// writeFile: ~200ms fixed metadata/GC cost + ~75ms per KB of data written.
-// listFiles: ~100ms base + ~12.5ms per file in the directory.
+// Calibrated from Run 4 (burst=500/pop=90%/rec=492B/cycles=3):
+//   simMaxLatency=48.6ms x 100 = 4860ms, actual MaxLatency=4861ms.
+// Previous constants (pre-Run4) used a uniform ~50ms/op estimate and
+// overestimated by ~45% for write-heavy workloads. Rescaled by 0.69.
+// readFile and readAt model open+read+close on LittleFS (~35ms each).
+// writeFile: ~140ms fixed metadata/GC cost + ~52ms per KB of data written.
+// listFiles: ~70ms base + ~9ms per file in the directory.
 inline FsLatency littleFsSimLatency() {
     FsLatency lat;
-    lat.readFileUs        = 500;   // ~50ms on device
-    lat.readAtUs          = 500;   // ~50ms on device
-    lat.writeFileFixedUs  = 2000;  // ~200ms fixed create/metadata cost
-    lat.writeFilePerKbUs  = 750;   // ~75ms per KB written
-    lat.writeAtUs         = 200;   // ~20ms on device
-    lat.removeFileUs      = 240;   // ~24ms on device
-    lat.listFilesBaseUs   = 1000;  // ~100ms base cost
-    lat.listFilesPerFileUs = 125;  // ~12.5ms per file (1100ms / 80 files typical)
+    lat.readFileUs        = 345;   // ~35ms on device
+    lat.readAtUs          = 345;   // ~35ms on device
+    lat.writeFileFixedUs  = 1380;  // ~138ms fixed create/metadata cost
+    lat.writeFilePerKbUs  = 518;   // ~52ms per KB written
+    lat.writeAtUs         = 138;   // ~14ms on device
+    lat.removeFileUs      = 166;   // ~17ms on device
+    lat.listFilesBaseUs   = 690;   // ~69ms base cost
+    lat.listFilesPerFileUs = 86;   // ~8.6ms per file
     return lat;
 }
 
