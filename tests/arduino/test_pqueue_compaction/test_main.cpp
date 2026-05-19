@@ -329,7 +329,7 @@ void test_compaction_burst_workload() {
                     ++queueSize;
                 } else {
                     Serial.printf("[enq] writeIndex failed: code=%d ranges=%u q=%u\n",
-                        static_cast<int>(idxSt.code()),
+                        static_cast<int>(idxSt.code),
                         static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
                         queueSize);
                     Serial.flush();
@@ -365,7 +365,7 @@ void test_compaction_burst_workload() {
                     --queueSize;
                 } else {
                     Serial.printf("[pop] writeIndex failed: code=%d ranges=%u q=%u\n",
-                        static_cast<int>(idxSt.code()),
+                        static_cast<int>(idxSt.code),
                         static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
                         queueSize);
                     Serial.flush();

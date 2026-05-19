@@ -376,8 +376,8 @@ Status AppendLogStore::rotateSegment() {
     manifest.nextGeneration = newGen + 1;
     st = publishManifest(manifest);
 #ifdef ARDUINO
-    Serial.printf("[rotate] old=%u new=%u merged=%u create_ms=%u probe_ms=%u write_ms=%u total_ms=%u\n",
-        oldTailGen, newGen, static_cast<unsigned>(merged),
+    Serial.printf("[rotate] old=%u new=%u create_ms=%u probe_ms=%u write_ms=%u total_ms=%u\n",
+        oldTailGen, newGen,
         ms_create, dbgLastProbeMs_, dbgLastWriteMs_, millis() - t_rot_start);
     Serial.flush();
 #endif
