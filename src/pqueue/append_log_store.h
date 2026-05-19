@@ -5,6 +5,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "append_log_common.h"
@@ -137,6 +138,10 @@ private:
     std::uint32_t activeSegmentBytes_ = 0;
     std::uint32_t totalOnDiskBytes_ = 0; // all seg-*.bin files, including dangling
     std::uint32_t nextGeneration_ = 1;
+
+    // Total bytes per sealed segment generation. Populated at mount, updated on
+    // rotate/compaction output/cleanup. Lets segmentStats() avoid fileSize() calls.
+    std::unordered_map<std::uint32_t, std::uint32_t> sealedSegmentBytes_;
 
     // Logical active segment order (matches replay order from scanSegments)
     std::vector<std::uint32_t> activeGenerations_;

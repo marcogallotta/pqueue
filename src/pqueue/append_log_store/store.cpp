@@ -154,6 +154,7 @@ Status AppendLogStore::scanSegments() {
 
     records_.clear();
     activeGenerations_.clear();
+    sealedSegmentBytes_.clear();
     activeGeneration_ = 0;
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
@@ -319,7 +320,9 @@ Status AppendLogStore::scanSegments() {
         std::uint64_t sz = 0;
         Status szSt = f->fileSize(segmentName(gen), sz);
         if (!szSt.ok()) return szSt;
-        totalOnDiskBytes_ += static_cast<std::uint32_t>(sz);
+        const auto szU = static_cast<std::uint32_t>(sz);
+        totalOnDiskBytes_ += szU;
+        sealedSegmentBytes_[gen] = szU;
     }
 
     cleanupOneDanglingSegment();
@@ -353,6 +356,8 @@ Status AppendLogStore::rotateSegment() {
         return Status::failure(StatusCode::RangeLimitExceeded,
             "segment range limit exceeded; compaction required before rollover");
     }
+
+    if (oldTailGen != 0) sealedSegmentBytes_[oldTailGen] = activeSegmentBytes_;
 
     const std::uint32_t baseSeq = records_.empty() ? 0 : records_.back().sequence + 1;
     Status st = createSegment(newGen, baseSeq);
@@ -471,6 +476,8 @@ Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const st
     const auto oldSz = static_cast<std::uint32_t>(oldSize);
     if (newSz >= oldSz) totalOnDiskBytes_ += newSz - oldSz;
     else                totalOnDiskBytes_ -= oldSz - newSz;
+    std::uint32_t gen = 0;
+    if (isSegmentName(name, gen)) sealedSegmentBytes_[gen] = newSz;
     return Status::success();
 }
 

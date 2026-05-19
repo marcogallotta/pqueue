@@ -90,9 +90,8 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
             stat.generation = gen;
             auto it = liveByGen.find(gen);
             stat.liveBytes = kSegmentHeaderBytes + (it != liveByGen.end() ? it->second : 0);
-            std::uint64_t size = 0;
-            fs_->fileSize(segmentName(gen), size); // missing file == 0 bytes
-            stat.totalBytes = static_cast<std::uint32_t>(size);
+            auto sit = sealedSegmentBytes_.find(gen);
+            stat.totalBytes = sit != sealedSegmentBytes_.end() ? sit->second : 0;
             result.push_back(stat);
         }
     }
@@ -522,6 +521,8 @@ void AppendLogStore::cleanupOneDanglingSegment() {
 #endif
     if (removed) {
         totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
+        std::uint32_t gen = 0;
+        if (isSegmentName(dangling, gen)) sealedSegmentBytes_.erase(gen);
     }
 
 #ifdef ARDUINO
