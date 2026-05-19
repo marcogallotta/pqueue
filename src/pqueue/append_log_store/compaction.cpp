@@ -1,6 +1,10 @@
 #include "pqueue/append_log_store.h"
 #include "pqueue/append_log_common.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>

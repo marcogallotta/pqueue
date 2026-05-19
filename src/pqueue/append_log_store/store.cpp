@@ -1,6 +1,10 @@
 #include "pqueue/append_log_store.h"
 #include "pqueue/append_log_common.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
@@ -501,11 +505,11 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 #endif
 
 #ifdef ARDUINO
-    { const std::uint32_t _t = millis();
+    const std::uint32_t _t_ensure = millis();
 #endif
     Status st = ensureMounted();
 #ifdef ARDUINO
-    ms_ensure = millis() - _t; }
+    ms_ensure = millis() - _t_ensure;
 #endif
     if (!st.ok()) return st;
 
@@ -578,11 +582,11 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     }
 
 #ifdef ARDUINO
-    { const std::uint32_t _t = millis();
+    const std::uint32_t _t_ensure_seg = millis();
 #endif
     Status est = ensureActiveSegment(sequence);
 #ifdef ARDUINO
-    ms_ensure_seg = millis() - _t; }
+    ms_ensure_seg = millis() - _t_ensure_seg;
 #endif
     if (!est.ok()) return diagnostic(Severity::Error, est, "writeRecord");
 
@@ -590,11 +594,11 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     const std::string eventData = serializeEnqueueEvent(sequence, record);
 
 #ifdef ARDUINO
-    { const std::uint32_t _t = millis();
+    const std::uint32_t _t_append = millis();
 #endif
     Status ast = appendEnqueueEventBytes(eventData);
 #ifdef ARDUINO
-    ms_append = millis() - _t; }
+    ms_append = millis() - _t_append;
 #endif
     if (!ast.ok()) return diagnostic(Severity::Error, ast, "writeRecord");
 
