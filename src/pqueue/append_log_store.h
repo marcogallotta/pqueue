@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "append_log_common.h"
@@ -165,6 +166,12 @@ private:
 
     // In-order live records (front = queue head)
     std::deque<SegmentRecord> records_;
+
+    // Set false on mount (history unknown). Set true with empty set by rotateSegment /
+    // ensureActiveSegment. Guards whether activeTailAffectedGenerations_ is trustworthy.
+    bool activeTailDependenciesTracked_ = false;
+    // Source segment generations touched by POP/REWRITE events in the active tail.
+    std::unordered_set<std::uint32_t> activeTailAffectedGenerations_;
 
     // One past the highest sequence seen during replay; preserved so an emptied
     // queue does not reset to sequence 0 on remount.

@@ -305,34 +305,40 @@ TEST_CASE("compaction: collectLiveRecords returns rewritten payload, not origina
 }
 
 TEST_CASE("compaction: multi-segment output compacts range when output count < input count") {
-    // range {1,3} = 3 input segments; records 1,2 popped → 4 live records fit in 2 output
-    // segments. 2 < 3 → compaction proceeds with multi-segment output.
-    plantLayout({
-        .ranges = {{1, 3}}, .tail = 4, .next = 5,
-        .segments = {
-            {1, 1, serializeEnqueueEvent(1,"a")+serializeEnqueueEvent(2,"b")},
-            {2, 3, serializeEnqueueEvent(3,"c")+serializeEnqueueEvent(4,"d")},
-            {3, 5, serializeEnqueueEvent(5,"e")+serializeEnqueueEvent(6,"f")},
-            {4, 7, serializePopEvent(1)+serializePopEvent(2)},
-        },
-    });
+    // Build state via live ops so activeTailDependenciesTracked_=true when compaction runs.
+    // 6 one-byte records fill segs 1-3 (2 per seg at maxSegmentBytes=70). Popping records
+    // 1+2 triggers rotation (seg 3 is full) → pop events land in seg 4. Affected gens={1}.
+    // Compact range {1,3}: tail is contiguous and gen 1 ∈ [1,4] → rotate-before-compact
+    // fires → effective range {1,4}, 4 live records → 2 output segs. 2 < 4 → proceeds.
+    resetSpool();
 
     auto cfg = makeStoreConfig();
-    cfg.maxSegmentBytes = 70;
+    cfg.maxSegmentBytes = 70; // 20-byte header + 2×25-byte enqueue events = exactly 2 records
     pqueue::AppendLogStore store(cfg);
-    CHECK(store.mount().ok());
+    REQUIRE(store.mount().ok());
+
+    storeEnqueue(store, 1, "a");
+    storeEnqueue(store, 2, "b");
+    storeEnqueue(store, 3, "c");
+    storeEnqueue(store, 4, "d");
+    storeEnqueue(store, 5, "e");
+    storeEnqueue(store, 6, "f");
+    storePop(store); // seg 3 full → rotation → pop for seq 1 lands in seg 4; affected={1}
+    storePop(store); // pop for seq 2 lands in seg 4; affected={1} (unchanged)
+
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    REQUIRE_EQ(store.manifestRanges()[0].startGen, 1u);
+    REQUIRE_EQ(store.manifestRanges()[0].endGen, 3u);
 
     auto st = store.compactOneSegment();
     CHECK(st.ok());
     CHECK_FALSE(st.isNoOp());
 
-    // rotate-before-compact seals tail gen=4 → {1,4}; new tail=gen=5, nextGen=6.
-    // Compact {1,4} → two output segs gen=6, gen=7.
-    CHECK(std::filesystem::exists(segmentPath(6)));
-    CHECK(std::filesystem::exists(segmentPath(7)));
+    // rotate-before-compact fired: seals gen 4 → range {1,4}, new tail=gen 5, nextGen=6.
+    // 4 live records → 2 output segs at gen 6 and gen 7. Result: range {6,7}.
     REQUIRE_EQ(store.manifestRanges().size(), 1u);
     CHECK_EQ(store.manifestRanges()[0].startGen, 6u);
-    CHECK_EQ(store.manifestRanges()[0].endGen,   7u);
+    CHECK_EQ(store.manifestRanges()[0].endGen, 7u);
 
     expectRecords(store, {{3,"c"},{4,"d"},{5,"e"},{6,"f"}});
 }

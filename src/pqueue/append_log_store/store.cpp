@@ -327,6 +327,8 @@ Status AppendLogStore::scanSegments() {
         sealedSegmentBytes_[gen] = szU;
     }
 
+    activeTailDependenciesTracked_ = false;
+    activeTailAffectedGenerations_.clear();
     cleanupOneDanglingSegment();
     return Status::success();
 }
@@ -383,6 +385,8 @@ Status AppendLogStore::rotateSegment() {
 
     activeGeneration_    = newGen;
     activeSegmentBytes_  = kSegmentHeaderBytes;
+    activeTailDependenciesTracked_ = true;
+    activeTailAffectedGenerations_.clear();
     return Status::success();
 }
 
@@ -402,6 +406,8 @@ Status AppendLogStore::ensureActiveSegment(std::uint32_t baseSeq) {
         // RAM updated only after durable manifest publish.
         activeGeneration_   = newGen;
         activeSegmentBytes_ = kSegmentHeaderBytes;
+        activeTailDependenciesTracked_ = true;
+        activeTailAffectedGenerations_.clear();
         return Status::success();
     }
     return Status::success();
@@ -457,6 +463,9 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     // Update RAM state for rewritten record
     for (auto& r : records_) {
         if (r.sequence == sequence) {
+            if (activeTailDependenciesTracked_) {
+                activeTailAffectedGenerations_.insert(r.segmentGeneration);
+            }
             r.segmentGeneration = activeGeneration_;
             r.payloadOffset = payloadOffset;
             r.payloadBytes = static_cast<std::uint32_t>(record.size());
@@ -651,9 +660,13 @@ Status AppendLogStore::writeIndex(const FileStoreIndex& index) {
     const FileStoreIndex current = indexFromRecords();
     if (index.head > current.head && !records_.empty()) {
         const std::uint32_t poppedSeq = records_.front().sequence;
+        const std::uint32_t poppedGen = records_.front().segmentGeneration;
         st = appendPopEvent(poppedSeq);
         if (!st.ok()) {
             return diagnostic(Severity::Error, st, "writeIndex");
+        }
+        if (activeTailDependenciesTracked_) {
+            activeTailAffectedGenerations_.insert(poppedGen);
         }
         records_.pop_front();
     }
@@ -776,6 +789,8 @@ Status AppendLogStore::format() {
     activeSegmentBytes_ = 0;
     totalOnDiskBytes_ = 0;
     nextGeneration_ = 1;
+    activeTailDependenciesTracked_ = true;
+    activeTailAffectedGenerations_.clear();
     nextSequence_ = 0;
     mounted_ = true;
     return Status::success();

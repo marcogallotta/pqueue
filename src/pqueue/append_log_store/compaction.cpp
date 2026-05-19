@@ -159,7 +159,13 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         activeSegmentBytes_ > kSegmentHeaderBytes &&
         !manifestRanges_.empty() &&
         manifestRanges_.back().endGen + 1 == activeGeneration_;
-    const bool wouldRotate = selectedIsLastRange && tailCanMergeWithLastRange;
+    const bool tailDepsContained =
+        activeTailDependenciesTracked_ &&
+        std::all_of(activeTailAffectedGenerations_.begin(), activeTailAffectedGenerations_.end(),
+            [&](std::uint32_t gen) {
+                return gen >= range.startGen && gen <= activeGeneration_;
+            });
+    const bool wouldRotate = selectedIsLastRange && tailCanMergeWithLastRange && tailDepsContained;
 
     const std::uint32_t hypoStartGen = range.startGen;
     const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : range.endGen;
