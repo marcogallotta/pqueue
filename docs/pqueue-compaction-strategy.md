@@ -343,14 +343,81 @@ and narrowed generation bounds.
 
 The store and compactRange() are unchanged; narrowRange() is entirely in the test harness.
 
+## On-device run 3 (burst=500/pop=90%/rec=492, bounded window)
+
+Results:
+
+  Workload: burst=500 pop=90% rec=492B cycles=15
+  Compactions: 102  NoOps: 30  MaxOutSegs: 9
+  MaxLatency: 82580 ms
+  Deadlocks: 0  CapExhausted: 0  FinalQueueSize: 56
+  PASS
+
+The bounded window (kMaxOutputSegs=8) eliminates the original 131-second stall.
+0 deadlocks, 0 capacity exhaustion across 15 cycles. The MaxOutSegs=9 result (above
+kMaxOutputSegs=8) occurs when rotate-before-compact extends the effective range by 1
+segment (the tail); the budget applies to the pre-rotate range. Acceptable.
+
+MaxLatency=82580ms is dominated by cleanup_ms=77216ms, not by the compaction itself.
+The breakdown for the worst-case compaction (75 input segs, 54 live records, 8 outputs):
+
+  collect_ms=2689  write_ms=960  publish_ms=24
+  cleanup_ms=77216  pre_size_ms=1601  total_ms=82557
+
+Two O(n) bugs remain that were not caught in earlier sessions:
+
+### Bug A: O(n^2) cleanup (cleanup_ms=77216ms, CRITICAL)
+
+compactRange calls cleanupOneDanglingSegment() inputSegCount times (lines 312 and 413
+of compaction.cpp). Each call to cleanupOneDanglingSegment() calls listFiles() on the
+full directory -- this takes 1-1.5 seconds on LittleFS with ~75 files. Result:
+75 calls x ~1.1s = ~82 seconds for the 75-seg compaction. The same pattern produces
+cleanup_ms=9054ms for an 8-seg pressure compaction and cleanup_ms=1318ms for a 1-seg
+compaction.
+
+Fix: replace the N-call loop with a single batch delete that calls listFiles once,
+identifies all non-active segments in one pass, and deletes them all. This is O(n_files)
+instead of O(n_files x n_input_segs).
+
+### Bug B: O(n) preflight fileSize (pre_size_ms=1601ms)
+
+The preflight loop in compactRange (compaction.cpp lines 199-207) still calls
+fs()->fileSize() for each sealed segment in the hypothetical range. With 75 sealed
+segments at ~21ms per fileSize call, this totals ~1.6 seconds. The sealedSegmentBytes_
+map was added to eliminate exactly this pattern in segmentStats(), but the preflight
+loop was not updated.
+
+Fix: replace fs()->fileSize(segmentName(gen), sz) with a sealedSegmentBytes_.find(gen)
+lookup in the preflight loop.
+
+### Other observations from run 3 logs
+
+GC pressure resets after compaction: create_ms drops from 300-1709ms (late burst) back
+to 20-35ms (immediately post-compaction), confirming compaction relieves LittleFS block
+pressure by freeing the input segments. As the next burst accumulates segments, create_ms
+climbs again. This is expected LittleFS behavior.
+
+Manifest slot cache (probe_ms): probe_ms=0 on every rotation after the first, confirming
+the cachedWrittenSlot_ fix is working.
+
+noOp during burst: all compaction attempts during the burst phase return noOp(notFound)
+because narrowRange produces sub-ranges (e.g. [1,1]) that are not manifest entries. This
+is correct -- there is too much live data to compact during the burst. After pops reduce
+live records to ~54, compaction fires and succeeds.
+
 ## Next steps
 
-**On-device run 3 (burst=500/pop=90%/rec=492, bounded window).** Run the test to verify
-kMaxOutputSegs=8 eliminates the 130-second stall. Expected: MaxLatency drops to under
-a few seconds; no deadlocks; no capacity exhaustion.
+**Fix Bug A (cleanup O(n^2)).** Add cleanupAllDanglingSegments() that calls listFiles
+once and deletes all non-active segments. Replace the loops at compaction.cpp lines 312
+and 413. Expected: cleanup_ms for 75-seg compaction drops from ~77s to ~2s (1 listFiles
++ 75 removes at ~24ms each).
 
-**Final strategy selection.** Deferred until the bounded window lands and on-device
-latency is confirmed acceptable.
+**Fix Bug B (preflight fileSize O(n)).** In compactRange preflight (lines 197-208),
+replace fs()->fileSize(segmentName(gen), sz) with sealedSegmentBytes_.find(gen) lookup.
+Expected: pre_size_ms drops from ~1600ms to ~0ms.
+
+**Final strategy selection.** Deferred until the above fixes land and MaxLatency is
+confirmed acceptable.
 
 **Capacity exhaustion is out of scope.** The sim confirms workloads where ratio-based
 strategies hit the range limit are pure capacity exhaustion (CapExhst=1000, Deadlock=0):
