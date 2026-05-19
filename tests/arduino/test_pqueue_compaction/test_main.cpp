@@ -160,11 +160,13 @@ void test_compaction_burst_workload() {
     };
 
     auto checkAndCompact = [&]() {
-        const std::uint32_t segCount =
-            static_cast<std::uint32_t>(store.segmentStats().size());
-        const std::uint32_t rangeCount =
-            static_cast<std::uint32_t>(store.manifestRanges().size());
-        const bool newSeg  = segCount > prevSegCount;
+        // Logical count: sealed gens from manifest + 1 for active tail.
+        // Avoids fileSize() per generation that segmentStats() would trigger.
+        const auto& ranges = store.manifestRanges();
+        std::uint32_t logicalSegCount = 1; // active tail always exists
+        for (const auto& r : ranges) logicalSegCount += r.endGen - r.startGen + 1;
+        const std::uint32_t rangeCount = static_cast<std::uint32_t>(ranges.size());
+        const bool newSeg   = logicalSegCount > prevSegCount;
         const bool pressure = rangeCount >= kRangePressureTrigger;
         if (newSeg || pressure) {
             bool useful = false;
@@ -174,7 +176,7 @@ void test_compaction_burst_workload() {
             }
             if (useful) tryCompact();
         }
-        prevSegCount = segCount;
+        prevSegCount = logicalSegCount;
     };
 
     for (std::uint32_t cycle = 0; cycle < kCycles; ++cycle) {

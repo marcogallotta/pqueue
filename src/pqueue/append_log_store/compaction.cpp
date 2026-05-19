@@ -87,7 +87,7 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
             auto it = liveByGen.find(gen);
             stat.liveBytes = kSegmentHeaderBytes + (it != liveByGen.end() ? it->second : 0);
             std::uint64_t size = 0;
-            fs_->fileSize(segmentName(gen), size);
+            fs_->fileSize(segmentName(gen), size); // missing file == 0 bytes
             stat.totalBytes = static_cast<std::uint32_t>(size);
             result.push_back(stat);
         }
