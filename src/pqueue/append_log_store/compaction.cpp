@@ -291,7 +291,6 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 #endif
 
     if (liveRecords.empty()) {
-        const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
         std::vector<ManifestRange> newRanges = manifestRanges_;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
         ManifestData md;
@@ -309,7 +308,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             return st;
         }
         CR_T0(ms_cleanup);
-        for (std::uint32_t i = 0; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+        cleanupAllDanglingSegments();
         CR_T1(ms_cleanup);
 #ifdef ARDUINO
         logLine("ok(dead)");
@@ -395,8 +394,6 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     md.tailGeneration = activeGeneration_;
     md.nextGeneration = lastNewGen + 1;
 
-    const std::uint32_t inputSegCount = effectiveRange.endGen - effectiveRange.startGen + 1;
-
     // Phase: publishManifest.
     CR_T0(ms_publish);
     st = publishManifest(md);
@@ -410,7 +407,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     // Phase: cleanup dangling input segments.
     CR_T0(ms_cleanup);
-    for (std::uint32_t i = 0; i < inputSegCount; ++i) cleanupOneDanglingSegment();
+    cleanupAllDanglingSegments();
     CR_T1(ms_cleanup);
 
     // Phase: update in-RAM records to point at new segment generations.
@@ -538,6 +535,38 @@ void AppendLogStore::cleanupOneDanglingSegment() {
         Serial.flush();
     }
 #endif
+}
+
+void AppendLogStore::cleanupAllDanglingSegments() {
+    auto f = fs();
+    if (!f) return;
+
+    std::vector<std::string> files;
+    if (!f->listFiles(files).ok()) return;
+
+    for (const auto& name : files) {
+        std::uint32_t gen = 0;
+        if (!isSegmentName(name, gen)) continue;
+        const bool active = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
+                            != activeGenerations_.end();
+        if (active) continue;
+
+        std::uint64_t sz = 0;
+        f->fileSize(name, sz);
+        const bool removed = f->removeFile(name).ok();
+        if (removed) {
+            totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
+            sealedSegmentBytes_.erase(gen);
+        }
+#ifdef ARDUINO
+        if (removed) {
+            Serial.printf("[cleanup] deleted=%s\n", name.c_str());
+        } else {
+            Serial.printf("[cleanup] rm-failed=%s\n", name.c_str());
+        }
+        Serial.flush();
+#endif
+    }
 }
 
 } // namespace pqueue
