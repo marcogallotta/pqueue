@@ -638,7 +638,8 @@ TEST_CASE("compaction: rotate-before-compact is blocked by cross-range tail pop 
         // affected={1,3}; gen=1 is NOT in [3, activeGen=5] → tailDepsContained=false.
 
         // First compactOneSegment: {1,1} fully dead → dead-range removal (not last range,
-        // no rotate). affected stays {1,3} — no new tail created.
+        // no rotate). After cleanup, gen=1 is pruned from activeTailAffectedGenerations_;
+        // affected becomes {3}.
         auto st1 = store.compactOneSegment();
         CHECK(st1.ok());
         CHECK_FALSE(st1.isNoOp());
@@ -648,18 +649,19 @@ TEST_CASE("compaction: rotate-before-compact is blocked by cross-range tail pop 
         CHECK_EQ(store.tailGeneration(), 5U);
 
         // Second compactOneSegment: {3,4} is now the last range; tail=5 is contiguous
-        // (4+1=5). tailDepsContained=false (gen=1 still in affected, not in [3,5]).
-        // Rotate must NOT fire; tail must remain gen=5.
+        // (4+1=5). affected={3}; gen=3 is in [3,5] → tailDepsContained=true → rotate fires.
+        // Gen=1's tombstones no longer risk resurrection: gen=1 is gone from the manifest.
+        // Rotate seals gen=5 into {3,5}; new tail=gen=6. Live records seq=5,6,7 → 2 output
+        // segs (3×49-byte events span 118B and 167B; 167>150 → split): gen=7 (seq=5,6),
+        // gen=8 (seq=7).
         auto st2 = store.compactOneSegment();
         CHECK(st2.ok());
         CHECK_FALSE(st2.isNoOp());
 
-        // Prove no rotate: tail still gen=5. If rotate had fired, tail would be gen=6.
-        CHECK_EQ(store.tailGeneration(), 5U);
-        // Output: 1 seg for live records seq=5,6 (in gen=4).
+        CHECK_EQ(store.tailGeneration(), 6U);
         REQUIRE_EQ(store.manifestRanges().size(), 1U);
-        CHECK_EQ(store.manifestRanges()[0].startGen, 6U);
-        CHECK_EQ(store.manifestRanges()[0].endGen,   6U);
+        CHECK_EQ(store.manifestRanges()[0].startGen, 7U);
+        CHECK_EQ(store.manifestRanges()[0].endGen,   8U);
 
         // Popped records absent; live records readable.
         std::string out;

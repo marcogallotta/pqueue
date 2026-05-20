@@ -687,3 +687,611 @@ TEST_CASE("compaction: orphan tail range is eliminated after its records are all
     }
     CHECK_EQ(store.manifestRanges().size(), 0U);
 }
+
+// ---------------------------------------------------------------------------
+// Subrange compaction
+//
+// maxSegmentBytes=185, payload=60 bytes ("aaa...60" etc).
+//   kSegmentHeaderBytes=20, kEnqueueOverheadBytes=24 -> 104 bytes/segment.
+//   Second enqueue: 104+84=188 > 185 -> rotation. One record per gen.
+//   Four pops: 104+4*20=184 <= 185 -> no rotation from pops.
+//   After enqueueing seqs 1-5: ranges=[{1,4}], tail=5, nextGen=6.
+//   seq i lives in gen i.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+pqueue::AppendLogConfig makeSubrangeConfig() {
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 185;
+    return cfg;
+}
+
+const std::string kP1(60, 'a');
+const std::string kP2(60, 'b');
+const std::string kP3(60, 'c');
+const std::string kP4(60, 'd');
+const std::string kP5(60, 'e');
+
+// Enqueue seqs 1-5, each in its own gen. Result: ranges=[{1,4}], tail=5, nextGen=6.
+void setupSubrangeStore(pqueue::AppendLogStore& store) {
+    storeEnqueue(store, 1, kP1);
+    storeEnqueue(store, 2, kP2);
+    storeEnqueue(store, 3, kP3);
+    storeEnqueue(store, 4, kP4);
+    storeEnqueue(store, 5, kP5);
+}
+
+} // namespace
+
+TEST_CASE("subrange: prefix compaction produces correct manifest split and FIFO order") {
+    // ranges=[{1,4}], tail=5, nextGen=6. Pop seq=1 (dead gen=1).
+    // Compact prefix {1,2}: live=[seq=2], output->gen=6.
+    // Result: ranges=[{6,6},{3,4}], tail=5.
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); // seq=1 dead
+
+    const auto st = store.compactRange({1, 2});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 6u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   6u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 3u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   4u);
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    CHECK(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(4)));
+    CHECK(std::filesystem::exists(segmentPath(5)));
+    CHECK(std::filesystem::exists(segmentPath(6)));
+
+    expectRecord(store, 2, kP2);
+    expectRecord(store, 3, kP3);
+    expectRecord(store, 4, kP4);
+    expectRecord(store, 5, kP5);
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: suffix compaction produces correct manifest split and FIFO order") {
+    // Pop seq=1,2,3 (3 pops, no rotation since 104+60=164<=185).
+    // Compact suffix {3,4}: gen=3 dead, gen=4 live(seq=4), output->gen=6.
+    // tailDepsContained=false (gen=1,2 outside {3,5}), so no rotate.
+    // Result: ranges=[{1,2},{6,6}], tail=5.
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); storePop(store); storePop(store); // seq=1,2,3
+
+    const auto st = store.compactRange({3, 4});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   2u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 6u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   6u);
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    CHECK(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+    CHECK(std::filesystem::exists(segmentPath(5)));
+    CHECK(std::filesystem::exists(segmentPath(6)));
+
+    expectRecord(store, 4, kP4);
+    expectRecord(store, 5, kP5);
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: middle compaction produces three-range manifest and FIFO order") {
+    // Pop seq=1,2. Compact middle {2,3}: gen=2 dead, gen=3 live(seq=3), output->gen=6.
+    // Result: ranges=[{1,1},{6,6},{4,4}], tail=5.
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); storePop(store); // seq=1,2
+
+    const auto st = store.compactRange({2, 3});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   1u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 6u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   6u);
+    CHECK_EQ(store.manifestRanges()[2].startGen, 4u);
+    CHECK_EQ(store.manifestRanges()[2].endGen,   4u);
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    CHECK(std::filesystem::exists(segmentPath(1)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(4)));
+    CHECK(std::filesystem::exists(segmentPath(5)));
+    CHECK(std::filesystem::exists(segmentPath(6)));
+
+    expectRecord(store, 3, kP3);
+    expectRecord(store, 4, kP4);
+    expectRecord(store, 5, kP5);
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: dead prefix drops subrange and leaves remainder") {
+    // Pop seq=1,2 -> both dead. Dead prefix {1,2}: gateDelta=0, no output written.
+    // Result: ranges=[{3,4}].
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); storePop(store);
+
+    const auto st = store.compactRange({1, 2});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 3u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   4u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    CHECK(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: dead suffix drops subrange and leaves remainder") {
+    // Pop seq=1..4 (4 pops, 104+80=184<=185, no rotation).
+    // Dead suffix {3,4}: gateDelta=0. Result: ranges=[{1,2}].
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); storePop(store); storePop(store); storePop(store);
+
+    const auto st = store.compactRange({3, 4});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   2u);
+
+    CHECK(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: dead middle splits parent into two remainder ranges") {
+    // Pop seq=1..3. Dead middle {2,3}: gateDelta=1 (dead middle), 1+1=2<=4.
+    // Result: ranges=[{1,1},{4,4}], no output seg.
+    resetSpool();
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    setupSubrangeStore(store);
+    storePop(store); storePop(store); storePop(store);
+
+    const auto st = store.compactRange({2, 3});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   1u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 4u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   4u);
+
+    CHECK(std::filesystem::exists(segmentPath(1)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: remount after prefix split preserves manifest and record accessibility") {
+    resetSpool();
+    {
+        pqueue::AppendLogStore store(makeSubrangeConfig());
+        CHECK(store.mount().ok());
+        setupSubrangeStore(store);
+        storePop(store);
+        CHECK(store.compactRange({1, 2}).ok());
+    }
+    pqueue::AppendLogStore store2(makeSubrangeConfig());
+    CHECK(store2.mount().ok());
+    REQUIRE_EQ(store2.manifestRanges().size(), 2u);
+    CHECK_EQ(store2.manifestRanges()[0].startGen, 6u);
+    CHECK_EQ(store2.manifestRanges()[0].endGen,   6u);
+    CHECK_EQ(store2.manifestRanges()[1].startGen, 3u);
+    CHECK_EQ(store2.manifestRanges()[1].endGen,   4u);
+    expectRecord(store2, 2, kP2);
+    expectRecord(store2, 3, kP3);
+    expectRecord(store2, 4, kP4);
+    expectRecord(store2, 5, kP5);
+}
+
+TEST_CASE("subrange: remount after middle split preserves three-range manifest") {
+    resetSpool();
+    {
+        pqueue::AppendLogStore store(makeSubrangeConfig());
+        CHECK(store.mount().ok());
+        setupSubrangeStore(store);
+        storePop(store); storePop(store);
+        CHECK(store.compactRange({2, 3}).ok());
+    }
+    pqueue::AppendLogStore store2(makeSubrangeConfig());
+    CHECK(store2.mount().ok());
+    REQUIRE_EQ(store2.manifestRanges().size(), 3u);
+    CHECK_EQ(store2.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store2.manifestRanges()[0].endGen,   1u);
+    CHECK_EQ(store2.manifestRanges()[1].startGen, 6u);
+    CHECK_EQ(store2.manifestRanges()[1].endGen,   6u);
+    CHECK_EQ(store2.manifestRanges()[2].startGen, 4u);
+    CHECK_EQ(store2.manifestRanges()[2].endGen,   4u);
+    expectRecord(store2, 3, kP3);
+    expectRecord(store2, 4, kP4);
+    expectRecord(store2, 5, kP5);
+}
+
+TEST_CASE("subrange: gate 1 fallback=yes on live middle expands to full parent and compacts it") {
+    // 3 ranges. Live record in gen=2 (middle of {1,3}).
+    // Middle {2,2}: liveDelta=2, 3+2=5>4 -> gate 1 fires.
+    // fallback=yes -> inputRange widened to {1,3}, hasLeft=false, hasRight=false.
+    // Full parent compacted: only live record is seq=2 -> output gen=31.
+    // Result: ranges=[{31,31},{10,11},{20,20}].
+    plantLayout({
+        .ranges = {{1,3},{10,11},{20,20}},
+        .tail   = 30,
+        .next   = 31,
+        .segments = {
+            {.gen=1,  .firstSeq=1},
+            {.gen=2,  .firstSeq=2, .body=serializeEnqueueEvent(2, "bbbb")},
+            {.gen=3,  .firstSeq=3},
+            {.gen=10, .firstSeq=10},
+            {.gen=11, .firstSeq=11},
+            {.gen=20, .firstSeq=20},
+            {.gen=30, .firstSeq=30},
+        }
+    });
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+
+    const auto st = store.compactRange({2, 2},
+                                       nullptr,
+                                       pqueue::AppendLogStore::AllowFullRangeFallback::yes);
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    // Full parent {1,3} was compacted, not just {2,2}. Gen=1 and gen=3 had no records.
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 31u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   31u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 10u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   11u);
+    CHECK_EQ(store.manifestRanges()[2].startGen, 20u);
+    CHECK_EQ(store.manifestRanges()[2].endGen,   20u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(3)));
+    CHECK(std::filesystem::exists(segmentPath(31)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: gate 1 fallback=yes on live suffix at range count 4 widens and rotate fires") {
+    // 4 ranges; last range has live suffix with hasLeft=true and contiguous tail.
+    // State built via live ops so activeTailDependenciesTracked_=true.
+    //
+    // Plant: ranges=[{1,2},{10,11},{20,21},{30,33}], tail=34 (enqueue seq=2, 104B), next=35.
+    //   gen=30: enqueue(seq=1,kP1)=104B (live). gen=31,32,33: header-only (dead).
+    //
+    // Mount + storeEnqueue(seq=3,kP3): 104+84=188>185 -> rotate gen=34 sealed -> {30,34}.
+    //   ranges=[{1,2},{10,11},{20,21},{30,34}], tail=35, tracking=true.
+    //
+    // compactRange({32,34}, fallback=yes):
+    //   suffix of {30,34}: hasLeft=true, hasRight=false.
+    //   rangeHasLive=true (seq=2 in gen=34). liveDelta=1. 4+1=5>4 -> gate 1 fires.
+    //   fallback=yes -> inputRange={30,34}, hasLeft=false.
+    //   wouldRotate=true (34==lastRange.endGen, tail=35 contiguous, deps={}).
+    //   hypoHasLive=true (seq=1,2,3 in [30,35]). Gate 2: hasLeft=false -> does not fire.
+    //   Rotate: gen=35 sealed -> {30,35}, tail=36. inputRange extended to {30,35}.
+    //   Live records: seq=1(gen=30), seq=2(gen=34), seq=3(gen=35). Output: gen=37,38,39.
+    //   Splice: erase {30,35}, insert {37,39}. Result: [{1,2},{10,11},{20,21},{37,39}], tail=36.
+
+    plantLayout({
+        .ranges = {{1,2},{10,11},{20,21},{30,33}},
+        .tail   = 34,
+        .next   = 35,
+        .segments = {
+            {.gen=1,  .firstSeq=1},
+            {.gen=2,  .firstSeq=2},
+            {.gen=10, .firstSeq=10},
+            {.gen=11, .firstSeq=11},
+            {.gen=20, .firstSeq=20},
+            {.gen=21, .firstSeq=21},
+            {.gen=30, .firstSeq=1, .body=serializeEnqueueEvent(1, kP1)},
+            {.gen=31, .firstSeq=0, .body={}},
+            {.gen=32, .firstSeq=0, .body={}},
+            {.gen=33, .firstSeq=0, .body={}},
+            {.gen=34, .firstSeq=2, .body=serializeEnqueueEvent(2, kP2)},
+        }
+    });
+
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.tailGeneration(), 34u);
+
+    storeEnqueue(store, 3, kP3); // 104+84>185 -> rotate gen=34 sealed -> {30,34}, tail=35
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.manifestRanges()[3].startGen, 30u);
+    CHECK_EQ(store.manifestRanges()[3].endGen,   34u);
+    CHECK_EQ(store.tailGeneration(), 35u);
+
+    const auto st = store.compactRange({32, 34},
+                                       nullptr,
+                                       pqueue::AppendLogStore::AllowFullRangeFallback::yes);
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    CHECK_EQ(store.tailGeneration(), 36u); // rotate fired
+
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.manifestRanges()[3].startGen, 37u);
+    CHECK_EQ(store.manifestRanges()[3].endGen,   39u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(30)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(34)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(35)));
+    CHECK(std::filesystem::exists(segmentPath(37)));
+    CHECK(std::filesystem::exists(segmentPath(38)));
+    CHECK(std::filesystem::exists(segmentPath(39)));
+
+    expectRecord(store, 1, kP1);
+    expectRecord(store, 2, kP2);
+    expectRecord(store, 3, kP3);
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: range-count gate returns noOp on hot path for live middle subrange") {
+    // 3 existing ranges. Live record in gen=2 (middle of {1,3}).
+    // Middle subrange {2,2}: liveDelta=2, 3+2=5>4 -> noOp in hot path.
+    // Full parent must not be compacted.
+    plantLayout({
+        .ranges = {{1,3},{10,11},{20,20}},
+        .tail   = 30,
+        .next   = 31,
+        .segments = {
+            {.gen=1,  .firstSeq=1},
+            {.gen=2,  .firstSeq=2, .body=serializeEnqueueEvent(2, "bbbb")},
+            {.gen=3,  .firstSeq=3},
+            {.gen=10, .firstSeq=10},
+            {.gen=11, .firstSeq=11},
+            {.gen=20, .firstSeq=20},
+            {.gen=30, .firstSeq=30},
+        }
+    });
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+
+    const auto st = store.compactRange({2, 2},
+                                       nullptr,
+                                       pqueue::AppendLogStore::AllowFullRangeFallback::no);
+    CHECK(st.ok());
+    CHECK(st.isNoOp());
+
+    // Manifest unchanged; full parent {1,3} not touched.
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   3u);
+}
+
+TEST_CASE("subrange: dead prefix/suffix does not block at range count 4") {
+    // At count=4, dead prefix has gateDelta=0 -> must proceed (not noOp).
+    // Compact dead prefix {1,1} of {1,2}: drops gen=1, remainder {2,2}. Count stays 4.
+    plantLayout({
+        .ranges = {{1,2},{10,11},{20,21},{30,31}},
+        .tail   = 40,
+        .next   = 41,
+        .segments = {
+            {.gen=1,  .firstSeq=1},
+            {.gen=2,  .firstSeq=2},
+            {.gen=10, .firstSeq=10},
+            {.gen=11, .firstSeq=11},
+            {.gen=20, .firstSeq=20},
+            {.gen=21, .firstSeq=21},
+            {.gen=30, .firstSeq=30},
+            {.gen=31, .firstSeq=31},
+            {.gen=40, .firstSeq=40},
+        }
+    });
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+
+    const auto st = store.compactRange({1, 1},
+                                       nullptr,
+                                       pqueue::AppendLogStore::AllowFullRangeFallback::no);
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 2u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   2u);
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: dead suffix with pop-only tail proceeds without rotate at range count 4") {
+    // Regression for hypoHasLive guard in the pre-rotate gate.
+    // Without it, wouldRotate && hasLeft fires the gate even when the extended range
+    // has no live records (tail is pop-only). Dead-suffix cleanup would be wrongly
+    // blocked at range count 4 with fallback=no.
+    //
+    // State is built via live operations so activeTailDependenciesTracked_=true.
+    //
+    // Plant gen=25 with enqueue(1)+enqueue(2)+pop(1)+pop(2) so that after mount
+    // records_=[] and activeSegmentBytes_=178 (20hdr+59+59+20+20).
+    //
+    // Drive two rotations with maxSegmentBytes=150, 35-byte payloads (59B/record):
+    //   enqueue(3): 178+59=237>150 → rotate gen=25 → {25,25}, 4 ranges, tail=26, tracking=true
+    //   enqueue(4): gen=26=138B
+    //   enqueue(5): 138+59=197>150 → rotate gen=26 → merge {25,26}, tail=27, tracking=true
+    //
+    // Pop seq=3,4 (gen=26) and seq=5 (gen=27):
+    //   tail=27 has enqueue(5)+pop(3)+pop(4)+pop(5) = 139B, all pop-only for live records
+    //   affected={26,27}; tailDepsContained for suffix {26,26}: all gens in [26,27]. TRUE.
+    //   hypoHasLive=false (no records in [26,27]) → pre-rotate gate must NOT fire.
+    //
+    // compactRange({26,26}) must proceed as dead-range removal; tail must not rotate.
+
+    const std::string p35(35, 'x');
+    plantLayout({
+        .ranges = {{1,2},{10,11},{20,21}},
+        .tail   = 25,
+        .next   = 26,
+        .segments = {
+            {.gen=1,  .firstSeq=1},
+            {.gen=2,  .firstSeq=2},
+            {.gen=10, .firstSeq=10},
+            {.gen=11, .firstSeq=11},
+            {.gen=20, .firstSeq=20},
+            {.gen=21, .firstSeq=21},
+            {.gen=25, .firstSeq=1, .body = serializeEnqueueEvent(1, p35) +
+                                           serializeEnqueueEvent(2, p35) +
+                                           serializePopEvent(1) +
+                                           serializePopEvent(2)},
+        }
+    });
+
+    pqueue::AppendLogConfig cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 150;
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 3u);
+    CHECK_EQ(store.tailGeneration(), 25u);
+
+    storeEnqueue(store, 3, p35); // 178+59>150 → rotate gen=25 → {25,25}, 4 ranges, tail=26
+    storeEnqueue(store, 4, p35); // gen=26: 138B
+    storeEnqueue(store, 5, p35); // 138+59>150 → rotate gen=26 → merge {25,26}, tail=27
+
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.manifestRanges()[3].startGen, 25u);
+    CHECK_EQ(store.manifestRanges()[3].endGen,   26u);
+    CHECK_EQ(store.tailGeneration(), 27u);
+
+    storePop(store); // seq=3 (gen=26) → affected={26}
+    storePop(store); // seq=4 (gen=26)
+    storePop(store); // seq=5 (gen=27) → affected={26,27}
+    // tail=27: 20+59+20+20+20=139B (enqueue+3 pops); no live records in [26,27]
+
+    const auto st = store.compactRange({26, 26},
+                                       nullptr,
+                                       pqueue::AppendLogStore::AllowFullRangeFallback::no);
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    CHECK_EQ(store.tailGeneration(), 27u); // no rotation
+    REQUIRE_EQ(store.manifestRanges().size(), 4u);
+    CHECK_EQ(store.manifestRanges()[3].startGen, 25u);
+    CHECK_EQ(store.manifestRanges()[3].endGen,   25u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(26)));
+    CHECK(std::filesystem::exists(segmentPath(25)));
+    checkTracking(store);
+}
+
+TEST_CASE("subrange: live suffix triggers rotate-before-compact extending inputRange to old tail") {
+    // Regression for rotate-before-compact on suffix subranges.
+    // activeTailDependenciesTracked_=true is required for wouldRotate; build state via live ops.
+    //
+    // Plant: ranges=[{1,4}], tail=5, next=6.
+    //   gen=1..3: header-only (no records).
+    //   gen=4: enqueue(seq=1,kP1)+enqueue(seq=2,kP2) = 188B, two live records.
+    //   gen=5 (tail): enqueue(seq=3,kP3) = 104B.
+    //
+    // Mount + storeEnqueue(seq=4, kP4): 104+84=188>185 -> rotate gen=5 sealed.
+    //   ranges=[{1,5}], tail=6, nextGen=7, tracking=true.
+    //   seq=4 written to gen=6: 104B.
+    //
+    // storePop x2: dead gen=4 (seq=1,seq=2). tail=6 gains two pop tombstones: 144B.
+    //   affected={4}; tailDepsContained for suffix {4,5}: gen=4 in [4,6]. TRUE.
+    //
+    // compactRange({4,5}):
+    //   suffix of {1,5}; wouldRotate=true (5==lastRange.endGen, tail=6 contiguous).
+    //   hypoHasLive=true (seq=3 in gen=5, seq=4 in gen=6, both in [4,6]).
+    //   Pre-rotate gate: +1, size=1 -> 2<=4. Rotate fires: gen=6 sealed -> {1,6}, tail=7.
+    //   inputRange extended to {4,6}; suffix of {1,6}: hasLeft=true, hasRight=false.
+    //   Live records in [4,6]: seq=3(gen=5), seq=4(gen=6). Output: gen=8(seq=3), gen=9(seq=4).
+    //   Splice: erase {1,6}, insert [{1,3},{8,9}].
+    //   Result: ranges=[{1,3},{8,9}], tail=7.
+
+    plantLayout({
+        .ranges = {{1, 4}},
+        .tail   = 5,
+        .next   = 6,
+        .segments = {
+            {.gen=1, .firstSeq=0, .body={}},
+            {.gen=2, .firstSeq=0, .body={}},
+            {.gen=3, .firstSeq=0, .body={}},
+            {.gen=4, .firstSeq=1, .body=serializeEnqueueEvent(1, kP1) + serializeEnqueueEvent(2, kP2)},
+            {.gen=5, .firstSeq=3, .body=serializeEnqueueEvent(3, kP3)},
+        }
+    });
+
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    storeEnqueue(store, 4, kP4); // 104+84>185 -> rotate gen=5 sealed; seq=4 to gen=6
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   5u);
+    CHECK_EQ(store.tailGeneration(), 6u);
+
+    storePop(store); // seq=1 (gen=4) dead; pop tombstone in gen=6
+    storePop(store); // seq=2 (gen=4) dead; pop tombstone in gen=6
+
+    const auto st = store.compactRange({4, 5});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    CHECK_EQ(store.tailGeneration(), 7u); // rotate fired
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   3u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 8u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   9u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(5)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6)));
+    CHECK(std::filesystem::exists(segmentPath(8)));
+    CHECK(std::filesystem::exists(segmentPath(9)));
+
+    expectRecord(store, 3, kP3);
+    expectRecord(store, 4, kP4);
+    checkTracking(store);
+}

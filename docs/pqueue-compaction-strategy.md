@@ -22,6 +22,12 @@ When the queue fills with live data and enqueue growth permanently exceeds drain
 
 ## Implementation
 
+### Subrange compaction (store)
+
+`compactRange()` accepts any subrange `[startGen, endGen]` that is contained within a single manifest range. The subrange is classified as exact (matches parent), prefix (shares parent's left endpoint), suffix (shares parent's right endpoint), or middle (strictly interior). On compaction, the parent range is spliced: remainders on each side are preserved as new manifest ranges, and the output range is inserted in between. Two-sided contiguity merge follows the splice. A dead subrange (no live records in `[startGen, endGen]`) is removed without writing output; remainders stay intact.
+
+**Range-count gate.** Splitting a parent produces at most +2 new ranges (middle case). Before any I/O the gate checks `manifestRanges_.size() + gateDelta > kManifestMaxRanges`. `gateDelta` is 2 for a live middle, 1 for a live prefix/suffix, 0 for an exact match. Dead prefix/suffix use gateDelta=0 (no new ranges needed); dead middle uses 1. If the gate fires and `AllowFullRangeFallback::yes`, `compactRange` expands to the full parent and continues. If `AllowFullRangeFallback::no` (default for both `compactRange` and `compactOneSegment` on the write path), it returns noOp immediately. Maintenance paths (`compactIdle`, `compactFull`) pass `yes` explicitly. A second pre-rotate gate evaluates the post-rotate shape (suffix becomes exact after tail merge) before calling `rotateSegment()`; this ensures noOp is returned before any state mutation if the post-rotate split would overflow. The gate fires only when `hypoHasLive` is true (a RAM scan for live records in `[inputRange.startGen, activeGeneration_]`): a pop-only tail means rotate will not fire and dead-suffix removal uses gateDelta=0, so the live split delta must not apply.
+
 ### Bounded output window (store)
 
 `narrowRange()` is a private store method called from `compactOneSegment()`. It caps the compaction unit at `AppendLogConfig::maxOutputSegments` (default 8) predicted output segments. Narrowing only applies when the full chosen range exceeds the budget; if it fits, the full range is used unchanged. When narrowing, an O(n^2) sliding window over per-segment stats finds the contiguous subrange with the highest dead ratio that fits within the budget. A single segment is always the minimum unit.
@@ -121,10 +127,6 @@ Enqueue is driven by backend failures: either brief and intermittent, or a susta
 **The clean-storage invariant.** If the queue is fully compacted before an enqueue burst, the burst writes only new live data, stays within maxSegments, and never triggers compaction at all. The stall during enqueue is a symptom of carrying dead data into the burst because the previous drain left it behind. Fix the drain phase, enqueue phase fixes itself.
 
 **Background compaction fits poorly here.** LittleFS is not concurrent: a background compaction task would still serialize against foreground I/O, adding context-switch overhead without real parallelism. During an active burst (enqueue or drain) there is no gain. The productive window is idle time between phases. Compaction during that window can be driven by the application, which already knows when the backend has recovered and the drain has finished. `compactFull()` called at that boundary is the right mechanism.
-
-## Planned work
-
-**1. Subrange compaction.** `narrowRange()` can return a subrange to bound hot-path latency, but `compactRange()` requires an exact manifest range match (existence check) and re-resolves any subrange back to the full parent range anyway. Proper subrange compaction requires splitting manifest ranges (e.g. [1,63] -> [1,4]+[newOut]+[13,63]). This is feasible within the current 4-range limit when range count is 1-2 (the split stays within budget); at 3-4 ranges the split is blocked and falls back to full-range compaction. Gate on `(currentRangeCount + 2) <= kManifestMaxRanges` before committing a split. No manifest format change needed for the common case. Address this after the idle-compaction hook; if the hook keeps storage clean, the worst-case enqueue stall may already be acceptable.
 
 ## Future work
 

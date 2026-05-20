@@ -120,7 +120,9 @@ std::size_t AppendLogStore::findParentRangeIdx(std::uint32_t startGen, std::uint
     return manifestRanges_.size();
 }
 
-Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
+Status AppendLogStore::compactRange(const CompactionRange& range,
+                                    std::uint32_t* outputSegCount,
+                                    AllowFullRangeFallback allowFallback) {
 #ifdef ARDUINO
     const std::uint32_t t_start = millis();
     std::uint32_t ms_exist = 0, ms_pre_scan = 0, ms_pre_size = 0;
@@ -155,7 +157,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     #define CR_T1(var)
 #endif
 
-    // Phase: find parent range (exact match required until subrange splice is implemented).
+    // Phase: find parent range and classify the input as prefix/suffix/middle/exact.
     CR_T0(ms_exist);
     std::size_t rangeIdx = findParentRangeIdx(range.startGen, range.endGen);
     if (rangeIdx >= manifestRanges_.size()) {
@@ -165,19 +167,44 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 #endif
         return Status::noOp();
     }
-    if (manifestRanges_[rangeIdx].startGen != range.startGen ||
-        manifestRanges_[rangeIdx].endGen   != range.endGen) {
-        CR_T1(ms_exist);
+
+    ManifestRange parent = manifestRanges_[rangeIdx];
+    bool hasLeft  = (range.startGen > parent.startGen);
+    bool hasRight = (range.endGen   < parent.endGen);
+
+    // Quick RAM scan: does the subrange contain any live records?
+    // Dead prefix/suffix costs 0 extra ranges; dead middle costs +1.
+    // Using the live delta for dead subranges would block dead-range cleanup
+    // at range count 4 even though no new ranges would be created.
+    const bool rangeHasLive = std::any_of(records_.begin(), records_.end(),
+        [&](const SegmentRecord& sr) {
+            return sr.segmentGeneration >= range.startGen &&
+                   sr.segmentGeneration <= range.endGen;
+        });
+    const std::uint32_t liveDelta = (hasLeft && hasRight) ? 2u : (hasLeft || hasRight) ? 1u : 0u;
+    const std::uint32_t deadDelta = (hasLeft && hasRight) ? 1u : 0u;
+    const std::uint32_t gateDelta = rangeHasLive ? liveDelta : deadDelta;
+
+    // Range-count gate: if the split would exceed kManifestMaxRanges, fall back to
+    // the full parent (maintenance path) or return noOp (hot path).
+    CompactionRange inputRange = range;
+    if (manifestRanges_.size() + gateDelta > kManifestMaxRanges) {
+        if (allowFallback == AllowFullRangeFallback::no) {
+            CR_T1(ms_exist);
 #ifdef ARDUINO
-        logLine("noOp(notExact)");
+            logLine("noOp(splitLimit)");
 #endif
-        return Status::noOp();
+            return Status::noOp();
+        }
+        inputRange = {parent.startGen, parent.endGen};
+        hasLeft  = false;
+        hasRight = false;
     }
     CR_T1(ms_exist);
 
     const bool subrangeReachesLastGen =
         !manifestRanges_.empty() &&
-        range.endGen == manifestRanges_.back().endGen;
+        inputRange.endGen == manifestRanges_.back().endGen;
     const bool tailCanMergeWithLastRange =
         activeSegmentBytes_ > kSegmentHeaderBytes &&
         !manifestRanges_.empty() &&
@@ -186,12 +213,42 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
         activeTailDependenciesTracked_ &&
         std::all_of(activeTailAffectedGenerations_.begin(), activeTailAffectedGenerations_.end(),
             [&](std::uint32_t gen) {
-                return gen >= range.startGen && gen <= activeGeneration_;
+                return gen >= inputRange.startGen && gen <= activeGeneration_;
             });
     const bool wouldRotate = subrangeReachesLastGen && tailCanMergeWithLastRange && tailDepsContained;
 
-    const std::uint32_t hypoStartGen = range.startGen;
-    const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : range.endGen;
+    // Pre-rotate range-count gate — evaluated before preflight so that a fallback
+    // expansion of inputRange is reflected in the hypo calculations below.
+    // When wouldRotate, the parent extends rightward to activeGeneration_
+    // (parent.startGen unchanged), hasRight becomes false, hasLeft is unchanged.
+    // postDelta = hasLeft ? 1 : 0.
+    // Gate only applies when the hypothetical extended range has live records:
+    // if there are no live records, rotate will not fire (guarded below by
+    // !hypoPayloadBytes.empty()), so dead-subrange cleanup must not be blocked.
+    // activeSegmentBytes_ > kSegmentHeaderBytes means the tail has events, but
+    // those could all be tombstones — use a cheap RAM scan instead.
+    const std::uint32_t hypoCheckEnd = wouldRotate ? activeGeneration_ : inputRange.endGen;
+    const bool hypoHasLive = std::any_of(records_.begin(), records_.end(),
+        [&](const SegmentRecord& sr) {
+            return sr.segmentGeneration >= inputRange.startGen &&
+                   sr.segmentGeneration <= hypoCheckEnd;
+        });
+    if (wouldRotate && hypoHasLive && hasLeft) {
+        if (manifestRanges_.size() + 1 > kManifestMaxRanges) {
+            if (allowFallback == AllowFullRangeFallback::no) {
+#ifdef ARDUINO
+                logLine("noOp(splitLimit/preRotate)");
+#endif
+                return Status::noOp();
+            }
+            inputRange = {parent.startGen, parent.endGen};
+            hasLeft  = false;
+            hasRight = false;
+        }
+    }
+
+    const std::uint32_t hypoStartGen = inputRange.startGen;
+    const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : inputRange.endGen;
 #ifdef ARDUINO
     hypo_e = hypoEndGen;
 #endif
@@ -276,9 +333,9 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     }
     CR_T1(ms_rotate);
 
-    // Phase: re-derive parent range after potential rotate.
+    // Phase: re-derive parent range after potential rotate (defensive reclassification).
     CR_T0(ms_resolve);
-    rangeIdx = findParentRangeIdx(range.startGen, range.endGen);
+    rangeIdx = findParentRangeIdx(inputRange.startGen, inputRange.endGen);
     if (rangeIdx >= manifestRanges_.size()) {
         CR_T1(ms_resolve);
 #ifdef ARDUINO
@@ -286,20 +343,22 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 #endif
         return Status::noOp();
     }
-    const CompactionRange effectiveRange = {
-        manifestRanges_[rangeIdx].startGen,
-        manifestRanges_[rangeIdx].endGen
-    };
+    parent = manifestRanges_[rangeIdx];
+    if (wouldRotate && !hypoPayloadBytes.empty()) {
+        inputRange.endGen = parent.endGen; // extend to include merged tail
+    }
+    hasLeft  = (inputRange.startGen > parent.startGen);
+    hasRight = (inputRange.endGen   < parent.endGen);
     CR_T1(ms_resolve);
 #ifdef ARDUINO
-    eff_s = effectiveRange.startGen; eff_e = effectiveRange.endGen;
-    n_in  = effectiveRange.endGen - effectiveRange.startGen + 1;
+    eff_s = inputRange.startGen; eff_e = inputRange.endGen;
+    n_in  = inputRange.endGen - inputRange.startGen + 1;
 #endif
 
     // Phase: collectLiveRecords.
     CR_T0(ms_collect);
     std::vector<CompactionLiveRecord> liveRecords;
-    Status st = collectLiveRecords(effectiveRange, liveRecords);
+    Status st = collectLiveRecords(inputRange, liveRecords);
     CR_T1(ms_collect);
     if (!st.ok()) {
 #ifdef ARDUINO
@@ -312,8 +371,16 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 #endif
 
     if (liveRecords.empty()) {
+        // Dead subrange: drop it and leave any remainder fragments in place.
         std::vector<ManifestRange> newRanges = manifestRanges_;
         newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
+        std::size_t insertAt = rangeIdx;
+        if (hasLeft)
+            newRanges.insert(newRanges.begin() + insertAt++,
+                             ManifestRange{parent.startGen, inputRange.startGen - 1});
+        if (hasRight)
+            newRanges.insert(newRanges.begin() + insertAt,
+                             ManifestRange{inputRange.endGen + 1, parent.endGen});
         ManifestData md;
         md.ranges         = std::move(newRanges);
         md.tailGeneration = activeGeneration_;
@@ -329,8 +396,10 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             return st;
         }
         CR_T0(ms_cleanup);
-        cleanupInputSegments(effectiveRange);
+        cleanupInputSegments(inputRange);
         CR_T1(ms_cleanup);
+        for (std::uint32_t g = inputRange.startGen; g <= inputRange.endGen; ++g)
+            activeTailAffectedGenerations_.erase(g);
 #ifdef ARDUINO
         logLine("ok(dead)");
 #endif
@@ -399,15 +468,29 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     }
     CR_T1(ms_write);
 
+    // Build manifest: erase parent, splice in left remainder + output + right remainder.
     std::vector<ManifestRange> newRanges = manifestRanges_;
-    newRanges[rangeIdx] = {firstNewGen, lastNewGen};
-    if (rangeIdx + 1 < newRanges.size() && newRanges[rangeIdx].endGen + 1 == newRanges[rangeIdx + 1].startGen) {
-        newRanges[rangeIdx].endGen = newRanges[rangeIdx + 1].endGen;
-        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx) + 1);
+    newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
+    std::size_t insertAt = rangeIdx;
+    if (hasLeft)
+        newRanges.insert(newRanges.begin() + insertAt++,
+                         ManifestRange{parent.startGen, inputRange.startGen - 1});
+    const std::size_t outputIdx = insertAt;
+    newRanges.insert(newRanges.begin() + insertAt++, ManifestRange{firstNewGen, lastNewGen});
+    if (hasRight)
+        newRanges.insert(newRanges.begin() + insertAt,
+                         ManifestRange{inputRange.endGen + 1, parent.endGen});
+
+    // Two-sided contiguity merge on the output range.
+    if (outputIdx + 1 < newRanges.size() &&
+        newRanges[outputIdx].endGen + 1 == newRanges[outputIdx + 1].startGen) {
+        newRanges[outputIdx].endGen = newRanges[outputIdx + 1].endGen;
+        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(outputIdx) + 1);
     }
-    if (rangeIdx > 0 && newRanges[rangeIdx - 1].endGen + 1 == newRanges[rangeIdx].startGen) {
-        newRanges[rangeIdx - 1].endGen = newRanges[rangeIdx].endGen;
-        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(rangeIdx));
+    if (outputIdx > 0 &&
+        newRanges[outputIdx - 1].endGen + 1 == newRanges[outputIdx].startGen) {
+        newRanges[outputIdx - 1].endGen = newRanges[outputIdx].endGen;
+        newRanges.erase(newRanges.begin() + static_cast<std::ptrdiff_t>(outputIdx));
     }
 
     ManifestData md;
@@ -428,14 +511,16 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
 
     // Phase: cleanup input segments (known retired range, no listFiles needed).
     CR_T0(ms_cleanup);
-    cleanupInputSegments(effectiveRange);
+    cleanupInputSegments(inputRange);
     CR_T1(ms_cleanup);
+    for (std::uint32_t g = inputRange.startGen; g <= inputRange.endGen; ++g)
+        activeTailAffectedGenerations_.erase(g);
 
     // Phase: update in-RAM records to point at new segment generations.
     CR_T0(ms_replace);
     for (auto& r : records_) {
-        if (r.segmentGeneration < effectiveRange.startGen ||
-            r.segmentGeneration > effectiveRange.endGen) continue;
+        if (r.segmentGeneration < inputRange.startGen ||
+            r.segmentGeneration > inputRange.endGen) continue;
         for (const auto& rep : replacements) {
             if (rep.sequence == r.sequence) { r = rep; break; }
         }
@@ -504,20 +589,20 @@ AppendLogStore::CompactionRange AppendLogStore::narrowRange(
     return best;
 }
 
-Status AppendLogStore::compactOneSegment() {
+Status AppendLogStore::compactOneSegment(AllowFullRangeFallback allowFallback) {
     auto rangeOpt = chooseCompactionRange();
     if (!rangeOpt) return Status::noOp();
     const CompactionRange range = config_.maxOutputSegments > 0
         ? narrowRange(*rangeOpt, config_.maxOutputSegments)
         : *rangeOpt;
-    return compactRange(range);
+    return compactRange(range, nullptr, allowFallback);
 }
 
 CompactIdleResult AppendLogStore::compactIdle(std::size_t maxSteps) {
     CompactIdleResult result{};
     result.status = Status::success();
     for (std::size_t i = 0; i < maxSteps; ++i) {
-        Status st = compactOneSegment();
+        Status st = compactOneSegment(AllowFullRangeFallback::yes);
         ++result.stepsRun;
         if (!st.ok()) {
             result.status = st;
