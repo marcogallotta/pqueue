@@ -181,6 +181,71 @@ do { cr = queue.compactIdle(1); } while (cr.compactions > 0);
 
 ---
 
+## Store-and-forward layers
+
+For most IoT use cases you do not need to drive `Queue` directly. Two
+higher-level wrappers handle the submit/drain lifecycle on top of the queue.
+
+### pqueue::Outbox
+
+`pqueue::Outbox` is a transport-agnostic store-and-forward layer. You provide
+a `SendCallback` that attempts delivery; the outbox handles queueing, retry
+backoff, and rate limiting.
+
+```cpp
+#include "pqueue/outbox.h"
+
+pqueue::SendResult mySend(void* ctx, const std::string& payload, const pqueue::RetryState&) {
+    if (myTransport.send(payload)) return {pqueue::SendDecision::Sent};
+    return {pqueue::SendDecision::RetryLater};
+}
+
+pqueue::Config qcfg;
+qcfg.storeLayout    = pqueue::StoreLayout::AppendLog;
+qcfg.basePath       = "/outbox";
+qcfg.reservedBytes  = 65536;
+
+pqueue::OutboxConfig ocfg;
+ocfg.retryDelayMs   = 10000;
+
+pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
+
+outbox.submit(payload);          // queue or send immediately if online
+outbox.drainUpTo(50);            // attempt up to 50 sends
+```
+
+### pqueue::http::Outbox
+
+`pqueue::http::Outbox` wraps `pqueue::Outbox` for HTTP POST use cases. You
+provide a `Transport` implementation (or use `CallbackTransport`); the outbox
+serialises requests into the queue and replays them when the network is
+available.
+
+```cpp
+#include "pqueue/http/outbox.h"
+
+pqueue::http::Config cfg;
+cfg.queue.storeLayout  = pqueue::StoreLayout::AppendLog;
+cfg.queue.basePath     = "/outbox";
+cfg.queue.reservedBytes = 65536;
+cfg.baseUrl            = "https://api.example.com";
+
+pqueue::http::Outbox outbox(cfg, transport, myClock, nullptr);
+
+outbox.submitPost("/readings", body);   // queue or send immediately
+outbox.drainUpTo(50);                   // replay queued requests
+```
+
+### Idle compaction with Outbox
+
+`compactIdle` is not currently exposed on `pqueue::Outbox` or
+`pqueue::http::Outbox`. If you use these classes, compaction falls back to the
+hot-path trigger inside `submit`. For explicit idle compaction control, use
+`pqueue::Queue` directly instead.
+
+
+---
+
 ## Configuration reference
 
 These fields on `pqueue::Config` control the AppendLog backend
