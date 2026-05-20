@@ -110,6 +110,16 @@ std::vector<AppendLogStore::SegmentStat> AppendLogStore::segmentStats() const {
     return result;
 }
 
+std::size_t AppendLogStore::findParentRangeIdx(std::uint32_t startGen, std::uint32_t endGen) const {
+    if (startGen > endGen) return manifestRanges_.size();
+    for (std::size_t i = 0; i < manifestRanges_.size(); ++i) {
+        const auto& r = manifestRanges_[i];
+        if (r.startGen <= startGen && endGen <= r.endGen)
+            return i;
+    }
+    return manifestRanges_.size();
+}
+
 Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t* outputSegCount) {
 #ifdef ARDUINO
     const std::uint32_t t_start = millis();
@@ -145,27 +155,29 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     #define CR_T1(var)
 #endif
 
-    // Phase: range existence check.
+    // Phase: find parent range (exact match required until subrange splice is implemented).
     CR_T0(ms_exist);
-    {
-        bool found = false;
-        for (const auto& r : manifestRanges_) {
-            if (r.startGen == range.startGen && r.endGen == range.endGen) { found = true; break; }
-        }
-        if (!found) {
-            CR_T1(ms_exist);
+    std::size_t rangeIdx = findParentRangeIdx(range.startGen, range.endGen);
+    if (rangeIdx >= manifestRanges_.size()) {
+        CR_T1(ms_exist);
 #ifdef ARDUINO
-            logLine("noOp(notFound)");
+        logLine("noOp(notFound)");
 #endif
-            return Status::noOp();
-        }
+        return Status::noOp();
+    }
+    if (manifestRanges_[rangeIdx].startGen != range.startGen ||
+        manifestRanges_[rangeIdx].endGen   != range.endGen) {
+        CR_T1(ms_exist);
+#ifdef ARDUINO
+        logLine("noOp(notExact)");
+#endif
+        return Status::noOp();
     }
     CR_T1(ms_exist);
 
-    const bool selectedIsLastRange =
+    const bool subrangeReachesLastGen =
         !manifestRanges_.empty() &&
-        range.startGen == manifestRanges_.back().startGen &&
-        range.endGen   == manifestRanges_.back().endGen;
+        range.endGen == manifestRanges_.back().endGen;
     const bool tailCanMergeWithLastRange =
         activeSegmentBytes_ > kSegmentHeaderBytes &&
         !manifestRanges_.empty() &&
@@ -176,7 +188,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
             [&](std::uint32_t gen) {
                 return gen >= range.startGen && gen <= activeGeneration_;
             });
-    const bool wouldRotate = selectedIsLastRange && tailCanMergeWithLastRange && tailDepsContained;
+    const bool wouldRotate = subrangeReachesLastGen && tailCanMergeWithLastRange && tailDepsContained;
 
     const std::uint32_t hypoStartGen = range.startGen;
     const std::uint32_t hypoEndGen   = wouldRotate ? activeGeneration_ : range.endGen;
@@ -264,28 +276,21 @@ Status AppendLogStore::compactRange(const CompactionRange& range, std::uint32_t*
     }
     CR_T1(ms_rotate);
 
-    // Phase: re-resolve effective range.
+    // Phase: re-derive parent range after potential rotate.
     CR_T0(ms_resolve);
-    CompactionRange effectiveRange = range;
-    for (const auto& r : manifestRanges_) {
-        if (r.startGen <= range.startGen && range.startGen <= r.endGen) {
-            effectiveRange = {r.startGen, r.endGen};
-            break;
-        }
-    }
-    auto it = std::find_if(manifestRanges_.begin(), manifestRanges_.end(),
-        [&](const ManifestRange& r) {
-            return r.startGen == effectiveRange.startGen && r.endGen == effectiveRange.endGen;
-        });
-    CR_T1(ms_resolve);
-    if (it == manifestRanges_.end()) {
+    rangeIdx = findParentRangeIdx(range.startGen, range.endGen);
+    if (rangeIdx >= manifestRanges_.size()) {
+        CR_T1(ms_resolve);
 #ifdef ARDUINO
-        eff_s = effectiveRange.startGen; eff_e = effectiveRange.endGen;
         logLine("noOp(lostRange)");
 #endif
         return Status::noOp();
     }
-    const std::size_t rangeIdx = static_cast<std::size_t>(it - manifestRanges_.begin());
+    const CompactionRange effectiveRange = {
+        manifestRanges_[rangeIdx].startGen,
+        manifestRanges_[rangeIdx].endGen
+    };
+    CR_T1(ms_resolve);
 #ifdef ARDUINO
     eff_s = effectiveRange.startGen; eff_e = effectiveRange.endGen;
     n_in  = effectiveRange.endGen - effectiveRange.startGen + 1;
