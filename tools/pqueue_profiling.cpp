@@ -533,6 +533,131 @@ CompactionBurstResult scenarioCompactionBurst(
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Idle compaction scenario
+// Models the intended usage pattern:
+//   1. Enqueue a burst (no compaction during burst)
+//   2. Drain (pop popRatio fraction)
+//   3. compactIdle until clean (measure steps and per-step latency)
+//   4. Next burst -- assert zero hot-path compactions
+// ---------------------------------------------------------------------------
+
+struct IdleCompactionResult {
+    std::uint32_t burstSize     = 0;
+    std::uint32_t payloadBytes  = 0;
+    std::uint32_t cycles        = 0;
+    std::uint32_t idleSteps     = 0;     // total compactIdle steps across all cycles
+    std::uint32_t idleNoOps     = 0;
+    std::uint64_t maxStepUs     = 0;     // worst single idle step
+    std::uint64_t totalIdleUs   = 0;     // sum of all idle steps
+    std::uint32_t hotCompactions = 0;    // compactions triggered on write path (should be 0)
+    std::uint32_t deadlocks     = 0;
+    std::uint32_t capExhausted  = 0;
+    bool          ok            = true;
+};
+
+IdleCompactionResult scenarioIdleCompaction(
+    std::uint32_t burstSize,
+    std::uint32_t payloadBytes,
+    std::uint32_t cycles,
+    float popRatio = 0.90f,
+    FsLatency latency = {})
+{
+    constexpr std::uint32_t kMaxSegmentBytes = 4096;
+    constexpr std::uint32_t kMaxTotalBytes   = 1024 * 1024;
+
+    auto memFs    = std::make_shared<MemoryFileSystem>();
+    auto counting = std::make_shared<CountingFileSystem>(memFs);
+    counting->setLatency(latency);
+
+    pqueue::AppendLogConfig cfg;
+    cfg.basePath        = "/idle_prof";
+    cfg.backend         = pqueue::StorageBackend::Posix;
+    cfg.maxSegmentBytes = kMaxSegmentBytes;
+    cfg.maxSegments     = 200;
+    cfg.maxTotalBytes   = kMaxTotalBytes;
+    cfg.minFreeBytes    = 0;
+    cfg.fileSystem      = counting;
+
+    pqueue::AppendLogStore store(cfg);
+    IdleCompactionResult result;
+    result.burstSize   = burstSize;
+    result.payloadBytes = payloadBytes;
+    result.cycles      = cycles;
+
+    if (!store.mount().ok()) { result.ok = false; return result; }
+
+    const std::string payload(payloadBytes, 'x');
+    std::uint32_t nextSeq   = 1;
+    std::uint32_t queueSize = 0;
+
+    for (std::uint32_t cycle = 0; cycle < cycles; ++cycle) {
+        // Phase 1: enqueue burst -- detect hot-path compactions via readFile delta
+        // Rotations do no readFile; compactions read input segments.
+        for (std::uint32_t i = 0; i < burstSize; ++i) {
+            const std::uint64_t rfBefore = counting->counters().readFile;
+            const auto st = store.writeRecord(nextSeq, payload);
+            if (counting->counters().readFile > rfBefore) ++result.hotCompactions;
+            if (st.ok()) {
+                pqueue::FileStoreIndex dummy;
+                store.writeIndex(dummy);
+                ++nextSeq;
+                ++queueSize;
+            } else {
+                bool reclaimable = false;
+                for (const auto& rs : buildCompactRangeStats(store))
+                    if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
+                if (reclaimable) ++result.deadlocks;
+                else             ++result.capExhausted;
+            }
+        }
+
+        // Phase 2: drain
+        const std::uint32_t toPop = static_cast<std::uint32_t>(static_cast<float>(queueSize) * popRatio);
+        for (std::uint32_t i = 0; i < toPop; ++i) {
+            pqueue::FileStoreIndex idx;
+            if (store.readIndex(idx).ok() && idx.count > 0) {
+                idx.head++; idx.count--;
+                store.writeIndex(idx);
+                --queueSize;
+            }
+        }
+
+        // Phase 3: idle compaction -- run to completion
+        for (;;) {
+            const std::uint64_t simBefore = counting->counters().simLatencyUs;
+            const auto cr = store.compactIdle(1);
+            const std::uint64_t simDelta = counting->counters().simLatencyUs - simBefore;
+            ++result.idleSteps;
+            if (cr.compactions > 0) {
+                result.maxStepUs   = std::max(result.maxStepUs, simDelta);
+                result.totalIdleUs += simDelta;
+            } else {
+                ++result.idleNoOps;
+                break;
+            }
+        }
+    }
+
+    return result;
+}
+
+void printIdleCompactionResult(const IdleCompactionResult& r, bool simMode) {
+    std::printf("idle_compaction  burst=%u payload=%uB cycles=%u pop=90%%\n",
+        r.burstSize, r.payloadBytes, r.cycles);
+    std::printf("  idleSteps=%-4u idleNoOps=%-2u hotCompactions=%u\n",
+        r.idleSteps, r.idleNoOps, r.hotCompactions);
+    if (simMode) {
+        std::printf("  maxStepLatency=%.1fms  totalIdleLatency=%.1fms\n",
+            static_cast<double>(r.maxStepUs) / 1000.0,
+            static_cast<double>(r.totalIdleUs) / 1000.0);
+    }
+    std::printf("  deadlocks=%-4u capExhausted=%-4u\n", r.deadlocks, r.capExhausted);
+    if (!r.ok) std::printf("  FAILED: mount error\n");
+    if (r.hotCompactions > 0)
+        std::printf("  WARNING: hot-path compactions fired during burst -- clean-storage invariant violated\n");
+}
+
 void printCompactionBurstResult(const CompactionBurstResult& r) {
     std::printf("compaction_burst  burst=%u payload=%uB cycles=%u maxOutSegs=%u maxInSegs=%u\n",
         r.burstSize, r.payloadBytes, r.cycles, r.maxOutSegsLimit, r.maxInSegsLimit);
@@ -624,7 +749,8 @@ int main(int argc, char** argv) {
     const std::uint32_t payloadBytes = argc >= 4 ? static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10)) : 256;
 
     if (mode != "queue" && mode != "validate" && mode != "outbox" && mode != "all"
-        && mode != "compaction" && mode != "compaction-sim") {
+        && mode != "compaction" && mode != "compaction-sim"
+        && mode != "idle" && mode != "idle-sim") {
         usage(argv[0]);
         return 2;
     }
@@ -646,6 +772,14 @@ int main(int argc, char** argv) {
         const std::uint32_t cycles = argc >= 5 ? static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 10)) : 3;
         const FsLatency latency = (mode == "compaction-sim") ? littleFsSimLatency() : FsLatency{};
         printCompactionBurstResult(scenarioCompactionBurst(records, payloadBytes, cycles, 8, 0.10f, 3, latency));
+        return 0;
+    }
+
+    if (mode == "idle" || mode == "idle-sim") {
+        const std::uint32_t cycles = argc >= 5 ? static_cast<std::uint32_t>(std::strtoul(argv[4], nullptr, 10)) : 3;
+        const FsLatency latency = (mode == "idle-sim") ? littleFsSimLatency() : FsLatency{};
+        printIdleCompactionResult(scenarioIdleCompaction(records, payloadBytes, cycles, 0.90f, latency),
+                                  mode == "idle-sim");
         return 0;
     }
 

@@ -71,10 +71,14 @@ Compaction trigger: rising-edge on segment count (new segment written), fires if
   make -j12 profiling
   ./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles>
   ./build/pqueue-profiling compaction-sim <burst> <payloadBytes> <cycles>
+  ./build/pqueue-profiling idle <burst> <payloadBytes> <cycles>
+  ./build/pqueue-profiling idle-sim <burst> <payloadBytes> <cycles>
 
 `compaction`: reports I/O op counts (readFile, readAt, writeFile, listFiles, removeFile) and wall-clock latency. Use for correctness and op-count regression.
 
 `compaction-sim`: accumulates simulated latency using per-op LittleFS cost estimates (no sleeping -- pure arithmetic). Use to predict on-device MaxLatency before flashing.
+
+`idle` / `idle-sim`: models the burst->drain->compactIdle pattern. Phase 1 enqueues a burst (detecting hot-path compactions via readFile delta -- rotations produce no readFile, compactions do). Phase 2 drains 90% of records. Phase 3 calls `compactIdle(1)` in a loop until noOp, measuring per-step latency. Reports idleSteps, idleNoOps, maxStepLatency, totalIdleLatency, and hotCompactions. Use to verify the clean-storage invariant: hotCompactions should be 0 if idle compaction fully cleans up between cycles.
 
 Simulated latency model (`littleFsSimLatency()`, scaled 100x from observed device timings):
 
@@ -87,6 +91,13 @@ Simulated latency model (`littleFsSimLatency()`, scaled 100x from observed devic
 writeFile and listFiles use variable costs because data size and directory size affect LittleFS GC pressure and scan time. Calibrated from Run 4 (burst=500/pop=90%/rec=492B): simMaxLatency=48.6ms x 100 = 4860ms vs actual 4861ms. Prior constants overestimated by ~45% for write-heavy workloads; rescaled uniformly by 0.69. Individual op multipliers may differ -- next calibration round should measure ops independently.
 
 With subrange compaction enabled (same workload, same model): simMaxLatency=41.6ms, predicting ~4160ms on device (~14% improvement). On-device validation pending.
+
+**Idle compaction sim results (subrange compaction + compactIdle pattern):**
+
+  burst=500 payload=492B cycles=3 pop=90%:  idleSteps=10  maxStepLatency=48.5ms  totalIdle=154.4ms  hotCompactions=0
+  burst=100 payload=150B cycles=5 pop=90%:  idleSteps=18  maxStepLatency=10.0ms  totalIdle=65.6ms   hotCompactions=0
+
+hotCompactions=0 confirms the clean-storage invariant holds: idle compaction between cycles fully cleans the queue, so subsequent enqueue bursts never trigger hot-path compaction. maxStepLatency for the heavy workload predicts ~4850ms per idle step on device; this is a worst-case single step, not per-burst latency.
 
 ## On-device validation
 
