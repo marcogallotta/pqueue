@@ -63,7 +63,11 @@ compaction below).
 
 ### Drain
 
-`pop()` appends a tombstone event to the active tail segment (one `writeAt`).
+`pop()` appends a tombstone to the active tail segment. The common case is one
+`writeAt`. If the active tail is full, the pop rotates the tail first (writes a
+new segment header and publishes a manifest) before appending the tombstone.
+Pops never trigger compaction, but they are not always a single write.
+
 It does not rewrite old segment files or reclaim space immediately. Dead records
 accumulate in the existing segments until compaction runs.
 
@@ -254,9 +258,10 @@ These fields on `pqueue::Config` control the AppendLog backend
 | Field | Default | Description |
 |---|---|---|
 | `maxSegmentBytes` | 4096 | Max bytes per segment file. Larger segments mean fewer files and less directory overhead, but coarser compaction granularity. |
-| `reservedBytes` | 131072 | Total flash budget for the queue (`maxTotalBytes` in the underlying store). Set this to the flash you can afford, leaving headroom for LittleFS metadata. |
-| `maxSegments` | 16 | Max number of segment files on disk. Each segment is one LittleFS file. Keep within LittleFS directory entry limits for your block device. |
-| `minFreeBytes` | 32768 | Reserve this many bytes on the filesystem before writing. Prevents the queue from consuming all available flash. |
+| `reservedBytes` | 131072 | Logical footprint cap for queue segment files (`maxTotalBytes` in the underlying store). Does not reserve or preallocate flash. When the total size of all segment files approaches this limit, writes compact or fail rather than growing further. |
+| `maxSegments` | 16 | Compaction pressure threshold. When the live segment count exceeds this value, `enqueue` attempts one compaction step before rotating. Not a hard file-count limit: if compaction is a no-op (all data is live), segment count can exceed this value. |
+| `minFreeBytes` | 32768 | Real filesystem safety floor. Writes are rejected when LittleFS free space would drop below this value. This is the actual guard against consuming all available flash, independent of `reservedBytes`. |
+| `recordSizeBytes` | 492 | Maximum record payload size. `enqueue` returns `RecordTooLarge` for records exceeding this limit. Also caps how large a single record can be relative to `maxSegmentBytes`. |
 
 `maxOutputSegments` (max output segments per compaction step, default 8) is only
 configurable at the `AppendLogStore` level. Through `Queue` it is fixed at 8.
@@ -264,13 +269,17 @@ To change it, construct an `AppendLogStore` directly instead of using `Queue`.
 
 ### Sizing guidance
 
-A rough capacity estimate:
+A rough clean-burst capacity estimate:
 
 ```
-usable_records ~ reservedBytes / (payloadBytes + ~8)
+records_per_burst ~ reservedBytes / (payloadBytes + 24)
 ```
 
-For a 64KB budget with 492-byte payloads: ~64000 / 500 = ~128 records.
+The `24` is the per-record AppendLog overhead (16-byte enqueue header + 8-byte
+trailer). This is an optimistic lower bound: it does not account for segment
+headers (~20 bytes amortized per record at 8-16 records per segment), pop
+tombstones, rewrite events, dead data from partial drain cycles, or dangling
+files. For a 64KB budget with 492-byte payloads: ~64000 / 516 = ~124 records.
 
 Set `maxSegmentBytes` so each segment holds 8-16 records. Too small and you
 accumulate many files; too large and each compaction step processes more data
@@ -309,6 +318,13 @@ Pass your config values as flags so the simulation matches your deployment:
 
 `Queue` users: leave `--max-output-segments` at 8 (the fixed default). Only
 change it if you construct `AppendLogStore` directly.
+
+**Simulator limitation:** the profiler uses an in-memory filesystem with
+unlimited free space and sets `minFreeBytes = 0`. It models compaction behavior
+and footprint cap exhaustion (`maxTotalBytes`) but cannot simulate the
+`minFreeBytes` filesystem safety floor. If your deployment relies on
+`minFreeBytes` to prevent full-flash scenarios, validate that separately on
+device.
 
 ### Reading the output
 
@@ -422,16 +438,20 @@ The AppendLog store is built on two durability primitives:
 **Append-only segments.** Enqueue events and pop tombstones are appended to
 the active tail segment. Compaction writes surviving records into new segment
 files, then publishes a new manifest. Existing segment content is never
-overwritten. A torn write at the tail (crash mid-append) is detected on remount
-by checksum and the partial event is truncated. All events before the torn one
-are intact.
+overwritten. A torn write at the active tail (crash mid-append) is detected on
+remount by checksum and the partial event is truncated; all events before it are
+intact. Corruption in a sealed (non-active) segment is fatal: remount returns
+`DataCorrupt`.
 
 **Atomic manifest publish.** The manifest (the index of which segment
 generations are live) is written to an inactive slot before the active pointer
 advances. If power fails between the slot write and the pointer update, remount
 picks up the previous valid manifest. Compaction output is only visible after
-its manifest is committed; partial output segments from an interrupted
-compaction are cleaned up on remount.
+its manifest is committed; unpublished output segments are not referenced by the
+manifest and are ignored on remount. Unpublished output segments are not referenced by the manifest and are ignored
+on remount. Generic dangling segment files are cleaned lazily during mount
+scanning. Successful compaction also removes the retired input segments it just
+replaced.
 
 **What survives a crash:**
 
