@@ -130,7 +130,6 @@ private:
     std::size_t findParentRangeIdx(std::uint32_t startGen, std::uint32_t endGen) const;
     void cleanupInputSegments(const CompactionRange& effectiveRange);
     void cleanupOneDanglingSegment();
-    void cleanupAllDanglingSegments();
 
     // Applies manifest fields to RAM state (activeGenerations_, nextGeneration_).
     // Called by publishManifest() after a successful write, and by scanSegments()

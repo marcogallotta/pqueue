@@ -219,7 +219,7 @@ TEST_CASE("cleanup: compactOneSegment deletes old segment files and preserves li
 
 TEST_CASE("cleanup: dangling segment is removed on mount") {
     // A segment whose generation is not referenced by the manifest is cleaned up
-    // during mount (scanSegments → cleanupAllDanglingSegments).
+    // during mount (scanSegments → cleanupOneDanglingSegment).
     plantLayout({
         .ranges = {{1, 1}}, .tail = 2, .next = 3,
         .segments = {

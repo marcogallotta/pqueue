@@ -742,36 +742,4 @@ void AppendLogStore::cleanupOneDanglingSegment() {
 #endif
 }
 
-void AppendLogStore::cleanupAllDanglingSegments() {
-    auto f = fs();
-    if (!f) return;
-
-    std::vector<std::string> files;
-    if (!f->listFiles(files).ok()) return;
-
-    for (const auto& name : files) {
-        std::uint32_t gen = 0;
-        if (!isSegmentName(name, gen)) continue;
-        const bool active = std::find(activeGenerations_.begin(), activeGenerations_.end(), gen)
-                            != activeGenerations_.end();
-        if (active) continue;
-
-        std::uint64_t sz = 0;
-        f->fileSize(name, sz);
-        const bool removed = f->removeFile(name).ok();
-        if (removed) {
-            totalOnDiskBytes_ -= static_cast<std::uint32_t>(sz);
-            sealedSegmentBytes_.erase(gen);
-        }
-#ifdef ARDUINO
-        if (removed) {
-            Serial.printf("[cleanup] deleted=%s\n", name.c_str());
-        } else {
-            Serial.printf("[cleanup] rm-failed=%s\n", name.c_str());
-        }
-        Serial.flush();
-#endif
-    }
-}
-
 } // namespace pqueue
