@@ -86,6 +86,8 @@ Simulated latency model (`littleFsSimLatency()`, scaled 100x from observed devic
 
 writeFile and listFiles use variable costs because data size and directory size affect LittleFS GC pressure and scan time. Calibrated from Run 4 (burst=500/pop=90%/rec=492B): simMaxLatency=48.6ms x 100 = 4860ms vs actual 4861ms. Prior constants overestimated by ~45% for write-heavy workloads; rescaled uniformly by 0.69. Individual op multipliers may differ -- next calibration round should measure ops independently.
 
+With subrange compaction enabled (same workload, same model): simMaxLatency=41.6ms, predicting ~4160ms on device (~14% improvement). On-device validation pending.
+
 ## On-device validation
 
 Test: `tests/arduino/test_pqueue_compaction/test_main.cpp`. Environment: `esp32s3-compaction`. Build and upload: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-testing`.
