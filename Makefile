@@ -41,6 +41,7 @@ TEST_SRC := \
 	tests/posix/pqueue_append_log_manifest.cpp \
 	tests/posix/pqueue_append_log_rollover.cpp \
 	tests/posix/pqueue_append_log_compaction.cpp \
+	tests/posix/pqueue_append_log_seq_edges.cpp \
 	tests/posix/pqueue_diagnostics.cpp \
 	tests/posix/pqueue_envelope.cpp \
 	tests/posix/pqueue_file_store.cpp \
