@@ -154,31 +154,20 @@ will have a dangling `pqueue.spool` that AppendLog ignores.
 
 ## Removal plan
 
-1. **AppendLog validation and repair.** `AppendLogStore::validateUnlocked` and
-   `rebuildMetadata` must be production-ready before FixedSlot can be dropped.
+1. **AppendLog validation and repair.** Migration plan:
+   `docs/appendlog-validation-repair.md`.
 
-2. **Expose and drive idle compaction through the app path.** The app must call
-   `compactIdle` at the right boundary (between drain and the next burst) so the
-   clean-storage invariant holds in production.
+2. **Expose and drive idle compaction through the app path.** Migration plan:
+   `docs/compactidle-integration.md`.
 
-3. **LittleFS integration tests.** On-device test coverage for AppendLog before
-   it becomes the only backend.
-
-4. **Migrate tests selectively.** Port FixedSlot-only tests that cover behaviour
-   AppendLog must also guarantee; discard tests for FixedSlot-specific mechanics
-   (checkpoint/journal format, slot addressing).
+3. **Migrate tests.** Port Queue/Outbox semantic tests to AppendLog config; discard
+   tests for FixedSlot-specific mechanics (checkpoint/journal format, slot addressing,
+   spool corruption injection). Full plan: `docs/pqueue-test-migration.md`.
 
 5. **Flip defaults.** Change `Config::storeLayout` default from `FixedSlot` to
    `AppendLog`. Smoke-test that nothing regresses with the new default.
 
-6. **Migrate the app.** Update the firmware to pass `StoreLayout::AppendLog`
-   explicitly (or rely on the new default) and remove any app-side references to
-   FixedSlot config fields. Perform a one-shot migration action only if required:
-   either drain the old fixed-slot queue before switching, use a new base path, or
-   explicitly format once under a migration or version flag. Do not unconditionally
-   format on every boot. AppendLog ignores `pqueue.spool` and starts fresh from its
-   own manifest files, so formatting is not required merely to avoid reading
-   fixed-slot data.
+6. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
 
 7. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
    and documentation sections that reference FixedSlot.
