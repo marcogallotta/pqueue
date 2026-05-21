@@ -10,6 +10,8 @@ sync on every mutation. The implementation is split across
 `manifest.cpp` (slot election, publish, apply), and `compaction.cpp`
 (compaction, cleanup).
 
+**POSIX tests:** `tests/posix/pqueue_append_log_compaction.cpp` contains regression coverage for `collectLiveRecords()` FIFO ordering after rewrite+compact+remount (`make -j12 test`).
+
 ---
 
 ## Scan and torn-tail rules

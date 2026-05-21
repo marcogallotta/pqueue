@@ -1612,3 +1612,92 @@ TEST_CASE("rewrite: rewriteFront into newer segment; compact+remount preserves F
     CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "B");
     CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "C");
 }
+
+TEST_CASE("rewrite: pop + rewriteRecord + compact + remount preserves FIFO order (regression)") {
+    // Regression companion to the collectLiveRecords FIFO-sort fix.
+    // After pop() removes the front, rewriteRecord(2,"X") moves seq=2
+    // into the tail segment (gen=4), which has a higher generation than seq=3
+    // (gen=3). Without the sort, collectLiveRecords returns live records in
+    // segment-generation order: [C(gen3), X(gen4), D(gen4)], producing wrong
+    // FIFO output [C, X, D] after compaction. With the fix, records are sorted
+    // by sequence: [X(seq=2), C(seq=3), D(seq=4)].
+    //
+    // maxSegmentBytes=45: each 1-byte record fills exactly one segment.
+    //   enqueue(1..4): ranges=[{1,3}], tail=4.
+    //   pop seq=1: dead in gen=1; pop event lands in gen=4.
+    //   rewriteRecord(2,"X"): REWRITE in gen=4; seq=2.segGen becomes 4.
+    //   Without sort: byGen={gen=3:[C], gen=4:[X,D]} -> compact output [C,X,D].
+    //   With fix: sort by seq -> [X,C,D].
+    resetSpool();
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 45;
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        storeEnqueue(store, 1, "A");
+        storeEnqueue(store, 2, "B");
+        storeEnqueue(store, 3, "C");
+        storeEnqueue(store, 4, "D"); // ranges=[{1,3}], tail=4
+        storePop(store);             // seq=1 dead in gen=1; pop tombstone in gen=4
+        CHECK(store.rewriteRecord(2, "X").ok()); // seq=2.segGen: gen=2 -> gen=4
+        const auto result = store.compactIdle(16);
+        CHECK(result.status.ok());
+        CHECK_GT(result.compactions, 0u);
+    }
+    expectRecordsAfterRemount(cfg, {{2,"X"},{3,"C"},{4,"D"}});
+}
+
+TEST_CASE("rewrite: index head and ordinals are correct after rewrite+compact+remount") {
+    // After a rewrite moves a record into a newer segment, compaction, and remount:
+    // - the index head must still point at the lowest live sequence
+    // - reading by ordinal (head, head+1, head+2, ...) must yield the correct payloads
+    // This validates that the index is internally consistent with the compacted segment layout.
+    //
+    // Setup is the same as the pop+rewrite regression above: after compaction the live
+    // records are seq=2("X"), seq=3("C"), seq=4("D"), so head=2, count=3.
+    resetSpool();
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 45;
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        storeEnqueue(store, 1, "A");
+        storeEnqueue(store, 2, "B");
+        storeEnqueue(store, 3, "C");
+        storeEnqueue(store, 4, "D");
+        storePop(store);
+        CHECK(store.rewriteRecord(2, "X").ok());
+        const auto result = store.compactIdle(16);
+        CHECK(result.status.ok());
+        CHECK_GT(result.compactions, 0u);
+    }
+
+    struct Expected { std::uint32_t seq; const char* payload; };
+    const Expected expected[] = {{2,"X"},{3,"C"},{4,"D"}};
+
+    auto checkOrdinals = [&](pqueue::AppendLogStore& s) {
+        pqueue::FileStoreIndex idx;
+        CHECK(s.readIndex(idx).ok());
+        CHECK_EQ(idx.head, 2u);
+        CHECK_EQ(idx.count, 3u);
+        for (std::uint32_t ordinal = 0; ordinal < 3u; ++ordinal) {
+            const std::uint32_t seq = idx.head + ordinal;
+            CHECK_EQ(seq, expected[ordinal].seq);
+            std::string out;
+            CHECK(s.readRecord(seq, out).ok());
+            CHECK_EQ(out, std::string(expected[ordinal].payload));
+        }
+    };
+
+    pqueue::AppendLogStore s1(cfg);
+    CHECK(s1.mount().ok());
+    checkOrdinals(s1);
+
+    pqueue::AppendLogStore s2(cfg);
+    CHECK(s2.mount().ok());
+    checkOrdinals(s2);
+}
+
+// Randomized model test (rewrite+compact+remount FIFO) deferred -- scope too broad for this patch.
+// Future task: start with no compaction, add remount, then add compactIdle.
+// Every operation must REQUIRE before mutating model; diagnostic output required from the start.
