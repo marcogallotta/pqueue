@@ -17,6 +17,8 @@ namespace {
 
 constexpr const char* kBasePath = "/pqueue_test";
 constexpr const char* kOtherBasePath = "/pqueue_test_other";
+constexpr const char* kAppendLogBasePath = "/pqueue_test_append_log";
+constexpr const char* kAppendLogOtherBasePath = "/pqueue_test_append_log_other";
 constexpr const char* kSpoolPath = "/pqueue_test/pqueue.spool";
 constexpr const char* kRebootStatePath = "/pqueue_reboot_state";
 constexpr std::uint8_t kRebootPhaseVerifyInitial = 1;
@@ -87,6 +89,22 @@ pqueue::Config queueConfigForBase(
 
 pqueue::Config queueConfig(std::size_t recordSizeBytes = 32, std::uint32_t capacityRecords = 8) {
     return queueConfigForBase(kBasePath, recordSizeBytes, capacityRecords);
+}
+
+pqueue::Config appendLogQueueConfigForBase(
+    const char* basePath,
+    std::size_t recordSizeBytes = 32
+) {
+    auto config = queueConfigForBase(basePath, recordSizeBytes, 8);
+    config.storeLayout = pqueue::StoreLayout::AppendLog;
+    config.maxSegmentBytes = 256;
+    config.maxSegments = 8;
+    config.minFreeBytes = 0;
+    return config;
+}
+
+pqueue::Config appendLogQueueConfig(std::size_t recordSizeBytes = 32) {
+    return appendLogQueueConfigForBase(kAppendLogBasePath, recordSizeBytes);
 }
 
 pqueue::OutboxConfig outboxConfig() {
@@ -566,6 +584,170 @@ void test_quick_reboot_persistence() {
     clearRebootState();
 }
 
+// --- AppendLog Queue variants ---
+
+void test_append_log_basic_fifo() {
+    cleanLittleFs();
+    pqueue::Queue queue(appendLogQueueConfig());
+
+    TEST_ASSERT_TRUE(queue.enqueue("one").ok());
+    TEST_ASSERT_TRUE(queue.enqueue("two").ok());
+    TEST_ASSERT_TRUE(queue.enqueue("three").ok());
+
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("one", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("two", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+
+    assertQueueEmpty(queue);
+}
+
+void test_append_log_remount_persistence() {
+    cleanLittleFs();
+    {
+        pqueue::Queue queue(appendLogQueueConfig());
+        TEST_ASSERT_TRUE(queue.enqueue("one").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("two").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("three").ok());
+    }
+
+    pqueue::Queue queue(appendLogQueueConfig());
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("one", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("two", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    assertQueueEmpty(queue);
+}
+
+void test_append_log_pop_persistence() {
+    cleanLittleFs();
+    {
+        pqueue::Queue queue(appendLogQueueConfig());
+        TEST_ASSERT_TRUE(queue.enqueue("one").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("two").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("three").ok());
+        TEST_ASSERT_TRUE(queue.pop().ok());
+        TEST_ASSERT_TRUE(queue.pop().ok());
+    }
+
+    pqueue::Queue queue(appendLogQueueConfig());
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    assertQueueEmpty(queue);
+}
+
+void test_append_log_rewrite_front_persistence() {
+    cleanLittleFs();
+    {
+        pqueue::Queue queue(appendLogQueueConfig());
+        TEST_ASSERT_TRUE(queue.enqueue("old").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("tail").ok());
+        TEST_ASSERT_TRUE(queue.rewriteFront("new").ok());
+    }
+
+    pqueue::Queue queue(appendLogQueueConfig());
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("new", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("tail", out.c_str());
+}
+
+void test_append_log_validate_clean_queue() {
+    cleanLittleFs();
+    pqueue::Queue queue(appendLogQueueConfig());
+
+    TEST_ASSERT_TRUE(queue.enqueue("one").ok());
+    TEST_ASSERT_TRUE(queue.enqueue("two").ok());
+
+    const pqueue::ValidationResult validation = queue.validate();
+    TEST_ASSERT_TRUE(validation.ok);
+    TEST_ASSERT_EQUAL_UINT32(0, validation.errors.size());
+}
+
+void test_append_log_record_size_boundary() {
+    cleanLittleFs();
+    pqueue::Queue queue(appendLogQueueConfig(4));
+
+    TEST_ASSERT_TRUE(queue.enqueue("1234").ok());
+    const pqueue::Status tooLarge = queue.enqueue("12345");
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::RecordTooLarge), static_cast<int>(tooLarge.code));
+    TEST_ASSERT_EQUAL_UINT32(1, queue.stats().count);
+}
+
+void test_append_log_lock_released_after_each_operation() {
+    cleanLittleFs();
+
+    pqueue::Queue first(appendLogQueueConfig());
+    TEST_ASSERT_TRUE(first.enqueue("first").ok());
+
+    pqueue::Queue second(appendLogQueueConfig());
+    TEST_ASSERT_TRUE(second.enqueue("second").ok());
+
+    TEST_ASSERT_EQUAL_UINT32(2, second.stats().count);
+}
+
+void test_append_log_locks_are_independent_across_base_paths() {
+    cleanLittleFs();
+
+    pqueue::Queue first(appendLogQueueConfigForBase(kAppendLogBasePath));
+    TEST_ASSERT_TRUE(first.enqueue("first").ok());
+
+    pqueue::Queue second(appendLogQueueConfigForBase(kAppendLogOtherBasePath));
+    TEST_ASSERT_TRUE(second.enqueue("other-base").ok());
+    TEST_ASSERT_EQUAL_UINT32(1, first.stats().count);
+    TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
+}
+
+void test_append_log_compact_idle_survives_remount() {
+    cleanLittleFs();
+    // maxSegmentBytes=45: kSegmentHeaderBytes(20)+kEnqueueHeaderBytes(16)+1byte+kEventTrailerBytes(8)
+    // fits exactly one 1-byte record per segment, so A/B/C each seal a segment and
+    // the rewrite of A leaves dead bytes in seg1, giving compactIdle real work.
+    auto cfg = appendLogQueueConfigForBase(kAppendLogBasePath);
+    cfg.maxSegmentBytes = 45;
+    {
+        pqueue::Queue queue(cfg);
+        TEST_ASSERT_TRUE(queue.enqueue("A").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("B").ok());
+        TEST_ASSERT_TRUE(queue.enqueue("C").ok());
+        TEST_ASSERT_TRUE(queue.rewriteFront("X").ok());
+        const pqueue::CompactIdleResult result = queue.compactIdle(16);
+        TEST_ASSERT_TRUE(result.status.ok());
+        TEST_ASSERT_TRUE(result.compactions > 0);
+    }
+
+    pqueue::Queue queue(cfg);
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("X", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("B", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("C", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    assertQueueEmpty(queue);
+}
+
 } // namespace
 
 void setup() {
@@ -587,6 +769,15 @@ void setup() {
     RUN_TEST(test_outbox_drops_corrupt_front_record_on_littlefs);
     RUN_TEST(test_outbox_backlog_persistence);
     RUN_TEST(test_retryable_failure_does_not_drop);
+    RUN_TEST(test_append_log_basic_fifo);
+    RUN_TEST(test_append_log_remount_persistence);
+    RUN_TEST(test_append_log_pop_persistence);
+    RUN_TEST(test_append_log_rewrite_front_persistence);
+    RUN_TEST(test_append_log_validate_clean_queue);
+    RUN_TEST(test_append_log_record_size_boundary);
+    RUN_TEST(test_append_log_lock_released_after_each_operation);
+    RUN_TEST(test_append_log_locks_are_independent_across_base_paths);
+    RUN_TEST(test_append_log_compact_idle_survives_remount);
     UNITY_END();
 }
 

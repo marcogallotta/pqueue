@@ -84,6 +84,14 @@ Status AppendLogStore::collectLiveRecords(const CompactionRange& range,
             out.push_back(std::move(lr));
         }
     }
+
+    // collectLiveRecords groups reads by segment generation for I/O efficiency.
+    // Re-sort by sequence before packing/writing so compacted output replays in FIFO order,
+    // especially after REWRITE moves an older sequence into a newer segment.
+    std::sort(out.begin(), out.end(), [](const CompactionLiveRecord& a, const CompactionLiveRecord& b) {
+        return a.sequence < b.sequence;
+    });
+
     return Status::success();
 }
 

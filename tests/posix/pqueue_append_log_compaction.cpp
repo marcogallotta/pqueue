@@ -1574,3 +1574,41 @@ TEST_CASE("tail dep: contained rewrite dependency allows rotate-before-compact")
     expectRecord(store, 4, kP4);
     checkTracking(store);
 }
+
+TEST_CASE("rewrite: rewriteFront into newer segment; compact+remount preserves FIFO order (regression)") {
+    // Regression: collectLiveRecords iterated by segment generation (std::map order), so a
+    // rewrite that moved seq=1's segmentGeneration past seq=2 and seq=3 caused the compacted
+    // output to be written in generation order [B,X,C] instead of FIFO order [X,B,C].
+    // After remount, records_.front().sequence was 2 ("B") instead of 1 ("X").
+    //
+    // maxSegmentBytes=45: exactly one 1-byte record per segment.
+    //   enqueue(1,"A"): gen=1 full -> rotate. enqueue(2,"B"): gen=2 full -> rotate.
+    //   enqueue(3,"C"): gen=3 (tail). rewriteRecord(1,"X"): REWRITE in gen=3 -> seq=1.segGen=3.
+    //   rotate-before-compact seals gen=3; range {1,3}: byGen={2:[B], 3:[X,C]}.
+    //   Without FIFO sort output=[B,X,C]. Fix: sort by sequence -> [X,B,C].
+    resetSpool();
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 45;
+    {
+        pqueue::AppendLogStore store(cfg);
+        CHECK(store.mount().ok());
+        storeEnqueue(store, 1, "A");
+        storeEnqueue(store, 2, "B");
+        storeEnqueue(store, 3, "C");
+        CHECK(store.rewriteRecord(1, "X").ok());
+        const auto result = store.compactIdle(16);
+        CHECK(result.status.ok());
+        CHECK_GT(result.compactions, 0u);
+    }
+
+    pqueue::AppendLogStore store(cfg);
+    CHECK(store.mount().ok());
+    pqueue::FileStoreIndex idx;
+    CHECK(store.readIndex(idx).ok());
+    CHECK_EQ(idx.head, 1u); // must be seq=1 ("X"), not seq=2 ("B")
+
+    std::string out;
+    CHECK(store.readRecord(1, out).ok()); CHECK_EQ(out, "X");
+    CHECK(store.readRecord(2, out).ok()); CHECK_EQ(out, "B");
+    CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, "C");
+}
