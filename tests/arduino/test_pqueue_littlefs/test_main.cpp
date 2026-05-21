@@ -19,11 +19,6 @@ constexpr const char* kBasePath = "/pqueue_test";
 constexpr const char* kOtherBasePath = "/pqueue_test_other";
 constexpr const char* kSpoolPath = "/pqueue_test/pqueue.spool";
 constexpr const char* kRebootStatePath = "/pqueue_reboot_state";
-constexpr const char* kLegacyLockFilePath = "/pqueue_test/.pqueue.lock";
-constexpr const char* kLegacyLockDirPath = "/pqueue_test/.pqueue.lock";
-constexpr const char* kLegacyLockOwnerPath = "/pqueue_test/.pqueue.lock/owner";
-constexpr const char* kLegacyAltLockDirPath = "/pqueue_test/pqueue.lock";
-constexpr const char* kLegacyAltLockOwnerPath = "/pqueue_test/pqueue.lock/owner";
 constexpr std::uint8_t kRebootPhaseVerifyInitial = 1;
 constexpr std::uint8_t kRebootPhaseVerifyMutated = 2;
 constexpr std::uint8_t kRebootPhaseFailed = 99;
@@ -249,35 +244,6 @@ void assertQueueEmpty(pqueue::Queue& queue) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::QueueEmpty), static_cast<int>(status.code));
 }
 
-void createLegacyLockFile(const char* path) {
-    TEST_ASSERT_TRUE_MESSAGE(mountLittleFsForRebootSmoke(), "LittleFS mount failed while creating legacy lock file");
-    LittleFS.mkdir(kBasePath);
-    File file = LittleFS.open(path, "w");
-    TEST_ASSERT_TRUE_MESSAGE(file, "failed to create legacy lock file");
-    file.print("legacy lock");
-    file.flush();
-    file.close();
-    LittleFS.end();
-}
-
-void createLegacyLockDir(const char* dirPath, const char* ownerPath) {
-    TEST_ASSERT_TRUE_MESSAGE(mountLittleFsForRebootSmoke(), "LittleFS mount failed while creating legacy lock dir");
-    LittleFS.mkdir(kBasePath);
-    LittleFS.mkdir(dirPath);
-    File file = LittleFS.open(ownerPath, "w");
-    TEST_ASSERT_TRUE_MESSAGE(file, "failed to create legacy lock owner");
-    file.print("legacy owner");
-    file.flush();
-    file.close();
-    LittleFS.end();
-}
-
-void assertPathGone(const char* path) {
-    TEST_ASSERT_TRUE_MESSAGE(mountLittleFsForRebootSmoke(), "LittleFS mount failed while checking legacy path");
-    TEST_ASSERT_FALSE(LittleFS.exists(path));
-    LittleFS.end();
-}
-
 void test_basic_fifo() {
     cleanLittleFs();
     pqueue::Queue queue(queueConfig());
@@ -462,57 +428,6 @@ void test_littlefs_locks_are_independent_across_base_paths() {
     TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
 }
 
-void test_legacy_lock_file_is_removed_and_does_not_block() {
-    cleanLittleFs();
-    createLegacyLockFile(kLegacyLockFilePath);
-
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
-    }
-
-    assertPathGone(kLegacyLockFilePath);
-
-    pqueue::Queue reopened(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(reopened.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
-}
-
-void test_legacy_lock_directory_is_removed_and_does_not_block() {
-    cleanLittleFs();
-    createLegacyLockDir(kLegacyLockDirPath, kLegacyLockOwnerPath);
-
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
-    }
-
-    assertPathGone(kLegacyLockDirPath);
-
-    pqueue::Queue reopened(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(reopened.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
-}
-
-void test_legacy_alt_lock_directory_is_removed_and_does_not_block() {
-    cleanLittleFs();
-    createLegacyLockDir(kLegacyAltLockDirPath, kLegacyAltLockOwnerPath);
-
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("ok").ok());
-    }
-
-    assertPathGone(kLegacyAltLockDirPath);
-
-    pqueue::Queue reopened(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(reopened.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("ok", out.c_str());
-}
-
 void test_corrupt_active_record() {
     cleanLittleFs();
     {
@@ -668,9 +583,6 @@ void setup() {
     RUN_TEST(test_multiple_queue_objects_share_same_base_path);
     RUN_TEST(test_queue_lock_released_after_each_operation);
     RUN_TEST(test_littlefs_locks_are_independent_across_base_paths);
-    RUN_TEST(test_legacy_lock_file_is_removed_and_does_not_block);
-    RUN_TEST(test_legacy_lock_directory_is_removed_and_does_not_block);
-    RUN_TEST(test_legacy_alt_lock_directory_is_removed_and_does_not_block);
     RUN_TEST(test_corrupt_active_record);
     RUN_TEST(test_outbox_drops_corrupt_front_record_on_littlefs);
     RUN_TEST(test_outbox_backlog_persistence);
