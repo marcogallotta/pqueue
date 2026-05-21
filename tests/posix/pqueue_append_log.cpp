@@ -106,6 +106,42 @@ TEST_CASE("append-log: rewriteFront persists") {
     }
 }
 
+TEST_CASE("append-log: rewriteFront persists across remount with FIFO order") {
+    cleanSpool();
+    auto cfg = makeConfig();
+    {
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("A").ok());
+        CHECK(q.enqueue("B").ok());
+        CHECK(q.rewriteFront("X").ok());
+    }
+    {
+        pqueue::Queue q(cfg);
+        std::string out;
+        CHECK(q.peek(out).ok()); CHECK_EQ(out, "X");
+        CHECK(q.pop().ok());
+        CHECK(q.peek(out).ok()); CHECK_EQ(out, "B");
+    }
+}
+
+TEST_CASE("append-log: rewriteFront then pop removes rewritten record") {
+    cleanSpool();
+    auto cfg = makeConfig();
+    {
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("A").ok());
+        CHECK(q.enqueue("B").ok());
+        CHECK(q.rewriteFront("X").ok());
+        CHECK(q.pop().ok());
+    }
+    {
+        pqueue::Queue q(cfg);
+        std::string out;
+        CHECK(q.peek(out).ok()); CHECK_EQ(out, "B");
+        CHECK_EQ(q.stats().count, 1U);
+    }
+}
+
 TEST_CASE("append-log: format clears all records") {
     cleanSpool();
     pqueue::Queue q(makeConfig());

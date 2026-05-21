@@ -1295,3 +1295,282 @@ TEST_CASE("subrange: live suffix triggers rotate-before-compact extending inputR
     expectRecord(store, 4, kP4);
     checkTracking(store);
 }
+
+// ---------------------------------------------------------------------------
+// rewriteFront / rewrite semantics tests
+//
+// Dead bytes for compaction come from the REWRITE event superseding the
+// original ENQUEUE bytes. No pop of the rewritten record is needed.
+// maxSegmentBytes=300 keeps the REWRITE in the same sealed segment as the
+// original ENQUEUE so collectLiveRecords reads the rewritten payload and
+// the compaction output carries it forward without FIFO disruption.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+pqueue::AppendLogConfig makeRewriteCompactionConfig() {
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 300;
+    return cfg;
+}
+
+const std::string kP6(60, 'f');
+const std::string kP7(60, 'g');
+const std::string kP8(60, 'h');
+
+} // namespace
+
+TEST_CASE("rewrite: rewriteFront payload survives compaction and remount") {
+    // maxSegmentBytes=300: seq=1..3 fit in gen=1 alongside their REWRITE event.
+    // Dead bytes = original ENQUEUE bytes for seq=1 (superseded by REWRITE).
+    // No pop of seq=1 needed; dead bytes from the REWRITE itself trigger compaction.
+    //
+    // storeEnqueue(1,kP1): gen=1=104B.
+    // storeEnqueue(2,kP2): gen=1=188B.
+    // rewriteRecord(1,"X"): REWRITE(25B) in gen=1=213B. seq=1.segGen=gen=1.
+    // storeEnqueue(3,kP3): gen=1=297B.
+    // storeEnqueue(4,kP4): 297+84=381>300 -> rotate gen=1 sealed. ranges=[{1,1}], tail=2.
+    //
+    // compactRange({1,1}): live=[seq=1("X"),seq=2(kP2),seq=3(kP3)]. Dead=84B (original ENQUEUE seq=1).
+    // rotate-before-compact fires (gen=2 tail contiguous, deps={}): gen=3 becomes new tail,
+    // inputRange extends to {1,2}, output goes to gen=4. ranges=[{4,4}], tail=3.
+    // Remount: front=seq=1 payload="X". FIFO preserved.
+    resetSpool();
+    auto rwCfg = makeRewriteCompactionConfig();
+    pqueue::AppendLogStore store(rwCfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, kP1);
+    storeEnqueue(store, 2, kP2);
+    CHECK(store.rewriteRecord(1, std::string(1, 'X')).ok()); // REWRITE in gen=1, 213B; no rotation
+    storeEnqueue(store, 3, kP3);
+    storeEnqueue(store, 4, kP4); // 297+84>300 -> rotate gen=1 sealed
+
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   1u);
+    CHECK_EQ(store.tailGeneration(), 2u);
+
+    const auto st = store.compactRange({1, 1});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    // rotate-before-compact fires (gen=2 tail contiguous, deps={}):
+    // gen=3 created as new tail, inputRange extended to {1,2}, output gen=4.
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 4u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   4u);
+    CHECK_EQ(store.tailGeneration(), 3u);
+
+    expectRecord(store, 1, std::string(1, 'X'));
+    expectRecord(store, 2, kP2);
+    expectRecord(store, 3, kP3);
+    expectRecord(store, 4, kP4);
+    checkTracking(store);
+
+    expectRecordsAfterRemount(rwCfg, {{1, std::string(1,'X')}, {2, kP2}, {3, kP3}, {4, kP4}});
+}
+
+TEST_CASE("rewrite: rewriteFront payload survives subrange compaction and remount") {
+    // Same maxSegmentBytes=300 setup; build two sealed ranges so we can compact a prefix subrange.
+    //
+    // storeEnqueue(1..8): gen=1 sealed (seq=1..3 + REWRITE seq=1). gen=2 sealed (seq=4..6).
+    //   gen=3 (tail) has seq=7..8. ranges=[{1,2}], tail=3.
+    // compactRange({1,1}): prefix of {1,2}. live=[seq=1("X"),seq=2,seq=3]. Dead=84B.
+    // Output gen=4. ranges=[{4,4},{2,2}], tail=3. seq=1 payload="X" after remount.
+    resetSpool();
+    auto rwCfg = makeRewriteCompactionConfig();
+    pqueue::AppendLogStore store(rwCfg);
+    CHECK(store.mount().ok());
+
+    storeEnqueue(store, 1, kP1);
+    storeEnqueue(store, 2, kP2);
+    CHECK(store.rewriteRecord(1, std::string(1, 'X')).ok()); // REWRITE in gen=1
+    storeEnqueue(store, 3, kP3);
+    storeEnqueue(store, 4, kP4); // 297+84>300 -> rotate gen=1. ranges=[{1,1}], tail=2.
+    storeEnqueue(store, 5, kP5);
+    storeEnqueue(store, 6, kP6); // fills gen=2 (104+84=188B)
+    storeEnqueue(store, 7, kP7); // 272+84=356>300 -> rotate gen=2; seq=7 in gen=3. ranges=[{1,2}], tail=3.
+    storeEnqueue(store, 8, kP8); // seq=8 in gen=3: 104+84=188B.
+
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   2u);
+    CHECK_EQ(store.tailGeneration(), 3u);
+
+    // compact prefix {1,1}: dead bytes from original ENQUEUE seq=1; live=seq=1("X"),seq=2,seq=3
+    const auto st = store.compactRange({1, 1});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 4u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   4u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 2u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   2u);
+    CHECK_EQ(store.tailGeneration(), 3u);
+
+    expectRecord(store, 1, std::string(1, 'X'));
+    expectRecord(store, 4, kP4);
+    checkTracking(store);
+
+    expectRecordsAfterRemount(rwCfg, {
+        {1, std::string(1,'X')}, {2,kP2}, {3,kP3},
+        {4,kP4}, {5,kP5}, {6,kP6}, {7,kP7}, {8,kP8}
+    });
+}
+
+TEST_CASE("tail dep: rewrite event in tail suppresses rotate-before-compact (cross-range)") {
+    // Only a cross-range REWRITE dep suppresses rotate. Dead bytes in gen=4 come from a
+    // pre-planted REWRITE superseding the original ENQUEUE (not a current-session event),
+    // so activeTailAffectedGenerations_ contains only the dep on gen=1 -- the sole out-of-range dep.
+    //
+    // Plant: ranges=[{1,4}], tail=5, nextGen=6.
+    //   gen=1..3: ENQUEUE(seq=1..3). gen=5: ENQUEUE(seq=5) [tail].
+    //   gen=4: ENQUEUE(seq=4,kP4=60B) + REWRITE(seq=4,"D"=1B). 129B total.
+    //     Mount applies REWRITE by sequence: seq=4.segGen=4, payload="D". Dead=84B (original ENQUEUE).
+    //
+    // Mount: records={seq=1(gen=1),seq=2(gen=2),seq=3(gen=3),seq=4(gen=4,"D"),seq=5(gen=5)}.
+    //   tracking=false, deps={}.
+    //
+    // storeEnqueue(6, kP6): 104+84=188>185 -> rotate gen=5 sealed; ranges=[{1,5}], tail=6.
+    //   tracking=true, deps={}.
+    //
+    // rewriteRecord(1, "R"): REWRITE(25B) in gen=6: 104+25=129B. seq=1.segGen=1->6. deps={1}.
+    //
+    // compactRange({4,5}):
+    //   suffix of {1,5}. gen=4: 84B dead (original ENQUEUE superseded). gen=5: live (seq=5).
+    //   Live records in [4,5]: seq=4("D",1B) + seq=5(kP5,60B). Both fit in one output segment.
+    //   tailDepsContained: gen=1 not in [4,6] -> FALSE. Rotate suppressed.
+    //   Output gen=7. ranges=[{1,3},{7,7}], tail=6.
+    plantLayout({
+        .ranges = {{1, 4}},
+        .tail   = 5,
+        .next   = 6,
+        .segments = {
+            {.gen=1, .firstSeq=1, .body=serializeEnqueueEvent(1, kP1)},
+            {.gen=2, .firstSeq=2, .body=serializeEnqueueEvent(2, kP2)},
+            {.gen=3, .firstSeq=3, .body=serializeEnqueueEvent(3, kP3)},
+            {.gen=4, .firstSeq=4, .body=serializeEnqueueEvent(4, kP4) + serializeRewriteEvent(4, std::string(1,'D'))},
+            {.gen=5, .firstSeq=5, .body=serializeEnqueueEvent(5, kP5)},
+        }
+    });
+
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    storeEnqueue(store, 6, kP6); // 104+84=188>185 -> rotate gen=5 sealed; tail=6, tracking=true
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   5u);
+    CHECK_EQ(store.tailGeneration(), 6u);
+
+    // REWRITE seq=1 (segGen=1, cross-range) into gen=6: sole active-tail dep
+    CHECK(store.rewriteRecord(1, std::string(1, 'R')).ok());
+
+    const auto st = store.compactRange({4, 5});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    // rotate must NOT have fired -- cross-range REWRITE dep on gen=1 suppresses it
+    CHECK_EQ(store.tailGeneration(), 6u);
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   3u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 7u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   7u);
+
+    CHECK(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    CHECK(std::filesystem::exists(segmentPath(3)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(5)));
+    CHECK(std::filesystem::exists(segmentPath(6)));
+    CHECK(std::filesystem::exists(segmentPath(7)));
+
+    expectRecord(store, 4, std::string(1,'D'));
+    expectRecord(store, 5, kP5);
+    checkTracking(store);
+
+    expectRecordsAfterRemount(makeSubrangeConfig(), {
+        {1, std::string(1,'R')}, {2, kP2}, {3, kP3},
+        {4, std::string(1,'D')}, {5, kP5}, {6, kP6}
+    });
+}
+
+TEST_CASE("tail dep: contained rewrite dependency allows rotate-before-compact") {
+    // When all active-tail deps fall within the compaction input range, rotate fires.
+    // The REWRITE dependency (old segGen=4, current location gen=6) is contained within [4,6];
+    // subsequent POP deps (poppedGen=6, poppedGen=4) are also contained. tailDepsContained=TRUE.
+    //
+    // Plant: ranges=[{1,4}], tail=5, nextGen=6.
+    //   gen=1..3: header-only. gen=4: enqueue(1,kP1)+enqueue(2,kP2)=188B.
+    //   gen=5: enqueue(3,kP3)=104B (tail).
+    //
+    // Mount + storeEnqueue(4,kP4): 104+84=188>185 -> rotate gen=5 sealed; ranges=[{1,5}], tail=6.
+    //   tracking=true, deps={}.
+    //
+    // rewriteRecord(1, "R"): seq=1 in gen=4. REWRITE event=25B in gen=6. 104+25=129<=185.
+    //   deps={4}. seq=1->gen=6.
+    // storePop seq=1 (poppedGen=6): gen=6=149B. deps={4,6}.
+    // storePop seq=2 (poppedGen=4): gen=6=169B. deps={4,6}.
+    //
+    // compactRange({4,5}):
+    //   suffix of {1,5}. gen=4 dead(seq=1 rewritten+seq=2 popped), gen=5 live(seq=3).
+    //   tailDepsContained: {4,6} in [4,6] -> TRUE. wouldRotate=TRUE. Rotate fires!
+    //   gen=6 sealed -> merge {1,6}. tail=7. inputRange extended to {4,6}.
+    //   Live in {4,6}: seq=3(gen=5), seq=4(gen=6,kP4). Output: gen=8(seq=3), gen=9(seq=4).
+    //   Result: ranges=[{1,3},{8,9}], tail=7.
+    plantLayout({
+        .ranges = {{1, 4}},
+        .tail   = 5,
+        .next   = 6,
+        .segments = {
+            {.gen=1, .firstSeq=0, .body={}},
+            {.gen=2, .firstSeq=0, .body={}},
+            {.gen=3, .firstSeq=0, .body={}},
+            {.gen=4, .firstSeq=1, .body=serializeEnqueueEvent(1, kP1) + serializeEnqueueEvent(2, kP2)},
+            {.gen=5, .firstSeq=3, .body=serializeEnqueueEvent(3, kP3)},
+        }
+    });
+
+    pqueue::AppendLogStore store(makeSubrangeConfig());
+    CHECK(store.mount().ok());
+    CHECK_EQ(store.tailGeneration(), 5u);
+
+    storeEnqueue(store, 4, kP4); // 104+84>185 -> rotate gen=5 sealed; seq=4 in gen=6
+    REQUIRE_EQ(store.manifestRanges().size(), 1u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   5u);
+    CHECK_EQ(store.tailGeneration(), 6u);
+
+    // REWRITE seq=1 (in gen=4) into gen=6: creates dep={4}, not a POP
+    CHECK(store.rewriteRecord(1, std::string(1, 'R')).ok());
+    storePop(store); // seq=1 (poppedGen=6): deps={4,6}
+    storePop(store); // seq=2 (poppedGen=4): deps={4,6}
+
+    const auto st = store.compactRange({4, 5});
+    CHECK(st.ok());
+    CHECK_FALSE(st.isNoOp());
+
+    // rotate MUST have fired
+    CHECK_EQ(store.tailGeneration(), 7u);
+
+    REQUIRE_EQ(store.manifestRanges().size(), 2u);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 1u);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   3u);
+    CHECK_EQ(store.manifestRanges()[1].startGen, 8u);
+    CHECK_EQ(store.manifestRanges()[1].endGen,   9u);
+
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(5)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(6)));
+    CHECK(std::filesystem::exists(segmentPath(8)));
+    CHECK(std::filesystem::exists(segmentPath(9)));
+
+    expectRecord(store, 3, kP3);
+    expectRecord(store, 4, kP4);
+    checkTracking(store);
+}
