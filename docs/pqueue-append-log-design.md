@@ -334,10 +334,6 @@ The cliff between 4 KB and 8 KB is the LittleFS block size boundary. It is struc
 
 The write itself is trivially fast. Open and flush dominate.
 
-### writeAt on 18,688 B spool file (fixed-slot reference)
-
-Flush: 133,685 µs. Total: 147,610 µs per writeAt. Fixed-slot enqueue does 2 writeAts → ~295 ms from writes alone, explaining the ~424 ms observed enqueue average.
-
 ### readAt breakdown (512 B file)
 
 | Phase | Cost (µs) |

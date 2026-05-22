@@ -18,17 +18,6 @@ Compaction -- the process of reclaiming flash space from popped records -- is
 designed to run during idle time between phases, not interleaved with enqueue or
 drain.
 
-**Two backends:**
-
-pqueue has two store layouts selected via `cfg.storeLayout`:
-
-- `AppendLog` (recommended): append-only segments with idle compaction. Low
-  per-enqueue cost (~14ms), compaction runs during idle time. This README
-  covers the AppendLog backend.
-- `FixedSlot`: fixed-size ring buffer. Simpler, no compaction needed, but
-  ~400ms per operation due to atomic fixed-size file writes. Use only if your
-  workload needs constant-time guarantees and can tolerate the latency.
-
 **What it is not:**
 
 - Not a general-purpose embedded queue. The AppendLog compaction model assumes
@@ -142,7 +131,6 @@ configured capacity.
 #include "pqueue/queue.h"
 
 pqueue::Config cfg;
-cfg.storeLayout     = pqueue::StoreLayout::AppendLog;
 cfg.storageBackend  = pqueue::StorageBackend::LittleFS;
 cfg.basePath        = "/pqueue";      // directory on LittleFS
 cfg.reservedBytes   = 65536;         // total flash budget
@@ -205,7 +193,6 @@ pqueue::SendResult mySend(void* ctx, const std::string& payload, const pqueue::R
 }
 
 pqueue::Config qcfg;
-qcfg.storeLayout    = pqueue::StoreLayout::AppendLog;
 qcfg.basePath       = "/outbox";
 qcfg.reservedBytes  = 65536;
 
@@ -230,7 +217,6 @@ available.
 #include "pqueue/http/outbox.h"
 
 pqueue::http::Config cfg;
-cfg.queue.storeLayout  = pqueue::StoreLayout::AppendLog;
 cfg.queue.basePath     = "/outbox";
 cfg.queue.reservedBytes = 65536;
 cfg.baseUrl            = "https://api.example.com";
@@ -262,8 +248,7 @@ do {
 
 ## Configuration reference
 
-These fields on `pqueue::Config` control the AppendLog backend
-(`cfg.storeLayout = StoreLayout::AppendLog`):
+These fields on `pqueue::Config` control the AppendLog backend:
 
 | Field | Default | Description |
 |---|---|---|
