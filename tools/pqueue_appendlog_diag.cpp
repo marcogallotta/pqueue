@@ -8,7 +8,6 @@
 
 #include "pqueue/diagnostics.h"
 #include "pqueue/append_log_store.h"
-#include "pqueue/file_store.h"
 #include "pqueue/queue.h"
 #include "pqueue/status.h"
 #include "pqueue/types.h"
@@ -27,22 +26,16 @@ namespace {
 const char* issueCodeName(pqueue::ValidationIssueCode code) {
     switch (code) {
         case pqueue::ValidationIssueCode::InvalidConfig:                return "invalid_config";
-        case pqueue::ValidationIssueCode::MetadataMissing:             return "metadata_missing";
         case pqueue::ValidationIssueCode::MetadataCorrupt:             return "metadata_corrupt";
         case pqueue::ValidationIssueCode::JournalCorrupt:              return "journal_corrupt";
         case pqueue::ValidationIssueCode::ConfigMismatch:              return "config_mismatch";
-        case pqueue::ValidationIssueCode::SpoolMissing:                return "spool_missing";
-        case pqueue::ValidationIssueCode::SpoolSizeMismatch:           return "spool_size_mismatch";
-        case pqueue::ValidationIssueCode::InvalidRingState:            return "invalid_ring_state";
-        case pqueue::ValidationIssueCode::SlotReadFailed:              return "slot_read_failed";
-        case pqueue::ValidationIssueCode::SlotHeaderInvalid:           return "slot_header_invalid";
         case pqueue::ValidationIssueCode::SlotCrcMismatch:             return "slot_crc_mismatch";
         case pqueue::ValidationIssueCode::QueueLoadFailed:             return "queue_load_failed";
         case pqueue::ValidationIssueCode::QueueIndexMismatch:          return "queue_index_mismatch";
         case pqueue::ValidationIssueCode::OutboxEnvelopeInvalid:       return "outbox_envelope_invalid";
         case pqueue::ValidationIssueCode::HttpRequestEnvelopeInvalid:  return "http_request_envelope_invalid";
+        default:                                                        return "unknown";
     }
-    return "unknown";
 }
 
 const char* repairActionName(pqueue::ValidationRepairAction action) {
@@ -50,9 +43,8 @@ const char* repairActionName(pqueue::ValidationRepairAction action) {
         case pqueue::ValidationRepairAction::None:               return "none";
         case pqueue::ValidationRepairAction::Format:             return "format queue";
         case pqueue::ValidationRepairAction::DropFrontIfCorrupt: return "drop corrupt front record";
-        case pqueue::ValidationRepairAction::RebuildMetadata:    return "rebuild metadata";
+        default:                                                  return "unknown";
     }
-    return "unknown";
 }
 
 const char* yesNo(bool v) { return v ? "yes" : "no"; }
@@ -130,7 +122,6 @@ void printDiagnostic(const pqueue::AppendLogStoreDiagnostic& d) {
 int runValidation(const std::string& basePath) {
     pqueue::Config cfg;
     cfg.basePath     = basePath;
-    cfg.storeLayout  = pqueue::StoreLayout::AppendLog;
     pqueue::Queue queue(cfg);
 
     const auto val = queue.validate();
@@ -154,7 +145,6 @@ int runValidation(const std::string& basePath) {
 int runFormat(const std::string& basePath) {
     pqueue::Config cfg;
     cfg.basePath    = basePath;
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     pqueue::Queue queue(cfg);
 
     const auto st = queue.format();

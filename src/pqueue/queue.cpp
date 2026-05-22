@@ -1,7 +1,6 @@
 #include "queue.h"
 #include "append_log_store.h"
 #include "internal/lock_owner.h"
-#include "storage_common.h"
 
 #include <cstdint>
 #include <sstream>
@@ -69,39 +68,18 @@ ValidationIssue makeQueueIssue(ValidationIssueCode code, std::string message, Va
 bool isFormatRepairIssue(ValidationIssueCode code) {
     switch (code) {
         case ValidationIssueCode::ConfigMismatch:
-        case ValidationIssueCode::SpoolMissing:
-        case ValidationIssueCode::SpoolSizeMismatch:
         case ValidationIssueCode::QueueLoadFailed:
         case ValidationIssueCode::QueueIndexMismatch:
-        // AppendLog: mount() returns DataCorrupt when segments exist without a valid manifest;
-        // rebuildMetadata() calls mount() and fails for the same reason. Format is the only
-        // safe repair for MetadataCorrupt and JournalCorrupt on AppendLog.
         case ValidationIssueCode::MetadataCorrupt:
         case ValidationIssueCode::JournalCorrupt:
             return true;
-        case ValidationIssueCode::MetadataMissing:
-        case ValidationIssueCode::InvalidRingState:
         case ValidationIssueCode::InvalidConfig:
-        case ValidationIssueCode::SlotReadFailed:
-        case ValidationIssueCode::SlotHeaderInvalid:
         case ValidationIssueCode::SlotCrcMismatch:
         case ValidationIssueCode::OutboxEnvelopeInvalid:
         case ValidationIssueCode::HttpRequestEnvelopeInvalid:
             return false;
     }
     return false;
-}
-
-bool isRebuildMetadataIssue(ValidationIssueCode code) {
-    switch (code) {
-        // MetadataMissing and InvalidRingState are FixedSlot-only codes; removal is
-        // blocked on FixedSlot test migration.
-        case ValidationIssueCode::MetadataMissing:
-        case ValidationIssueCode::InvalidRingState:
-            return true;
-        default:
-            return false;
-    }
 }
 
 void addRepairHints(ValidationResult& result, std::uint32_t head) {
@@ -113,11 +91,7 @@ void addRepairHints(ValidationResult& result, std::uint32_t head) {
             issue.repairAction = ValidationRepairAction::Format;
             continue;
         }
-        if (isRebuildMetadataIssue(issue.code)) {
-            issue.repairAction = ValidationRepairAction::RebuildMetadata;
-            continue;
-        }
-        if (issue.code == ValidationIssueCode::SlotHeaderInvalid || issue.code == ValidationIssueCode::SlotCrcMismatch) {
+        if (issue.code == ValidationIssueCode::SlotCrcMismatch) {
             if (issue.hasExpectedSequence && issue.expectedSequence == head) {
                 issue.repairAction = ValidationRepairAction::DropFrontIfCorrupt;
             } else {
@@ -141,29 +115,17 @@ bool isCorruptRecordStatus(StatusCode code) {
 namespace {
 
 std::unique_ptr<Store> makeStore(const Config& config) {
-    if (config.storeLayout == StoreLayout::AppendLog) {
-        AppendLogConfig ac;
-        ac.basePath = config.basePath;
-        ac.backend = config.storageBackend;
-        ac.events = config.events;
-        ac.fileSystem = config.fileSystem;
-        ac.maxRecordBytes = config.recordSizeBytes;
-        ac.maxTotalBytes = config.reservedBytes;
-        ac.maxSegmentBytes = config.maxSegmentBytes;
-        ac.minFreeBytes = config.minFreeBytes;
-        ac.maxSegments = config.maxSegments;
-        return std::make_unique<AppendLogStore>(std::move(ac));
-    }
-    FileStoreConfig fc;
-    fc.basePath = config.basePath;
-    fc.backend = config.storageBackend;
-    fc.events = config.events;
-    fc.fileSystem = config.fileSystem;
-    fc.reservedBytes = config.reservedBytes;
-    fc.recordSizeBytes = config.recordSizeBytes;
-    fc.journalBytes = config.journalBytes;
-    fc.checkpointEveryOps = config.checkpointEveryOps;
-    return std::make_unique<FileStore>(std::move(fc));
+    AppendLogConfig ac;
+    ac.basePath = config.basePath;
+    ac.backend = config.storageBackend;
+    ac.events = config.events;
+    ac.fileSystem = config.fileSystem;
+    ac.maxRecordBytes = config.recordSizeBytes;
+    ac.maxTotalBytes = config.reservedBytes;
+    ac.maxSegmentBytes = config.maxSegmentBytes;
+    ac.minFreeBytes = config.minFreeBytes;
+    ac.maxSegments = config.maxSegments;
+    return std::make_unique<AppendLogStore>(std::move(ac));
 }
 
 } // namespace

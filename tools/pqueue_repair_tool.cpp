@@ -30,7 +30,6 @@ const char* repairActionHuman(pqueue::ValidationRepairAction action) {
         case pqueue::ValidationRepairAction::None: return "none";
         case pqueue::ValidationRepairAction::Format: return "format queue";
         case pqueue::ValidationRepairAction::DropFrontIfCorrupt: return "drop corrupt front record";
-        case pqueue::ValidationRepairAction::RebuildMetadata: return "rebuild metadata";
     }
     return "unknown";
 }

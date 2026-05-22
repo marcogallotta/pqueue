@@ -4,7 +4,7 @@
 #include <memory>
 #include <string>
 
-#include "file_store.h"
+#include "store_types.h"
 #include "status.h"
 #include "types.h"
 

@@ -159,14 +159,3 @@ will have a dangling `pqueue.spool` that AppendLog ignores.
 ## Remaining removal steps
 
 1. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
-
-2. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
-   and documentation sections that reference FixedSlot.
-
-3. **Eliminate FixedSlot.** Delete the files listed above, strip the dead
-   `Config` fields, collapse `makeStore()`, and remove `StoreLayout`.
-
-One prerequisite still blocked: remove FixedSlot-only `ValidationIssueCode` values
-(`SpoolMissing`, `SpoolSizeMismatch`, `InvalidRingState`, `SlotHeaderInvalid`,
-`SlotReadFailed`, `MetadataMissing`) once dead test references are cleared.
-See `docs/appendlog-validation-repair.md`.

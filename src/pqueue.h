@@ -3,7 +3,7 @@
 #include "pqueue/diagnostics.h"
 #include "pqueue/envelope.h"
 #include "pqueue/events.h"
-#include "pqueue/file_store.h"
+#include "pqueue/store_types.h"
 #include "pqueue/file_system.h"
 #include "pqueue/outbox.h"
 #include "pqueue/queue.h"

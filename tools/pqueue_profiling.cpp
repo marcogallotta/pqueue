@@ -5,7 +5,6 @@
 #include "pqueue/queue.h"
 #include "pqueue/outbox.h"
 #include "pqueue/http/outbox.h"
-#include "pqueue/storage_common.h"
 
 #include <algorithm>
 #include <chrono>
@@ -97,7 +96,7 @@ pqueue::Config queueConfig(const std::string& basePath, std::shared_ptr<Counting
     pqueue::Config cfg;
     cfg.basePath = basePath;
     cfg.recordSizeBytes = recordSizeBytes;
-    cfg.reservedBytes = requestedRecords * static_cast<std::uint32_t>(pqueue::storage_detail::kRecordHeaderBytes + recordSizeBytes);
+    cfg.reservedBytes = requestedRecords * static_cast<std::uint32_t>(pqueue::append_log_detail::kEnqueueOverheadBytes + recordSizeBytes);
     cfg.storageBackend = pqueue::StorageBackend::Posix;
     cfg.fileSystem = fs;
     return cfg;

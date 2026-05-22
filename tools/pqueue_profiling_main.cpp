@@ -9,7 +9,7 @@
 #include "pqueue/http/outbox.h"
 #include "pqueue/outbox.h"
 #include "pqueue/queue.h"
-#include "pqueue/storage_common.h"
+#include "pqueue/append_log_common.h"
 
 namespace {
 
@@ -53,7 +53,7 @@ pqueue::Config makeQueueConfig(std::shared_ptr<CountingFileSystem> fs, uint32_t 
     cfg.basePath = kBasePath;
     cfg.recordSizeBytes = recordSizeBytes;
     cfg.reservedBytes = (kRecordsPerScenario + 8) *
-        static_cast<uint32_t>(pqueue::storage_detail::kRecordHeaderBytes + recordSizeBytes);
+        static_cast<uint32_t>(pqueue::append_log_detail::kEnqueueOverheadBytes + recordSizeBytes);
     cfg.storageBackend = pqueue::StorageBackend::LittleFS;
     cfg.fileSystem = fs;
     return cfg;

@@ -11,7 +11,7 @@
 
 #include "append_log_common.h"
 #include "events.h"
-#include "file_store.h"
+#include "store_types.h"
 #include "file_system.h"
 #include "status.h"
 

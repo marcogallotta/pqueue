@@ -11,7 +11,7 @@
 
 #include "pqueue/append_log_common.h"
 #include "pqueue/append_log_store.h"
-#include "pqueue/file_store.h"
+#include "pqueue/store_types.h"
 #include "pqueue/status.h"
 #include "counting_file_system.h"
 
