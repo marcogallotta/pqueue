@@ -151,7 +151,7 @@ construction are removed. `makeStore` becomes a straight `AppendLogStore` constr
 ## On-disk compatibility
 
 The two backends never share a filename. FixedSlot owns `pqueue.spool`; AppendLog
-owns `mf-a.bin`, `mf-b.bin`, and `seg-*.bin`. A device previously running FixedSlot
+owns `manifest-a.bin`, `manifest-b.bin`, and `seg-*.bin`. A device previously running FixedSlot
 will have a dangling `pqueue.spool` that AppendLog ignores.
 
 ---

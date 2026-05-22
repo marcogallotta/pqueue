@@ -21,8 +21,8 @@ const char* issueCodeName(pqueue::ValidationIssueCode code) {
         case pqueue::ValidationIssueCode::QueueIndexMismatch: return "queue_index_mismatch";
         case pqueue::ValidationIssueCode::OutboxEnvelopeInvalid: return "outbox_envelope_invalid";
         case pqueue::ValidationIssueCode::HttpRequestEnvelopeInvalid: return "http_request_envelope_invalid";
+        default: return "unknown";
     }
-    return "unknown";
 }
 
 const char* repairActionHuman(pqueue::ValidationRepairAction action) {
@@ -30,7 +30,7 @@ const char* repairActionHuman(pqueue::ValidationRepairAction action) {
         case pqueue::ValidationRepairAction::None: return "none";
         case pqueue::ValidationRepairAction::Format: return "format queue";
         case pqueue::ValidationRepairAction::DropFrontIfCorrupt: return "drop corrupt front record";
-        case pqueue::ValidationRepairAction::RebuildMetadata: return "rebuild metadata from slot scan";
+        case pqueue::ValidationRepairAction::RebuildMetadata: return "rebuild metadata";
     }
     return "unknown";
 }
@@ -122,7 +122,7 @@ void addConfigOptions(CLI::App& app, pqueue::Config& config) {
         ->capture_default_str();
     app.add_option("--reserved-bytes", config.reservedBytes, "Reserved spool bytes")
         ->capture_default_str();
-    app.add_option("--record-size-bytes", config.recordSizeBytes, "Record slot size in bytes")
+    app.add_option("--record-size-bytes", config.recordSizeBytes, "Maximum record payload size in bytes")
         ->capture_default_str();
 }
 
@@ -178,17 +178,6 @@ int main(int argc, char** argv) {
                 return 1;
             }
             std::cout << "Failed to recover stale lock.\n"
-                      << "status: " << pqueue::statusCodeName(st.code) << "\n"
-                      << "message: " << st.message << "\n";
-            return 2;
-        }
-        case Command::RebuildMetadata: {
-            const pqueue::Status st = queue.rebuildMetadata();
-            if (st.ok()) {
-                std::cout << "Metadata rebuilt from slot scan.\n";
-                return 0;
-            }
-            std::cout << "Rebuild failed.\n"
                       << "status: " << pqueue::statusCodeName(st.code) << "\n"
                       << "message: " << st.message << "\n";
             return 2;
