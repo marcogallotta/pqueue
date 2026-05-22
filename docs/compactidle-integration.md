@@ -17,3 +17,15 @@ Two thin wrappers, no redesign:
   returns `pqueue::CompactIdleResult`.
 
 The return type flows through unchanged. Callers decide what to log.
+
+---
+
+## Tests
+
+Add a POSIX test (in `pqueue_outbox.cpp` or a new `pqueue_http_outbox.cpp` file) that:
+
+- Constructs a `pqueue::http::Outbox` (or `pqueue::Outbox`) over an AppendLog config with
+  enough churn to leave compactable dead ranges.
+- Calls `compactIdle(N)` through the outbox layer.
+- Asserts the returned `CompactIdleResult` reflects work done (e.g. `moreWorkLikely` or
+  a step count), and that the queue drains correctly afterwards.
