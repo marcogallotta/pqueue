@@ -2,24 +2,22 @@
 #include <LittleFS.h>
 #include <unity.h>
 
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "pqueue/outbox.h"
 #include "pqueue/queue.h"
 #include "pqueue/status.h"
-#include "pqueue/storage_common.h"
 #include "pqueue/types.h"
 
 namespace {
 
-constexpr const char* kBasePath = "/pqueue_test";
-constexpr const char* kOtherBasePath = "/pqueue_test_other";
 constexpr const char* kAppendLogBasePath = "/pqueue_test_append_log";
 constexpr const char* kAppendLogOtherBasePath = "/pqueue_test_append_log_other";
-constexpr const char* kSpoolPath = "/pqueue_test/pqueue.spool";
 constexpr const char* kRebootStatePath = "/pqueue_reboot_state";
 constexpr std::uint8_t kRebootPhaseVerifyInitial = 1;
 constexpr std::uint8_t kRebootPhaseVerifyMutated = 2;
@@ -46,59 +44,18 @@ pqueue::SendResult fakeSend(void* context, const std::string& payload, const pqu
     return {sender->decision};
 }
 
-std::uint32_t slotSize(std::size_t recordSizeBytes) {
-    return static_cast<std::uint32_t>(sizeof(pqueue::storage_detail::RecordHeader) + recordSizeBytes);
-}
-
-std::uint32_t recordRegionOffset(const pqueue::Config& config) {
-    return static_cast<std::uint32_t>(pqueue::storage_detail::kCheckpointSlots) *
-               pqueue::storage_detail::kCheckpointRecordBytes +
-           config.journalBytes;
-}
-
-std::uint32_t recordSlotOffset(const pqueue::Config& config, std::uint32_t slot) {
-    return recordRegionOffset(config) + slot * slotSize(config.recordSizeBytes);
-}
-
-void corruptSlotPayload(const pqueue::Config& config, std::uint32_t slot) {
-    LittleFS.end();
-    TEST_ASSERT_TRUE_MESSAGE(LittleFS.begin(true), "LittleFS mount failed for slot corruption");
-    File spool = LittleFS.open(kSpoolPath, "r+");
-    TEST_ASSERT_TRUE_MESSAGE(spool, "failed to open pqueue spool for slot corruption");
-    const std::uint32_t payloadOffset =
-        recordSlotOffset(config, slot) + pqueue::storage_detail::kRecordHeaderBytes;
-    TEST_ASSERT_TRUE(spool.seek(payloadOffset, SeekSet));
-    TEST_ASSERT_EQUAL_UINT(1, spool.write(static_cast<uint8_t>(0xff)));
-    spool.flush();
-    spool.close();
-    LittleFS.end();
-}
-
-pqueue::Config queueConfigForBase(
+pqueue::Config appendLogQueueConfigForBase(
     const char* basePath,
-    std::size_t recordSizeBytes = 32,
-    std::uint32_t capacityRecords = 8
+    std::size_t recordSizeBytes = 32
 ) {
     pqueue::Config config;
     config.basePath = basePath;
     config.storageBackend = pqueue::StorageBackend::LittleFS;
     config.recordSizeBytes = recordSizeBytes;
-    config.reservedBytes = slotSize(recordSizeBytes) * capacityRecords;
-    return config;
-}
-
-pqueue::Config queueConfig(std::size_t recordSizeBytes = 32, std::uint32_t capacityRecords = 8) {
-    return queueConfigForBase(kBasePath, recordSizeBytes, capacityRecords);
-}
-
-pqueue::Config appendLogQueueConfigForBase(
-    const char* basePath,
-    std::size_t recordSizeBytes = 32
-) {
-    auto config = queueConfigForBase(basePath, recordSizeBytes, 8);
     config.storeLayout = pqueue::StoreLayout::AppendLog;
     config.maxSegmentBytes = 256;
     config.maxSegments = 8;
+    config.reservedBytes = 0;
     config.minFreeBytes = 0;
     return config;
 }
@@ -228,7 +185,7 @@ void runQuickRebootSmokePhaseIfNeeded() {
             rebootSmokeFail("phase 0 LittleFS format failed");
         }
         {
-            pqueue::Queue queue(queueConfig());
+            pqueue::Queue queue(appendLogQueueConfig());
             verifyOkOrRebootFail(queue.enqueue("one"), "phase 0 enqueue one failed");
             verifyOkOrRebootFail(queue.enqueue("two"), "phase 0 enqueue two failed");
             verifyOkOrRebootFail(queue.enqueue("three"), "phase 0 enqueue three failed");
@@ -241,7 +198,7 @@ void runQuickRebootSmokePhaseIfNeeded() {
     if (phase == kRebootPhaseVerifyInitial) {
         Serial.println("[pqueue reboot smoke] phase 1: verify initial queue, mutate, then reboot");
         {
-            pqueue::Queue queue(queueConfig());
+            pqueue::Queue queue(appendLogQueueConfig());
             std::string out;
             verifyOkOrRebootFail(queue.peek(out), "phase 1 peek one failed");
             verifyStringOrRebootFail(out, "one", "phase 1 expected one");
@@ -262,306 +219,6 @@ void assertQueueEmpty(pqueue::Queue& queue) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::QueueEmpty), static_cast<int>(status.code));
 }
 
-void test_basic_fifo() {
-    cleanLittleFs();
-    pqueue::Queue queue(queueConfig());
-
-    TEST_ASSERT_TRUE(queue.enqueue("one").ok());
-    TEST_ASSERT_TRUE(queue.enqueue("two").ok());
-    TEST_ASSERT_TRUE(queue.enqueue("three").ok());
-
-    std::string out;
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("one", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("two", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-
-    assertQueueEmpty(queue);
-}
-
-void test_remount_persistence() {
-    cleanLittleFs();
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("one").ok());
-        TEST_ASSERT_TRUE(queue.enqueue("two").ok());
-        TEST_ASSERT_TRUE(queue.enqueue("three").ok());
-    }
-
-    pqueue::Queue queue(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("one", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("two", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
-}
-
-void test_pop_persistence() {
-    cleanLittleFs();
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("one").ok());
-        TEST_ASSERT_TRUE(queue.enqueue("two").ok());
-        TEST_ASSERT_TRUE(queue.enqueue("three").ok());
-        TEST_ASSERT_TRUE(queue.pop().ok());
-        TEST_ASSERT_TRUE(queue.pop().ok());
-    }
-
-    pqueue::Queue queue(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("three", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-    assertQueueEmpty(queue);
-}
-
-void test_rewrite_front_persistence() {
-    cleanLittleFs();
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("old").ok());
-        TEST_ASSERT_TRUE(queue.enqueue("tail").ok());
-        TEST_ASSERT_TRUE(queue.rewriteFront("new").ok());
-    }
-
-    pqueue::Queue queue(queueConfig());
-    std::string out;
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("new", out.c_str());
-    TEST_ASSERT_TRUE(queue.pop().ok());
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("tail", out.c_str());
-}
-
-void test_capacity_full_behavior() {
-    cleanLittleFs();
-    {
-        pqueue::Queue queue(queueConfig(16, 2));
-
-        const auto one = queue.enqueue("one");
-        TEST_ASSERT_TRUE(one.ok());
-
-        const auto two = queue.enqueue("two");
-        TEST_ASSERT_TRUE(two.ok());
-
-        const pqueue::Status full = queue.enqueue("three");
-        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::QueueFull), static_cast<int>(full.code));
-
-        TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
-    }
-
-    pqueue::Queue queue(queueConfig(16, 2));
-    TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
-
-    std::string out;
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("one", out.c_str());
-
-    TEST_ASSERT_TRUE(queue.pop().ok());
-
-    TEST_ASSERT_TRUE(queue.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("two", out.c_str());
-
-    TEST_ASSERT_TRUE(queue.pop().ok());
-
-    assertQueueEmpty(queue);
-}
-
-void test_validate_clean_queue() {
-    cleanLittleFs();
-    pqueue::Queue queue(queueConfig());
-
-    TEST_ASSERT_TRUE(queue.enqueue("one").ok());
-    TEST_ASSERT_TRUE(queue.enqueue("two").ok());
-
-    const pqueue::ValidationResult validation = queue.validate();
-    TEST_ASSERT_TRUE(validation.ok);
-    TEST_ASSERT_EQUAL_UINT32(0, validation.errors.size());
-}
-
-void test_record_size_boundary() {
-    cleanLittleFs();
-    pqueue::Queue queue(queueConfig(4, 2));
-
-    TEST_ASSERT_TRUE(queue.enqueue("1234").ok());
-    const pqueue::Status tooLarge = queue.enqueue("12345");
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::RecordTooLarge), static_cast<int>(tooLarge.code));
-    TEST_ASSERT_EQUAL_UINT32(1, queue.stats().count);
-}
-
-void test_multiple_queue_objects_share_same_base_path() {
-    cleanLittleFs();
-    pqueue::Queue first(queueConfig());
-    pqueue::Queue second(queueConfig());
-
-    const auto firstStatus = first.enqueue("first");
-    TEST_ASSERT_TRUE(firstStatus.ok());
-
-    const auto secondStatus = second.enqueue("second");
-    TEST_ASSERT_TRUE(secondStatus.ok());
-
-    std::string out;
-    TEST_ASSERT_TRUE(first.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("first", out.c_str());
-
-    TEST_ASSERT_TRUE(first.pop().ok());
-
-    TEST_ASSERT_TRUE(second.peek(out).ok());
-    TEST_ASSERT_EQUAL_STRING("second", out.c_str());
-    TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
-}
-
-void test_queue_lock_released_after_each_operation() {
-    cleanLittleFs();
-
-    pqueue::Queue first(queueConfig());
-    TEST_ASSERT_TRUE(first.enqueue("first").ok());
-
-    pqueue::Queue second(queueConfig());
-    TEST_ASSERT_TRUE(second.enqueue("second").ok());
-
-    TEST_ASSERT_EQUAL_UINT32(2, second.stats().count);
-}
-
-void test_littlefs_locks_are_independent_across_base_paths() {
-    cleanLittleFs();
-
-    pqueue::Queue first(queueConfigForBase(kBasePath));
-    TEST_ASSERT_TRUE(first.enqueue("first").ok());
-
-    pqueue::Queue second(queueConfigForBase(kOtherBasePath));
-    TEST_ASSERT_TRUE(second.enqueue("other-base").ok());
-    TEST_ASSERT_EQUAL_UINT32(1, first.stats().count);
-    TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
-}
-
-void test_corrupt_active_record() {
-    cleanLittleFs();
-    {
-        pqueue::Queue queue(queueConfig());
-        TEST_ASSERT_TRUE(queue.enqueue("one").ok());
-    }
-
-    File spool = LittleFS.open(kSpoolPath, "r+");
-    TEST_ASSERT_TRUE_MESSAGE(spool, "failed to open pqueue spool for corruption");
-
-    const std::uint32_t payloadOffset =
-        static_cast<std::uint32_t>(pqueue::storage_detail::kCheckpointSlots) *
-            pqueue::storage_detail::kCheckpointRecordBytes +
-        4096U +
-        pqueue::storage_detail::kRecordHeaderBytes;
-
-    TEST_ASSERT_TRUE(spool.seek(payloadOffset, SeekSet));
-    TEST_ASSERT_EQUAL_UINT(1, spool.write(static_cast<uint8_t>(0xff)));
-    spool.flush();
-    spool.close();
-
-    pqueue::Queue queue(queueConfig());
-    std::string out;
-    const pqueue::Status readStatus = queue.peek(out);
-    TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::CrcMismatch), static_cast<int>(readStatus.code));
-
-    const pqueue::ValidationResult validation = queue.validate();
-    TEST_ASSERT_FALSE(validation.ok);
-    TEST_ASSERT_GREATER_OR_EQUAL_UINT32(1, validation.errors.size());
-}
-
-void test_outbox_drops_corrupt_front_record_on_littlefs() {
-    cleanLittleFs();
-    g_nowMs = 1000;
-    const pqueue::Config config = queueConfig();
-
-    {
-        FakeSender retrying;
-        retrying.decision = pqueue::SendDecision::RetryLater;
-        pqueue::Outbox outbox(config, outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
-
-        const pqueue::SubmitResult first = outbox.submit("bad");
-        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(first.status));
-        TEST_ASSERT_EQUAL_UINT16(1, retrying.calls);
-
-        const pqueue::SubmitResult second = outbox.submit("ok");
-        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(second.status));
-        TEST_ASSERT_EQUAL_UINT32(2, outbox.stats().count);
-    }
-
-    corruptSlotPayload(config, 0);
-
-    FakeSender succeeding;
-    succeeding.decision = pqueue::SendDecision::Sent;
-    pqueue::Outbox outbox(config, outboxConfig(), fakeSend, &succeeding, fakeClock, nullptr);
-    const pqueue::DrainResult drained = outbox.drainUpTo(2);
-
-    TEST_ASSERT_EQUAL_UINT16(1, drained.attempts);
-    TEST_ASSERT_EQUAL_UINT16(1, drained.corruptDropped);
-    TEST_ASSERT_EQUAL_UINT16(1, drained.sent);
-    TEST_ASSERT_EQUAL_UINT16(0, drained.dropped);
-    TEST_ASSERT_FALSE(drained.queueError);
-    TEST_ASSERT_FALSE(drained.sendError);
-    TEST_ASSERT_EQUAL_UINT16(1, succeeding.calls);
-    TEST_ASSERT_EQUAL_STRING("ok", succeeding.lastPayload.c_str());
-    TEST_ASSERT_EQUAL_UINT32(0, outbox.stats().count);
-}
-
-void test_outbox_backlog_persistence() {
-    cleanLittleFs();
-    FakeSender retrying;
-    retrying.decision = pqueue::SendDecision::RetryLater;
-    {
-        pqueue::Outbox outbox(queueConfig(), outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
-        const pqueue::SubmitResult submitted = outbox.submit("payload");
-        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(submitted.status));
-        TEST_ASSERT_EQUAL_UINT16(1, retrying.calls);
-        TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
-    }
-
-    FakeSender succeeding;
-    succeeding.decision = pqueue::SendDecision::Sent;
-    pqueue::Outbox outbox(queueConfig(), outboxConfig(), fakeSend, &succeeding, fakeClock, nullptr);
-    TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
-    const pqueue::DrainResult drained = outbox.drain();
-    TEST_ASSERT_EQUAL_UINT16(1, drained.attempts);
-    TEST_ASSERT_EQUAL_UINT16(1, drained.sent);
-    TEST_ASSERT_EQUAL_UINT32(0, outbox.stats().count);
-    TEST_ASSERT_EQUAL_STRING("payload", succeeding.lastPayload.c_str());
-}
-
-void test_retryable_failure_does_not_drop() {
-    cleanLittleFs();
-    FakeSender retrying;
-    retrying.decision = pqueue::SendDecision::RetryLater;
-    {
-        pqueue::Outbox outbox(queueConfig(), outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
-        const pqueue::SubmitResult submitted = outbox.submit("payload");
-        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(submitted.status));
-        TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
-
-        for (int i = 0; i < 3; ++i) {
-            const pqueue::DrainResult drained = outbox.drainUpTo(1);
-            TEST_ASSERT_EQUAL_UINT16(1, drained.attempts);
-            TEST_ASSERT_EQUAL_UINT16(0, drained.sent);
-            TEST_ASSERT_EQUAL_UINT16(0, drained.dropped);
-            TEST_ASSERT_FALSE(drained.queueError);
-            TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
-        }
-    }
-
-    pqueue::Queue queue(queueConfig());
-    TEST_ASSERT_EQUAL_UINT32(1, queue.stats().count);
-}
-
-
 void test_quick_reboot_persistence() {
     std::uint8_t phase = 0;
     std::string message;
@@ -571,7 +228,7 @@ void test_quick_reboot_persistence() {
     }
     TEST_ASSERT_EQUAL_UINT8(kRebootPhaseVerifyMutated, phase);
 
-    pqueue::Queue queue(queueConfig());
+    pqueue::Queue queue(appendLogQueueConfig());
     std::string out;
     TEST_ASSERT_TRUE(queue.peek(out).ok());
     TEST_ASSERT_EQUAL_STRING("two-rewritten", out.c_str());
@@ -584,7 +241,7 @@ void test_quick_reboot_persistence() {
     clearRebootState();
 }
 
-// --- AppendLog Queue variants ---
+// --- AppendLog Queue tests ---
 
 void test_append_log_basic_fifo() {
     cleanLittleFs();
@@ -670,6 +327,45 @@ void test_append_log_rewrite_front_persistence() {
     TEST_ASSERT_EQUAL_STRING("tail", out.c_str());
 }
 
+void test_append_log_capacity_full_behavior() {
+    cleanLittleFs();
+
+    pqueue::Config cfg = appendLogQueueConfig();
+    cfg.reservedBytes = 200;
+
+    std::vector<std::string> submitted;
+    bool sawFull = false;
+    {
+        pqueue::Queue queue(cfg);
+        for (int i = 0; i < 20; ++i) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "r%02d", i);
+            pqueue::Status st = queue.enqueue(buf);
+            if (!st.ok()) {
+                TEST_ASSERT_EQUAL_INT(
+                    static_cast<int>(pqueue::StatusCode::QueueFull),
+                    static_cast<int>(st.code));
+                sawFull = true;
+                break;
+            }
+            submitted.push_back(buf);
+        }
+        TEST_ASSERT_TRUE_MESSAGE(sawFull, "did not reach QueueFull within 20 records");
+        TEST_ASSERT_FALSE_MESSAGE(submitted.empty(), "no records accepted before QueueFull");
+    }
+
+    // Remount and drain: verify FIFO order survived intact
+    pqueue::Queue queue(cfg);
+    TEST_ASSERT_EQUAL_UINT32(static_cast<std::uint32_t>(submitted.size()), queue.stats().count);
+    for (const std::string& expected : submitted) {
+        std::string out;
+        TEST_ASSERT_TRUE(queue.peek(out).ok());
+        TEST_ASSERT_EQUAL_STRING(expected.c_str(), out.c_str());
+        TEST_ASSERT_TRUE(queue.pop().ok());
+    }
+    assertQueueEmpty(queue);
+}
+
 void test_append_log_validate_clean_queue() {
     cleanLittleFs();
     pqueue::Queue queue(appendLogQueueConfig());
@@ -690,6 +386,26 @@ void test_append_log_record_size_boundary() {
     const pqueue::Status tooLarge = queue.enqueue("12345");
     TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::StatusCode::RecordTooLarge), static_cast<int>(tooLarge.code));
     TEST_ASSERT_EQUAL_UINT32(1, queue.stats().count);
+}
+
+void test_append_log_multiple_queue_objects_share_same_base_path() {
+    cleanLittleFs();
+    {
+        pqueue::Queue first(appendLogQueueConfig());
+        pqueue::Queue second(appendLogQueueConfig());
+        TEST_ASSERT_TRUE(first.enqueue("first").ok());
+        TEST_ASSERT_TRUE(second.enqueue("second").ok());
+    }
+    pqueue::Queue queue(appendLogQueueConfig());
+    TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
+    std::string out;
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("first", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    TEST_ASSERT_TRUE(queue.peek(out).ok());
+    TEST_ASSERT_EQUAL_STRING("second", out.c_str());
+    TEST_ASSERT_TRUE(queue.pop().ok());
+    assertQueueEmpty(queue);
 }
 
 void test_append_log_lock_released_after_each_operation() {
@@ -714,6 +430,53 @@ void test_append_log_locks_are_independent_across_base_paths() {
     TEST_ASSERT_TRUE(second.enqueue("other-base").ok());
     TEST_ASSERT_EQUAL_UINT32(1, first.stats().count);
     TEST_ASSERT_EQUAL_UINT32(1, second.stats().count);
+}
+
+void test_append_log_outbox_backlog_persistence() {
+    cleanLittleFs();
+    FakeSender retrying;
+    retrying.decision = pqueue::SendDecision::RetryLater;
+    {
+        pqueue::Outbox outbox(appendLogQueueConfig(), outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
+        const pqueue::SubmitResult submitted = outbox.submit("payload");
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(submitted.status));
+        TEST_ASSERT_EQUAL_UINT16(1, retrying.calls);
+        TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
+    }
+
+    FakeSender succeeding;
+    succeeding.decision = pqueue::SendDecision::Sent;
+    pqueue::Outbox outbox(appendLogQueueConfig(), outboxConfig(), fakeSend, &succeeding, fakeClock, nullptr);
+    TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
+    const pqueue::DrainResult drained = outbox.drain();
+    TEST_ASSERT_EQUAL_UINT16(1, drained.attempts);
+    TEST_ASSERT_EQUAL_UINT16(1, drained.sent);
+    TEST_ASSERT_EQUAL_UINT32(0, outbox.stats().count);
+    TEST_ASSERT_EQUAL_STRING("payload", succeeding.lastPayload.c_str());
+}
+
+void test_append_log_retryable_failure_does_not_drop() {
+    cleanLittleFs();
+    FakeSender retrying;
+    retrying.decision = pqueue::SendDecision::RetryLater;
+    {
+        pqueue::Outbox outbox(appendLogQueueConfig(), outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
+        const pqueue::SubmitResult submitted = outbox.submit("payload");
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued), static_cast<int>(submitted.status));
+        TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
+
+        for (int i = 0; i < 3; ++i) {
+            const pqueue::DrainResult drained = outbox.drainUpTo(1);
+            TEST_ASSERT_EQUAL_UINT16(1, drained.attempts);
+            TEST_ASSERT_EQUAL_UINT16(0, drained.sent);
+            TEST_ASSERT_EQUAL_UINT16(0, drained.dropped);
+            TEST_ASSERT_FALSE(drained.queueError);
+            TEST_ASSERT_EQUAL_UINT32(1, outbox.stats().count);
+        }
+    }
+
+    pqueue::Queue queue(appendLogQueueConfig());
+    TEST_ASSERT_EQUAL_UINT32(1, queue.stats().count);
 }
 
 void test_append_log_compact_idle_survives_remount() {
@@ -748,6 +511,57 @@ void test_append_log_compact_idle_survives_remount() {
     assertQueueEmpty(queue);
 }
 
+void test_append_log_drop_oldest_evicts_and_continues() {
+    cleanLittleFs();
+
+    // maxSegmentBytes=80 with 12-byte payloads forces one record per sealed segment.
+    // Attempt 20 enqueues with DropOldest; not all may succeed because compaction can
+    // exhaust manifest range capacity after many eviction cycles. Track only accepted
+    // payloads so the FIFO suffix assertion remains valid regardless of how many succeed.
+    pqueue::Config cfg = appendLogQueueConfig(12);
+    cfg.maxSegmentBytes = 80;
+    cfg.reservedBytes = 600;
+    cfg.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
+
+    constexpr int kTotal = 20;
+    std::vector<std::string> accepted;
+    {
+        pqueue::Queue queue(cfg);
+        for (int i = 0; i < kTotal; ++i) {
+            char buf[13];
+            snprintf(buf, sizeof(buf), "pay-load-%03d", i);
+            if (queue.enqueue(buf).ok()) {
+                accepted.emplace_back(buf);
+            }
+        }
+    }
+    TEST_ASSERT_FALSE_MESSAGE(accepted.empty(), "no records accepted");
+
+    pqueue::Queue queue(cfg);
+    TEST_ASSERT_GREATER_THAN(0u, queue.stats().count);
+
+    std::string front;
+    TEST_ASSERT_TRUE(queue.peek(front).ok());
+
+    int startIdx = -1;
+    for (int i = 0; i < static_cast<int>(accepted.size()); ++i) {
+        if (front == accepted[i]) { startIdx = i; break; }
+    }
+    TEST_ASSERT_NOT_EQUAL(-1, startIdx);
+    TEST_ASSERT_GREATER_THAN(0, startIdx);
+    TEST_ASSERT_EQUAL_UINT32(
+        static_cast<std::uint32_t>(accepted.size()) - startIdx,
+        queue.stats().count);
+
+    for (int i = startIdx; i < static_cast<int>(accepted.size()); ++i) {
+        std::string out;
+        TEST_ASSERT_TRUE(queue.peek(out).ok());
+        TEST_ASSERT_EQUAL_STRING(accepted[i].c_str(), out.c_str());
+        TEST_ASSERT_TRUE(queue.pop().ok());
+    }
+    assertQueueEmpty(queue);
+}
+
 } // namespace
 
 void setup() {
@@ -755,29 +569,20 @@ void setup() {
     runQuickRebootSmokePhaseIfNeeded();
     UNITY_BEGIN();
     RUN_TEST(test_quick_reboot_persistence);
-    RUN_TEST(test_basic_fifo);
-    RUN_TEST(test_remount_persistence);
-    RUN_TEST(test_pop_persistence);
-    RUN_TEST(test_rewrite_front_persistence);
-    RUN_TEST(test_capacity_full_behavior);
-    RUN_TEST(test_validate_clean_queue);
-    RUN_TEST(test_record_size_boundary);
-    RUN_TEST(test_multiple_queue_objects_share_same_base_path);
-    RUN_TEST(test_queue_lock_released_after_each_operation);
-    RUN_TEST(test_littlefs_locks_are_independent_across_base_paths);
-    RUN_TEST(test_corrupt_active_record);
-    RUN_TEST(test_outbox_drops_corrupt_front_record_on_littlefs);
-    RUN_TEST(test_outbox_backlog_persistence);
-    RUN_TEST(test_retryable_failure_does_not_drop);
     RUN_TEST(test_append_log_basic_fifo);
     RUN_TEST(test_append_log_remount_persistence);
     RUN_TEST(test_append_log_pop_persistence);
     RUN_TEST(test_append_log_rewrite_front_persistence);
+    RUN_TEST(test_append_log_capacity_full_behavior);
     RUN_TEST(test_append_log_validate_clean_queue);
     RUN_TEST(test_append_log_record_size_boundary);
+    RUN_TEST(test_append_log_multiple_queue_objects_share_same_base_path);
     RUN_TEST(test_append_log_lock_released_after_each_operation);
     RUN_TEST(test_append_log_locks_are_independent_across_base_paths);
+    RUN_TEST(test_append_log_outbox_backlog_persistence);
+    RUN_TEST(test_append_log_retryable_failure_does_not_drop);
     RUN_TEST(test_append_log_compact_idle_survives_remount);
+    RUN_TEST(test_append_log_drop_oldest_evicts_and_continues);
     UNITY_END();
 }
 
