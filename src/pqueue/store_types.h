@@ -80,6 +80,11 @@ struct CompactIdleResult {
     // one successful compaction -- meaning more candidates likely remain.
     // False when the loop stopped due to a noOp or when maxSteps was 0.
     bool moreWorkLikely = false;
+    std::uint32_t bytesReclaimed = 0;      // totalOnDiskBytes before - after
+    std::uint32_t deadBytesBefore = 0;     // dead bytes across referenced sealed segments before the call
+    std::uint32_t remainingDeadBytes = 0;  // dead bytes across referenced sealed segments after the call
+    std::uint32_t inputSegments = 0;       // total sealed segments consumed across all compaction steps
+    std::uint32_t outputSegments = 0;      // total segments written across all compaction steps
 };
 
 class Store {

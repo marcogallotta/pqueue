@@ -87,6 +87,21 @@ But dead data from completed drains will accumulate, and the next enqueue burst
 will eventually trigger compaction on the write path -- paying the cleanup cost
 at the worst possible moment.
 
+`CompactIdleResult` fields:
+
+| Field | Meaning |
+|---|---|
+| `status` | `ok()` on success, error otherwise. `isNoOp()` means no compaction candidates were found. |
+| `stepsRun` | Steps attempted (including noOps). |
+| `compactions` | Steps that did real work. |
+| `noOps` | Steps that found no compaction candidates. |
+| `moreWorkLikely` | True when the loop exhausted `maxSteps` after at least one successful compaction. Use as a scheduling hint to re-run next cycle. |
+| `bytesReclaimed` | `totalOnDiskBytes` before minus after. May be 0 after a live rewrite that reduces dead bytes but has not yet freed files. |
+| `deadBytesBefore` | Dead bytes across referenced sealed segments before the call. |
+| `remainingDeadBytes` | Dead bytes across referenced sealed segments after the call. More reliable than `bytesReclaimed` as a measure of remaining cleanup work. |
+| `inputSegments` | Total sealed segments consumed across all steps in this call. |
+| `outputSegments` | Total segments written across all steps in this call. |
+
 
 ---
 
@@ -242,6 +257,43 @@ do {
     feedWatchdog();
 } while (cr.compactions > 0);
 ```
+
+### Drain-informed compaction
+
+`DrainResult` (returned by `drain()` and `drainUpTo()`) includes
+`removedQueuedBytes`: the sum of raw pqueue record bytes for records
+successfully removed from the queue (sent or dropped). Records dropped due to
+an unreadable corrupt front contribute to the count but 0 bytes (the byte
+count is unavailable).
+
+This field is a useful scheduling signal for compaction: when the drain
+removes records, it creates dead bytes in the sealed segments. The amount
+removed is a rough proxy for how much compaction work has been created.
+
+A budget-aware compaction pattern:
+
+```cpp
+const pqueue::DrainResult dr = outbox.drainUpTo(maxDrainAttempts);
+
+// Size the compaction budget from how much the drain freed, capped at
+// the configured max. If a previous run flagged more work, use full budget.
+bool& moreWork = app.pqueueMoreCompactionLikely; // persistent across ticks
+if (dr.removedQueuedBytes > 0 || moreWork) {
+    const size_t maxSteps = kConfiguredMaxCompactSteps;
+    size_t steps = maxSteps;
+    if (!moreWork) {
+        steps = std::max<size_t>(1, dr.removedQueuedBytes / kCompactBytesPerStep);
+        steps = std::min(maxSteps, steps);
+    }
+    const auto cr = outbox.compactIdle(steps);
+    moreWork = cr.status.ok() && cr.moreWorkLikely;
+}
+```
+
+`removedQueuedBytes` does not include per-record append-log overhead (~24
+bytes per record). It is a proportional guide, not an exact dead-byte count.
+Use `CompactIdleResult::remainingDeadBytes` after compaction to see how much
+dead data is still on disk.
 
 
 ---

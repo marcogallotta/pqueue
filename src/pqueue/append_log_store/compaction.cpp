@@ -130,7 +130,8 @@ std::size_t AppendLogStore::findParentRangeIdx(std::uint32_t startGen, std::uint
 
 Status AppendLogStore::compactRange(const CompactionRange& range,
                                     std::uint32_t* outputSegCount,
-                                    AllowFullRangeFallback allowFallback) {
+                                    AllowFullRangeFallback allowFallback,
+                                    std::uint32_t* inputSegCount) {
 #ifdef ARDUINO
     const std::uint32_t t_start = millis();
     std::uint32_t ms_exist = 0, ms_pre_scan = 0, ms_pre_size = 0;
@@ -363,6 +364,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range,
     eff_s = inputRange.startGen; eff_e = inputRange.endGen;
     n_in  = inputRange.endGen - inputRange.startGen + 1;
 #endif
+    if (inputSegCount) *inputSegCount = inputRange.endGen - inputRange.startGen + 1;
 
     // Phase: collectLiveRecords.
     CR_T0(ms_collect);
@@ -598,32 +600,49 @@ AppendLogStore::CompactionRange AppendLogStore::narrowRange(
     return best;
 }
 
-Status AppendLogStore::compactOneSegment(AllowFullRangeFallback allowFallback) {
+Status AppendLogStore::compactOneSegment(AllowFullRangeFallback allowFallback,
+                                         std::uint32_t* inputSegs,
+                                         std::uint32_t* outputSegs) {
     auto rangeOpt = chooseCompactionRange();
     if (!rangeOpt) return Status::noOp();
     const CompactionRange range = config_.maxOutputSegments > 0
         ? narrowRange(*rangeOpt, config_.maxOutputSegments)
         : *rangeOpt;
-    return compactRange(range, nullptr, allowFallback);
+    return compactRange(range, outputSegs, allowFallback, inputSegs);
+}
+
+std::uint32_t AppendLogStore::sumDeadBytes() const {
+    std::uint32_t total = 0;
+    for (const auto& s : segmentStats()) total += s.deadBytes();
+    return total;
 }
 
 CompactIdleResult AppendLogStore::compactIdle(std::size_t maxSteps) {
     CompactIdleResult result{};
     result.status = Status::success();
+    result.deadBytesBefore = sumDeadBytes();
+    const std::uint32_t diskBefore = totalOnDiskBytes_;
+
     for (std::size_t i = 0; i < maxSteps; ++i) {
-        Status st = compactOneSegment(AllowFullRangeFallback::yes);
+        std::uint32_t stepInput = 0, stepOutput = 0;
+        Status st = compactOneSegment(AllowFullRangeFallback::yes, &stepInput, &stepOutput);
         ++result.stepsRun;
         if (!st.ok()) {
             result.status = st;
-            return result;
+            break;
         }
         if (st.isNoOp()) {
             ++result.noOps;
-            return result; // moreWorkLikely stays false
+            break; // moreWorkLikely stays false
         }
         ++result.compactions;
+        result.inputSegments += stepInput;
+        result.outputSegments += stepOutput;
     }
-    result.moreWorkLikely = (result.compactions > 0);
+    result.moreWorkLikely = result.status.ok() && result.noOps == 0 && result.compactions > 0;
+    result.remainingDeadBytes = sumDeadBytes();
+    result.bytesReclaimed = totalOnDiskBytes_ < diskBefore
+        ? diskBefore - totalOnDiskBytes_ : 0;
     return result;
 }
 

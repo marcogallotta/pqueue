@@ -175,6 +175,7 @@ DrainResult Outbox::drainUpTo(std::uint16_t maxDrainAttempts) {
         total.sent += current.sent;
         total.dropped += current.dropped;
         total.corruptDropped += current.corruptDropped;
+        total.removedQueuedBytes += current.removedQueuedBytes;
         total.rateLimited = total.rateLimited || current.rateLimited;
         total.notDue = total.notDue || current.notDue;
         total.queueError = total.queueError || current.queueError;
@@ -222,7 +223,8 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
     envelope::DecodedEnvelope decoded;
     if (!envelope::decodeEnvelope(record, decoded)) {
         return dropCorruptFrontRecord(
-            Status::failure(StatusCode::DecodeFailed, "stored outbox envelope could not be decoded"));
+            Status::failure(StatusCode::DecodeFailed, "stored outbox envelope could not be decoded"),
+            static_cast<std::uint32_t>(record.size()));
     }
 
     if (frontIsCoolingDown(nowMs)) {
@@ -270,6 +272,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
             }
             clearFrontCooldown();
             result.sent += 1;
+            result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
             emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "drain", decoded.attempts, 0);
             return result;
 
@@ -283,6 +286,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
             }
             clearFrontCooldown();
             result.dropped += 1;
+            result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
             emitRequestEvent(
                 EventKind::RequestDropped,
                 Severity::Warning,
@@ -426,7 +430,7 @@ bool Outbox::canDropCorruptFrontRecord() const {
            corruptDropsThisLifetime_ < config_.maxCorruptDropsPerLifetime;
 }
 
-DrainResult Outbox::dropCorruptFrontRecord(Status corruptStatus) {
+DrainResult Outbox::dropCorruptFrontRecord(Status corruptStatus, std::uint32_t recordBytes) {
     DrainResult result;
     if (!canDropCorruptFrontRecord()) {
         result.queueError = true;
@@ -449,6 +453,7 @@ DrainResult Outbox::dropCorruptFrontRecord(Status corruptStatus) {
     clearFrontCooldown();
     corruptDropsThisLifetime_ += 1;
     result.corruptDropped += 1;
+    result.removedQueuedBytes = recordBytes;
     result.detail = corruptStatus;
     emitRequestEvent(
         EventKind::RequestDropped,

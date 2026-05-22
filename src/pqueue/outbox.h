@@ -65,6 +65,10 @@ struct DrainResult {
     std::uint16_t sent = 0;
     std::uint16_t dropped = 0;
     std::uint16_t corruptDropped = 0;
+    // Sum of raw pqueue record bytes for records successfully removed from the queue.
+    // If a corrupt front record was dropped but the raw record was unreadable, the
+    // record count is incremented but 0 bytes are added here.
+    std::uint32_t removedQueuedBytes = 0;
     bool rateLimited = false;
     bool notDue = false;
     bool queueError = false;
@@ -122,7 +126,7 @@ private:
     void recordDrainAttempt(std::uint64_t nowMs);
     std::uint32_t drainRateRemainingMs(std::uint64_t nowMs) const;
     bool canDropCorruptFrontRecord() const;
-    DrainResult dropCorruptFrontRecord(Status corruptStatus);
+    DrainResult dropCorruptFrontRecord(Status corruptStatus, std::uint32_t recordBytes = 0);
     std::uint16_t maxDrainAttemptsPerSecond() const;
 
     Queue queue_;

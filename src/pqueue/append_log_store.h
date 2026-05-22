@@ -64,10 +64,14 @@ public:
     enum class AllowFullRangeFallback : bool { no = false, yes = true };
     Status compactRange(const CompactionRange& range,
                         std::uint32_t* outputSegCount = nullptr,
-                        AllowFullRangeFallback allowFallback = AllowFullRangeFallback::no);
-    Status compactOneSegment(AllowFullRangeFallback allowFallback = AllowFullRangeFallback::no);
+                        AllowFullRangeFallback allowFallback = AllowFullRangeFallback::no,
+                        std::uint32_t* inputSegCount = nullptr);
+    Status compactOneSegment(AllowFullRangeFallback allowFallback = AllowFullRangeFallback::no,
+                             std::uint32_t* inputSegs = nullptr,
+                             std::uint32_t* outputSegs = nullptr);
     Status compactFull();
     CompactIdleResult compactIdle(std::size_t maxSteps) override;
+    std::uint32_t sumDeadBytes() const;
 
     struct SegmentStat {
         std::uint32_t generation = 0;

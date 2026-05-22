@@ -501,6 +501,7 @@ TEST_CASE("pqueue http outbox drainUpTo sends multiple queued requests within ra
     const auto first = outbox.drainUpTo(3);
     CHECK_EQ(first.attempts, 3U);
     CHECK_EQ(first.sent, 3U);
+    CHECK_GT(first.removedQueuedBytes, 0U);
     CHECK_FALSE(first.rateLimited);
     CHECK_EQ(outbox.stats().count, 1U);
 
@@ -591,6 +592,11 @@ TEST_CASE("pqueue http outbox compactIdle removes dead sealed segments") {
     CHECK(result.status.ok());
     CHECK(result.compactions > 0);
     CHECK(result.noOps <= 1);
+    CHECK_GT(result.deadBytesBefore, 0U);
+    CHECK_LT(result.remainingDeadBytes, result.deadBytesBefore);
+    CHECK_GT(result.bytesReclaimed, 0U);
+    CHECK_GT(result.inputSegments, 0U);
+    CHECK_LE(result.outputSegments, result.inputSegments);
 
     // Remaining records drain cleanly.
     clock.nowMs += 1000;
