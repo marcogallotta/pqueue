@@ -184,6 +184,9 @@ public:
     }
 
     Status readFile(const std::string& name, std::string& out) override {
+        if (!fileExistsQuiet(name)) {
+            return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS file for read");
+        }
         File file = LittleFS.open(path(name).c_str(), "r");
         if (!file) {
             return Status::failure(StatusCode::ReadFailed, "failed to open LittleFS file for read");

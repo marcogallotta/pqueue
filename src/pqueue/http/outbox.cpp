@@ -145,7 +145,7 @@ SendResult Outbox::sendStoredRequest(const std::string& encodedRequest, const Re
     );
     notifyResponse(request, response);
     emitDiagnostic(
-        response.error == TransportError::None ? Severity::Debug : Severity::Info,
+        response.error == TransportError::None ? Severity::Debug : Severity::Warning,
         response.error == TransportError::None
             ? Status::success()
             : Status::failure(StatusCode::SendFailed, "HTTP transport returned an error", static_cast<int>(response.error)),
