@@ -99,8 +99,8 @@ bool AppendLogStore::isSegmentName(const std::string& name, std::uint32_t& gener
     return true;
 }
 
-FileStoreIndex AppendLogStore::indexFromRecords() const {
-    FileStoreIndex idx;
+QueueIndex AppendLogStore::indexFromRecords() const {
+    QueueIndex idx;
     if (records_.empty()) {
         idx.head = nextSequence_;
         idx.tail = nextSequence_;
@@ -504,14 +504,14 @@ std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const 
 
 // --- Store interface implementation ---
 
-Status AppendLogStore::readIndex(FileStoreIndex& out) {
+Status AppendLogStore::readIndex(QueueIndex& out) {
     Status st = ensureMounted();
     if (!st.ok()) return st;
     out = indexFromRecords();
     return Status::success();
 }
 
-Status AppendLogStore::readIndexFromDisk(FileStoreIndex& out) {
+Status AppendLogStore::readIndexFromDisk(QueueIndex& out) {
     return readIndex(out);
 }
 
@@ -645,7 +645,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     return Status::success();
 }
 
-Status AppendLogStore::writeIndex(const FileStoreIndex& index) {
+Status AppendLogStore::writeIndex(const QueueIndex& index) {
     Status st = ensureMounted();
     if (!st.ok()) return st;
 
@@ -657,7 +657,7 @@ Status AppendLogStore::writeIndex(const FileStoreIndex& index) {
     }
 
     // Detect pop: head advanced
-    const FileStoreIndex current = indexFromRecords();
+    const QueueIndex current = indexFromRecords();
     if (index.head > current.head && !records_.empty()) {
         const std::uint32_t poppedSeq = records_.front().sequence;
         const std::uint32_t poppedGen = records_.front().segmentGeneration;

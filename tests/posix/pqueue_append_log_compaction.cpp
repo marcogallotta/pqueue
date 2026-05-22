@@ -519,7 +519,7 @@ TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
 
     // footprint=110; +25 for enqueue=135 > 120 → compact gen=1; then fits
     CHECK(store.writeRecord(3, "c").ok());
-    pqueue::FileStoreIndex idx;
+    pqueue::QueueIndex idx;
     CHECK(store.readIndex(idx).ok());
     CHECK(store.writeIndex(idx).ok());
 
@@ -1603,7 +1603,7 @@ TEST_CASE("rewrite: rewriteFront into newer segment; compact+remount preserves F
 
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
-    pqueue::FileStoreIndex idx;
+    pqueue::QueueIndex idx;
     CHECK(store.readIndex(idx).ok());
     CHECK_EQ(idx.head, 1u); // must be seq=1 ("X"), not seq=2 ("B")
 
@@ -1676,7 +1676,7 @@ TEST_CASE("rewrite: index head and ordinals are correct after rewrite+compact+re
     const Expected expected[] = {{2,"X"},{3,"C"},{4,"D"}};
 
     auto checkOrdinals = [&](pqueue::AppendLogStore& s) {
-        pqueue::FileStoreIndex idx;
+        pqueue::QueueIndex idx;
         CHECK(s.readIndex(idx).ok());
         CHECK_EQ(idx.head, 2u);
         CHECK_EQ(idx.count, 3u);

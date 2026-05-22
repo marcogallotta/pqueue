@@ -347,7 +347,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
         counting->resetCounters();
         auto st = store.writeRecord(nextSeq, payload);
         if (st.ok()) {
-            pqueue::FileStoreIndex dummy;
+            pqueue::QueueIndex dummy;
             store.writeIndex(dummy);
             ++nextSeq;
             ++queueSize;
@@ -370,7 +370,7 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
 
     auto doPop = [&]() {
         counting->resetCounters();
-        pqueue::FileStoreIndex idx;
+        pqueue::QueueIndex idx;
         store.readIndex(idx);
         if (idx.count > 0) {
             idx.head++;

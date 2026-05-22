@@ -35,9 +35,9 @@ public:
     explicit AppendLogStore(AppendLogConfig config = AppendLogConfig{});
 
     Status mount() override;
-    Status readIndex(FileStoreIndex& out) override;
-    Status readIndexFromDisk(FileStoreIndex& out) override;
-    Status writeIndex(const FileStoreIndex& index) override;
+    Status readIndex(QueueIndex& out) override;
+    Status readIndexFromDisk(QueueIndex& out) override;
+    Status writeIndex(const QueueIndex& index) override;
 
     Status writeRecord(std::uint32_t sequence, const std::string& record) override;
     Status rewriteRecord(std::uint32_t sequence, const std::string& record) override;
@@ -137,7 +137,7 @@ private:
     // divergence between publish and mount reconstruction.
     void applyManifestToRam(const append_log_detail::ManifestData& manifest);
 
-    FileStoreIndex indexFromRecords() const;
+    QueueIndex indexFromRecords() const;
 
     AppendLogConfig config_;
     mutable std::shared_ptr<FileSystem> fs_;

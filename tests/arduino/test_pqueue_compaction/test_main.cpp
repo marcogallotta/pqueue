@@ -320,7 +320,7 @@ void test_compaction_burst_workload() {
             t_wr += millis() - t0;
 
             if (st.ok()) {
-                pqueue::FileStoreIndex dummy;
+                pqueue::QueueIndex dummy;
                 t0 = millis();
                 const auto idxSt = store.writeIndex(dummy);
                 t_widx += millis() - t0;
@@ -351,7 +351,7 @@ void test_compaction_burst_workload() {
         const std::uint32_t t_pop0 = millis();
         for (std::uint32_t i = 0; i < toPop; ++i) {
             std::uint32_t t0;
-            pqueue::FileStoreIndex idx;
+            pqueue::QueueIndex idx;
             t0 = millis();
             const bool ok = store.readIndex(idx).ok() && idx.count > 0;
             t_ridx += millis() - t0;
@@ -408,7 +408,7 @@ void test_compaction_burst_workload() {
 
     // Verify all remaining live records are readable and have correct payloads.
     {
-        pqueue::FileStoreIndex idx;
+        pqueue::QueueIndex idx;
         TEST_ASSERT_TRUE_MESSAGE(store.readIndex(idx).ok(), "readIndex failed");
         TEST_ASSERT_EQUAL_UINT32_MESSAGE(queueSize, idx.count,
             "index count mismatch after workload");

@@ -546,7 +546,7 @@ CompactionBurstResult scenarioCompactionBurst(
         for (std::uint32_t i = 0; i < burstSize; ++i) {
             const auto st = store.writeRecord(nextSeq, payload);
             if (st.ok()) {
-                pqueue::FileStoreIndex dummy;
+                pqueue::QueueIndex dummy;
                 store.writeIndex(dummy);
                 ++nextSeq;
                 ++queueSize;
@@ -561,7 +561,7 @@ CompactionBurstResult scenarioCompactionBurst(
         }
         const std::uint32_t toPop = static_cast<std::uint32_t>(static_cast<float>(queueSize) * pcfg.popRatio);
         for (std::uint32_t i = 0; i < toPop; ++i) {
-            pqueue::FileStoreIndex idx;
+            pqueue::QueueIndex idx;
             if (store.readIndex(idx).ok() && idx.count > 0) {
                 idx.head++; idx.count--;
                 store.writeIndex(idx);
@@ -635,7 +635,7 @@ IdleCompactionResult scenarioIdleCompaction(
             const auto st = store.writeRecord(nextSeq, payload);
             if (counting->counters().readFile > rfBefore) ++result.hotCompactions;
             if (st.ok()) {
-                pqueue::FileStoreIndex dummy;
+                pqueue::QueueIndex dummy;
                 store.writeIndex(dummy);
                 ++nextSeq;
                 ++queueSize;
@@ -651,7 +651,7 @@ IdleCompactionResult scenarioIdleCompaction(
         // Phase 2: drain
         const std::uint32_t toPop = static_cast<std::uint32_t>(static_cast<float>(queueSize) * pcfg.popRatio);
         for (std::uint32_t i = 0; i < toPop; ++i) {
-            pqueue::FileStoreIndex idx;
+            pqueue::QueueIndex idx;
             if (store.readIndex(idx).ok() && idx.count > 0) {
                 idx.head++; idx.count--;
                 store.writeIndex(idx);

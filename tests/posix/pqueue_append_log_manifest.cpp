@@ -283,7 +283,7 @@ TEST_CASE("manifest-mount: referenced segment missing returns DataCorrupt") {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::FileStoreIndex dummy{};
+        pqueue::QueueIndex dummy{};
         REQUIRE(store.writeRecord(0, "A").ok());
         REQUIRE(store.writeIndex(dummy).ok());
 
@@ -321,7 +321,7 @@ TEST_CASE("manifest-mount: normal mount with manifest recovers records") {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::FileStoreIndex dummy{};
+        pqueue::QueueIndex dummy{};
         REQUIRE(store.writeRecord(0, "alpha").ok());
         REQUIRE(store.writeIndex(dummy).ok());
         REQUIRE(store.writeRecord(1, "beta").ok());
@@ -336,7 +336,7 @@ TEST_CASE("manifest-mount: normal mount with manifest recovers records") {
     {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
-        pqueue::FileStoreIndex idx;
+        pqueue::QueueIndex idx;
         REQUIRE(store.readIndex(idx).ok());
         CHECK_EQ(idx.count, 3U);
         std::string out;
@@ -355,7 +355,7 @@ TEST_CASE("manifest-mount: corrupt inactive slot does not affect mount (critical
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::FileStoreIndex dummy{};
+        pqueue::QueueIndex dummy{};
         REQUIRE(store.writeRecord(0, "one").ok());
         REQUIRE(store.writeIndex(dummy).ok());
         REQUIRE(store.writeRecord(1, "two").ok());
@@ -373,7 +373,7 @@ TEST_CASE("manifest-mount: corrupt inactive slot does not affect mount (critical
     {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
-        pqueue::FileStoreIndex idx;
+        pqueue::QueueIndex idx;
         REQUIRE(store.readIndex(idx).ok());
         CHECK_EQ(idx.count, 3U);
         std::string out;

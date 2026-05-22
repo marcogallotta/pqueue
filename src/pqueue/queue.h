@@ -57,7 +57,7 @@ private:
 
     Config config_;
     std::unique_ptr<Store> store_;
-    FileStoreIndex index_;
+    QueueIndex index_;
     std::string lockContents_;
     bool lockHeld_ = false;
 };

@@ -24,7 +24,7 @@ inline constexpr const char* kDefaultBasePath = "/pqueue_spool";
 inline constexpr const char* kDefaultBasePath = "build/pqueue-spools/pqueue_spool";
 #endif
 
-struct FileStoreIndex {
+struct QueueIndex {
     std::uint32_t head = 0;
     std::uint32_t tail = 0;
     std::uint32_t count = 0;
@@ -87,9 +87,9 @@ public:
     virtual ~Store() = default;
 
     virtual Status mount() = 0;
-    virtual Status readIndex(FileStoreIndex& out) = 0;
-    virtual Status readIndexFromDisk(FileStoreIndex& out) = 0;
-    virtual Status writeIndex(const FileStoreIndex& index) = 0;
+    virtual Status readIndex(QueueIndex& out) = 0;
+    virtual Status readIndexFromDisk(QueueIndex& out) = 0;
+    virtual Status writeIndex(const QueueIndex& index) = 0;
 
     virtual Status writeRecord(std::uint32_t sequence, const std::string& record) = 0;
     virtual Status rewriteRecord(std::uint32_t sequence, const std::string& record) = 0;

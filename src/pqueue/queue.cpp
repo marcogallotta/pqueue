@@ -101,7 +101,7 @@ void addRepairHints(ValidationResult& result, std::uint32_t head) {
     }
 }
 
-bool sameIndex(const FileStoreIndex& lhs, const FileStoreIndex& rhs) {
+bool sameIndex(const QueueIndex& lhs, const QueueIndex& rhs) {
     return lhs.head == rhs.head && lhs.tail == rhs.tail && lhs.count == rhs.count;
 }
 
@@ -270,7 +270,7 @@ Status Queue::enqueue(const std::string& record) {
         return diagnostic(Severity::Error, st, "enqueue");
     }
 
-    FileStoreIndex next = index_;
+    QueueIndex next = index_;
     next.tail += 1;
     next.count += 1;
     st = store_->writeIndex(next);
@@ -311,7 +311,7 @@ Status Queue::pop() {
     }
 
     const std::uint32_t oldHead = index_.head;
-    FileStoreIndex next = index_;
+    QueueIndex next = index_;
     next.head += 1;
     next.count -= 1;
 
@@ -348,7 +348,7 @@ Status Queue::rewriteFront(const std::string& record) {
 
 Status Queue::evictFront() {
     const std::uint32_t oldHead = index_.head;
-    FileStoreIndex next = index_;
+    QueueIndex next = index_;
     next.head += 1;
     next.count -= 1;
 
@@ -386,7 +386,7 @@ Status Queue::dropFrontIfCorrupt() {
     }
 
     const std::uint32_t corruptHead = index_.head;
-    FileStoreIndex next = index_;
+    QueueIndex next = index_;
     next.head += 1;
     next.count -= 1;
 
@@ -417,7 +417,7 @@ Status Queue::format() {
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "format");
     }
-    index_ = FileStoreIndex{};
+    index_ = QueueIndex{};
     return Status::success();
 }
 
@@ -489,7 +489,7 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
         return result;
     }
 
-    FileStoreIndex diskIndex;
+    QueueIndex diskIndex;
     const Status st = store_->readIndexFromDisk(diskIndex);
     if (!st.ok()) {
         addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));

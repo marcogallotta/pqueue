@@ -126,13 +126,13 @@ inline void plantLayout(const LayoutSpec& spec) {
 
 inline void storeEnqueue(pqueue::AppendLogStore& store, std::uint32_t seq, const std::string& payload) {
     CHECK(store.writeRecord(seq, payload).ok());
-    pqueue::FileStoreIndex idx;
+    pqueue::QueueIndex idx;
     CHECK(store.readIndex(idx).ok());
     CHECK(store.writeIndex(idx).ok());
 }
 
 inline void storePop(pqueue::AppendLogStore& store) {
-    pqueue::FileStoreIndex idx;
+    pqueue::QueueIndex idx;
     CHECK(store.readIndex(idx).ok());
     idx.head++;
     CHECK(store.writeIndex(idx).ok());
