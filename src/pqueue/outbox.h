@@ -89,6 +89,7 @@ public:
     SubmitResult submit(const std::string& payload);
     DrainResult drain();
     DrainResult drainUpTo(std::uint16_t maxDrainAttempts);
+    CompactIdleResult compactIdle(std::size_t maxSteps);
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     Stats stats();
 

@@ -553,6 +553,58 @@ TEST_CASE("pqueue http outbox validate rejects malformed request envelopes") {
 }
 
 
+TEST_CASE("pqueue http outbox compactIdle removes dead sealed segments") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    // path="/t" body="b": request envelope=15 bytes, outbox envelope=29 bytes, per-record segment cost=53 bytes.
+    // maxSegmentBytes=100 holds exactly 1 record per sealed segment (20+53=73 < 100, 20+106=126 > 100).
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.queue.storeLayout = pqueue::StoreLayout::AppendLog;
+    httpConfig.queue.maxSegmentBytes = 100;
+    httpConfig.queue.minFreeBytes = 0;
+    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
+    httpConfig.baseUrl = "https://example.test";
+
+    FakeHttpTransport transport;
+    FakeClock clock;
+    // submitPost triggers a live send attempt for the first record; 503 queues it.
+    transport.responses.push_back({503, pqueue::http::TransportError::None});
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+    REQUIRE(outbox.submitPost("/t", "b").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submitPost("/t", "b").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submitPost("/t", "b").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submitPost("/t", "b").status == pqueue::SubmitStatus::Queued);
+
+    // Drain r0 and r1 into separate 1-second rate windows.
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    outbox.drain();
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    outbox.drain();
+    CHECK_EQ(outbox.stats().count, 2U);
+
+    // Two sealed segments are now fully dead; compactIdle should do real work.
+    const auto result = outbox.compactIdle(16);
+    CHECK(result.status.ok());
+    CHECK(result.compactions > 0);
+    CHECK(result.noOps <= 1);
+
+    // Remaining records drain cleanly.
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    outbox.drain();
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    outbox.drain();
+    CHECK_EQ(outbox.stats().count, 0U);
+    cleanHttpOutboxSpool();
+#endif
+}
+
 TEST_CASE("pqueue http default classifier covers retryable and permanent statuses") {
 #ifndef ARDUINO
     const int retryableStatuses[] = {408, 429, 500, 502, 503, 504, 599};

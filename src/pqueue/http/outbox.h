@@ -131,6 +131,7 @@ public:
     pqueue::SubmitResult submitPost(const std::string& path, const std::string& body);
     pqueue::DrainResult drain();
     pqueue::DrainResult drainUpTo(std::uint16_t maxDrainAttempts);
+    pqueue::CompactIdleResult compactIdle(std::size_t maxSteps);
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     Stats stats();
 

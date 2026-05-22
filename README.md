@@ -216,6 +216,7 @@ pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
 
 outbox.submit(payload);          // queue or send immediately if online
 outbox.drainUpTo(50);            // attempt up to 50 sends
+while (outbox.compactIdle(1).compactions > 0) {}  // reclaim dead space
 ```
 
 ### pqueue::http::Outbox
@@ -238,14 +239,23 @@ pqueue::http::Outbox outbox(cfg, transport, myClock, nullptr);
 
 outbox.submitPost("/readings", body);   // queue or send immediately
 outbox.drainUpTo(50);                   // replay queued requests
+while (outbox.compactIdle(1).compactions > 0) {}  // reclaim dead space
 ```
 
 ### Idle compaction with Outbox
 
-`compactIdle` is not currently exposed on `pqueue::Outbox` or
-`pqueue::http::Outbox`. If you use these classes, compaction falls back to the
-hot-path trigger inside `submit`. For explicit idle compaction control, use
-`pqueue::Queue` directly instead.
+Both `pqueue::Outbox` and `pqueue::http::Outbox` expose `compactIdle(maxSteps)`
+which forwards to the underlying `Queue`. Drive it the same way as with `Queue`
+directly -- after a drain completes, during a reconnect delay, or in a
+low-priority task:
+
+```cpp
+pqueue::CompactIdleResult cr;
+do {
+    cr = outbox.compactIdle(1);
+    feedWatchdog();
+} while (cr.compactions > 0);
+```
 
 
 ---

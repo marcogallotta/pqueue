@@ -322,6 +322,10 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
     return result;
 }
 
+CompactIdleResult Outbox::compactIdle(std::size_t maxSteps) {
+    return queue_.compactIdle(maxSteps);
+}
+
 ValidationResult Outbox::validate(const ValidationOptions& options) {
     return validatePayloads(nullptr, nullptr, options);
 }

@@ -765,6 +765,55 @@ TEST_CASE("pqueue outbox drainUpTo zero still performs one drain attempt") {
 #endif
 }
 
+TEST_CASE("pqueue outbox compactIdle removes dead sealed segments") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    // 3-char payloads: envelope=17 bytes, per-record segment cost=41 bytes.
+    // maxSegmentBytes=100 holds exactly 1 record per sealed segment (20+41=61 < 100, 20+82=102 > 100).
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
+    queueConfig.maxSegmentBytes = 100;
+
+    FakeSender sender;
+    FakeClock clock;
+    // submit("r00") triggers a live send attempt; the rest enqueue directly.
+    sender.decisions.push_back(pqueue::SendDecision::RetryLater);
+
+    pqueue::OutboxConfig outboxConfig = testOutboxConfig();
+    outboxConfig.retryDelayMs = 1000;
+    auto outbox = makeOutbox(queueConfig, sender, clock, outboxConfig);
+
+    REQUIRE(outbox.submit("r00").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submit("r01").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submit("r02").status == pqueue::SubmitStatus::Queued);
+    REQUIRE(outbox.submit("r03").status == pqueue::SubmitStatus::Queued);
+
+    // Drain r00 and r01 into separate 1-second rate windows.
+    clock.nowMs += 1000;
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    outbox.drain();
+    clock.nowMs += 1000;
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    outbox.drain();
+    CHECK_EQ(outbox.stats().count, 2U);
+
+    // Two sealed segments are now fully dead; compactIdle should do real work.
+    const auto result = outbox.compactIdle(16);
+    CHECK(result.status.ok());
+    CHECK(result.compactions > 0);
+    CHECK(result.noOps <= 1);
+
+    // Remaining records drain cleanly.
+    clock.nowMs += 1000;
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    outbox.drain();
+    clock.nowMs += 1000;
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    outbox.drain();
+    CHECK_EQ(outbox.stats().count, 0U);
+    cleanOutboxSpool();
+#endif
+}
+
 TEST_CASE("pqueue outbox handles unknown send decisions as send errors") {
 #ifndef ARDUINO
     cleanOutboxSpool();

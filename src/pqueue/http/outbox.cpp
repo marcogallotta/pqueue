@@ -98,6 +98,10 @@ pqueue::DrainResult Outbox::drainUpTo(std::uint16_t maxDrainAttempts) {
     return outbox_.drainUpTo(maxDrainAttempts);
 }
 
+pqueue::CompactIdleResult Outbox::compactIdle(std::size_t maxSteps) {
+    return outbox_.compactIdle(maxSteps);
+}
+
 ValidationResult Outbox::validate(const ValidationOptions& options) {
     return outbox_.validatePayloads(validateHttpRequestPayload, nullptr, options);
 }
