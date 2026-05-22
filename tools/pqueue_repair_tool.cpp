@@ -13,15 +13,9 @@ namespace {
 const char* issueCodeName(pqueue::ValidationIssueCode code) {
     switch (code) {
         case pqueue::ValidationIssueCode::InvalidConfig: return "invalid_config";
-        case pqueue::ValidationIssueCode::MetadataMissing: return "metadata_missing";
         case pqueue::ValidationIssueCode::MetadataCorrupt: return "metadata_corrupt";
         case pqueue::ValidationIssueCode::JournalCorrupt: return "journal_corrupt";
         case pqueue::ValidationIssueCode::ConfigMismatch: return "config_mismatch";
-        case pqueue::ValidationIssueCode::SpoolMissing: return "spool_missing";
-        case pqueue::ValidationIssueCode::SpoolSizeMismatch: return "spool_size_mismatch";
-        case pqueue::ValidationIssueCode::InvalidRingState: return "invalid_ring_state";
-        case pqueue::ValidationIssueCode::SlotReadFailed: return "slot_read_failed";
-        case pqueue::ValidationIssueCode::SlotHeaderInvalid: return "slot_header_invalid";
         case pqueue::ValidationIssueCode::SlotCrcMismatch: return "slot_crc_mismatch";
         case pqueue::ValidationIssueCode::QueueLoadFailed: return "queue_load_failed";
         case pqueue::ValidationIssueCode::QueueIndexMismatch: return "queue_index_mismatch";
@@ -121,7 +115,6 @@ enum class Command {
     Format,
     DropFrontIfCorrupt,
     RecoverStaleLock,
-    RebuildMetadata,
 };
 
 void addConfigOptions(CLI::App& app, pqueue::Config& config) {
@@ -130,10 +123,6 @@ void addConfigOptions(CLI::App& app, pqueue::Config& config) {
     app.add_option("--reserved-bytes", config.reservedBytes, "Reserved spool bytes")
         ->capture_default_str();
     app.add_option("--record-size-bytes", config.recordSizeBytes, "Record slot size in bytes")
-        ->capture_default_str();
-    app.add_option("--journal-bytes", config.journalBytes, "Journal region size in bytes")
-        ->capture_default_str();
-    app.add_option("--checkpoint-every-ops", config.checkpointEveryOps, "Checkpoint interval in queue operations")
         ->capture_default_str();
 }
 
@@ -162,10 +151,6 @@ int main(int argc, char** argv) {
     auto* recoverLock = app.add_subcommand("recover-stale-lock", "Remove a stale lock left by a dead process");
     addConfigOptions(*recoverLock, config);
     recoverLock->callback([&command]() { command = Command::RecoverStaleLock; });
-
-    auto* rebuild = app.add_subcommand("rebuild-metadata", "Reconstruct checkpoint and journal by scanning slot headers");
-    addConfigOptions(*rebuild, config);
-    rebuild->callback([&command]() { command = Command::RebuildMetadata; });
 
     try {
         app.parse(argc, argv);
