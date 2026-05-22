@@ -126,8 +126,12 @@ These are FixedSlot-only and disappear:
   `CheckpointRecord`, `JournalEntry`, `RecordHeader`, and their serializers.
   `AppendLogStore` does not include this file.
 - `src/pqueue/storage_common.cpp`
-- `src/pqueue/diagnostics.h` -- only operates on `FileStoreConfig` / `FileStoreLayoutDiagnostic`.
-- `src/pqueue/diagnostics.cpp`
+- `src/pqueue/diagnostics.h` -- FixedSlot-specific types (`CheckpointSlotDiagnostic`,
+  `FileStoreLayoutDiagnostic`, `FileStoreDiagnostic`, `diagnoseFileStore`,
+  `checkpointSlotStateName`) are removed. AppendLog diagnostic types
+  (`AppendLogStoreDiagnostic`, `diagnoseAppendLogStore`, etc.) survive.
+- `src/pqueue/diagnostics.cpp` -- FixedSlot-specific implementation removed;
+  AppendLog diagnostic implementation survives.
 
 ---
 
@@ -152,25 +156,20 @@ will have a dangling `pqueue.spool` that AppendLog ignores.
 
 ---
 
-## Removal plan
+## Remaining removal steps
 
-1. **AppendLog validation and repair.** Migration plan:
-   `docs/appendlog-validation-repair.md`.
-
-2. **Expose and drive idle compaction through the app path.** Migration plan:
-   `docs/compactidle-integration.md`.
-
-3. **Migrate tests.** Port Queue/Outbox semantic tests to AppendLog config; discard
-   tests for FixedSlot-specific mechanics (checkpoint/journal format, slot addressing,
-   spool corruption injection). Full plan: `docs/pqueue-test-migration.md`.
-
-5. **Flip defaults.** Change `Config::storeLayout` default from `FixedSlot` to
+1. **Flip defaults.** Change `Config::storeLayout` default from `FixedSlot` to
    `AppendLog`. Smoke-test that nothing regresses with the new default.
 
-6. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
+2. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
 
-7. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
+3. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
    and documentation sections that reference FixedSlot.
 
-8. **Eliminate FixedSlot.** Delete the files listed above, strip the dead
+4. **Eliminate FixedSlot.** Delete the files listed above, strip the dead
    `Config` fields, collapse `makeStore()`, and remove `StoreLayout`.
+
+One prerequisite still blocked: remove FixedSlot-only `ValidationIssueCode` values
+(`SpoolMissing`, `SpoolSizeMismatch`, `InvalidRingState`, `SlotHeaderInvalid`,
+`SlotReadFailed`, `MetadataMissing`) once dead test references are cleared.
+See `docs/appendlog-validation-repair.md`.
