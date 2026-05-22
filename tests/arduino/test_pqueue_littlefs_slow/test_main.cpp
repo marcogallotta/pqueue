@@ -343,7 +343,7 @@ void test_churn_without_reboot() {
 
     // maxSegmentBytes=128: 3-char payloads use 27 bytes/record, 4 records per segment.
     // Five rounds of enqueue/rewriteFront/pop/compactIdle exercise rotation and
-    // compaction without a FixedSlot capacity cap.
+    // compaction.
     pqueue::Config cfg = appendLogQueueConfigForBase(kBasePath);
     cfg.maxSegmentBytes = 128;
 
