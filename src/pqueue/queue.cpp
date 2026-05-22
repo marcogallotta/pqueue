@@ -73,10 +73,13 @@ bool isFormatRepairIssue(ValidationIssueCode code) {
         case ValidationIssueCode::SpoolSizeMismatch:
         case ValidationIssueCode::QueueLoadFailed:
         case ValidationIssueCode::QueueIndexMismatch:
-            return true;
-        case ValidationIssueCode::MetadataMissing:
+        // AppendLog: mount() returns DataCorrupt when segments exist without a valid manifest;
+        // rebuildMetadata() calls mount() and fails for the same reason. Format is the only
+        // safe repair for MetadataCorrupt and JournalCorrupt on AppendLog.
         case ValidationIssueCode::MetadataCorrupt:
         case ValidationIssueCode::JournalCorrupt:
+            return true;
+        case ValidationIssueCode::MetadataMissing:
         case ValidationIssueCode::InvalidRingState:
         case ValidationIssueCode::InvalidConfig:
         case ValidationIssueCode::SlotReadFailed:
@@ -91,9 +94,9 @@ bool isFormatRepairIssue(ValidationIssueCode code) {
 
 bool isRebuildMetadataIssue(ValidationIssueCode code) {
     switch (code) {
+        // MetadataMissing and InvalidRingState are FixedSlot-only codes; removal is
+        // blocked on FixedSlot test migration.
         case ValidationIssueCode::MetadataMissing:
-        case ValidationIssueCode::MetadataCorrupt:
-        case ValidationIssueCode::JournalCorrupt:
         case ValidationIssueCode::InvalidRingState:
             return true;
         default:
@@ -457,6 +460,10 @@ Status Queue::format() {
 }
 
 Status Queue::rebuildMetadata() {
+    // For AppendLog stores, rebuildMetadata() resets RAM state and calls mount().
+    // mount() returns DataCorrupt when segment files exist without a valid manifest,
+    // so rebuildMetadata() cannot recover a MetadataCorrupt store -- it will fail
+    // for the same reason validate() reported corruption. Use format() instead.
     ScopedLock lock(*this);
     if (!lock.status().ok()) {
         return lock.status();
