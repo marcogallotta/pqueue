@@ -832,6 +832,24 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
         return result;
     }
 
+    // --- Manifest pass ---
+
+    auto tryReadSlot = [&](const char* slotName, ManifestData& md) -> bool {
+        std::string data;
+        if (!f->readFile(slotName, data).ok()) return false;
+        return parseManifest(reinterpret_cast<const std::uint8_t*>(data.data()), data.size(), md);
+    };
+    auto slotExists = [&](const char* slotName) -> bool {
+        std::uint64_t dummy;
+        return f->fileSize(slotName, dummy).ok();
+    };
+
+    ManifestData mdA, mdB;
+    const bool existsA = slotExists(kManifestSlotA);
+    const bool existsB = slotExists(kManifestSlotB);
+    const bool validA  = tryReadSlot(kManifestSlotA, mdA);
+    const bool validB  = tryReadSlot(kManifestSlotB, mdB);
+
     std::vector<std::string> files;
     st = f->listFiles(files);
     if (!st.ok()) {
@@ -839,117 +857,216 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
         return result;
     }
 
-    std::vector<std::uint32_t> sortedGenerations;
-    for (const auto& name : files) {
+    bool hasSegments = false;
+    for (const auto& fname : files) {
         std::uint32_t gen = 0;
-        if (isSegmentName(name, gen)) {
-            sortedGenerations.push_back(gen);
+        if (isSegmentName(fname, gen)) { hasSegments = true; break; }
+    }
+
+    if (!validA && !validB) {
+        if (existsA || existsB) {
+            addErr(ValidationIssueCode::MetadataCorrupt,
+                "manifest slot(s) present but none parseable");
+            return result;
+        }
+        if (hasSegments) {
+            addErr(ValidationIssueCode::MetadataCorrupt,
+                "segment files present but no valid manifest");
+            return result;
+        }
+        return result; // fresh empty store
+    }
+
+    // Elect winning slot (mirrors chooseWinningSlot in manifest.cpp)
+    ManifestData winning;
+    if (validA && validB) {
+        winning = (mdB.epoch > mdA.epoch) ? mdB : mdA;
+    } else {
+        winning = validA ? mdA : mdB;
+    }
+
+    // Validate manifest structure
+    std::uint32_t maxSealedGen = 0;
+    for (const auto& r : winning.ranges) {
+        if (r.startGen == 0 || r.endGen == 0 || r.startGen > r.endGen) {
+            addErr(ValidationIssueCode::MetadataCorrupt, "manifest range has invalid generation bounds");
+            return result;
+        }
+        if (r.endGen == std::numeric_limits<std::uint32_t>::max()) {
+            addErr(ValidationIssueCode::MetadataCorrupt, "manifest range endGen at UINT32_MAX");
+            return result;
+        }
+        maxSealedGen = std::max(maxSealedGen, r.endGen);
+    }
+    // Pairwise overlap check -- post-compaction, numeric order of ranges is not guaranteed
+    for (std::size_t i = 0; i < winning.ranges.size(); ++i) {
+        for (std::size_t j = i + 1; j < winning.ranges.size(); ++j) {
+            const auto& ri = winning.ranges[i];
+            const auto& rj = winning.ranges[j];
+            if (std::max(ri.startGen, rj.startGen) <= std::min(ri.endGen, rj.endGen)) {
+                addErr(ValidationIssueCode::MetadataCorrupt, "manifest ranges overlap");
+                return result;
+            }
         }
     }
-    std::sort(sortedGenerations.begin(), sortedGenerations.end());
 
-    for (std::uint32_t gen : sortedGenerations) {
-        if (result.stoppedEarly) break;
-        const std::string name = segmentName(gen);
-
-        std::uint64_t fileSize = 0;
-        if (!f->fileSize(name, fileSize).ok() || fileSize < kSegmentHeaderBytes) {
-            addErr(ValidationIssueCode::MetadataCorrupt,
-                "segment " + name + " is missing or too small");
-            continue;
+    if (winning.tailGeneration != 0) {
+        for (const auto& r : winning.ranges) {
+            if (winning.tailGeneration >= r.startGen && winning.tailGeneration <= r.endGen) {
+                addErr(ValidationIssueCode::MetadataCorrupt,
+                    "tail generation appears within a sealed range");
+                return result;
+            }
         }
+    }
 
-        std::string headerBytes;
-        if (!f->readAt(name, 0, kSegmentHeaderBytes, headerBytes).ok()) {
+    const std::uint32_t maxRefGen = (winning.tailGeneration != 0)
+        ? std::max(maxSealedGen, winning.tailGeneration)
+        : maxSealedGen;
+    if (maxRefGen > 0 && maxRefGen >= winning.nextGeneration) {
+        addErr(ValidationIssueCode::MetadataCorrupt,
+            "nextGeneration not greater than max referenced generation");
+        return result;
+    }
+
+    const bool hasTail = (winning.tailGeneration != 0);
+    const std::uint32_t tailGen = winning.tailGeneration;
+
+    // Guard: reject manifests that claim more segment generations than exist on disk.
+    // This prevents a corrupt range like {startGen=1, endGen=4000000000} from causing
+    // O(4B) iteration. Bounded by the real filesystem, which is physically limited.
+    {
+        std::uint64_t segmentFileCount = 0;
+        for (const auto& fname : files) {
+            std::uint32_t dummy = 0;
+            if (isSegmentName(fname, dummy)) ++segmentFileCount;
+        }
+        std::uint64_t referencedCount = hasTail ? 1 : 0;
+        for (const auto& r : winning.ranges) {
+            referencedCount += static_cast<std::uint64_t>(r.endGen) - r.startGen + 1;
+            if (referencedCount > segmentFileCount) {
+                addErr(ValidationIssueCode::MetadataCorrupt,
+                    "manifest references more segments than exist on disk");
+                return result;
+            }
+        }
+    }
+
+    // Verify each referenced segment exists and is large enough (lazy, no gen expansion)
+    auto checkSegExists = [&](std::uint32_t gen) {
+        if (result.stoppedEarly) return;
+        const std::string name = segmentName(gen);
+        std::uint64_t sz = 0;
+        if (!f->fileSize(name, sz).ok() || sz < kSegmentHeaderBytes)
+            addErr(ValidationIssueCode::MetadataCorrupt,
+                "referenced segment " + name + " missing or too small");
+    };
+    for (const auto& r : winning.ranges)
+        for (std::uint32_t g = r.startGen; g <= r.endGen; ++g) checkSegExists(g);
+    if (hasTail) checkSegExists(tailGen);
+
+    if (!result.ok) return result;
+
+    // --- Segment scan pass (lazy iteration, no gen vector) ---
+
+    auto scanSegment = [&](std::uint32_t gen, bool isTail) {
+        const std::string name = segmentName(gen);
+        std::uint64_t fileSize = 0;
+        f->fileSize(name, fileSize); // already validated above
+
+        std::string hdrBytes;
+        if (!f->readAt(name, 0, kSegmentHeaderBytes, hdrBytes).ok()) {
             addErr(ValidationIssueCode::MetadataCorrupt,
                 "cannot read segment header for " + name);
-            continue;
+            return;
+        }
+        SegmentHeader segHdr;
+        if (!parseSegmentHeader(hdrBytes, segHdr)) {
+            addErr(ValidationIssueCode::MetadataCorrupt, "corrupt segment header in " + name);
+            return;
+        }
+        if (segHdr.generation != gen) {
+            addErr(ValidationIssueCode::MetadataCorrupt, "segment generation mismatch in " + name);
+            return;
         }
 
-        SegmentHeader segHeader;
-        if (!parseSegmentHeader(headerBytes, segHeader)) {
-            addErr(ValidationIssueCode::MetadataCorrupt,
-                "corrupt segment header in " + name);
-            continue;
-        }
-        if (segHeader.generation != gen) {
-            addErr(ValidationIssueCode::MetadataCorrupt,
-                "segment generation mismatch in " + name);
-            continue;
-        }
+        enum class ScanExit { Clean, Torn, Corrupt };
+        ScanExit scanExit = ScanExit::Clean;
+        std::string corruptReason;
 
-        // Scan events
+        auto torn    = [&]{ scanExit = ScanExit::Torn; };
+        auto corrupt = [&](const char* why) { scanExit = ScanExit::Corrupt; corruptReason = why; };
+
         std::uint32_t offset = kSegmentHeaderBytes;
         while (offset < static_cast<std::uint32_t>(fileSize)) {
             if (result.stoppedEarly) break;
             const std::uint32_t remaining = static_cast<std::uint32_t>(fileSize) - offset;
-            if (remaining < 4) break;
+            if (remaining < 4) { torn(); break; }
 
             std::string headerBuf;
             const std::uint32_t toRead = std::min(remaining, static_cast<std::uint32_t>(kEnqueueHeaderBytes));
-            if (!f->readAt(name, offset, toRead, headerBuf).ok()) break;
-            if (headerBuf.size() < 4) break;
+            if (!f->readAt(name, offset, toRead, headerBuf).ok()) { torn(); break; }
+            if (headerBuf.size() < 4) { torn(); break; }
 
             const std::uint32_t magic = readLE32(headerBuf, 0);
 
             if (magic == kEnqueueMagic || magic == kRewriteMagic) {
-                if (toRead < kEnqueueHeaderBytes) break;
+                if (toRead < kEnqueueHeaderBytes) { torn(); break; }
                 EnqueueHeader eh;
-                if (!parseEnqueueHeader(headerBuf, eh)) {
-                    addErr(ValidationIssueCode::JournalCorrupt,
-                        "invalid enqueue header in " + name);
-                    break;
-                }
-                if (eh.payloadBytes > config_.maxRecordBytes) {
-                    addErr(ValidationIssueCode::JournalCorrupt,
-                        "payloadBytes exceeds maxRecordBytes at offset " + std::to_string(offset) + " in " + name);
-                    break;
-                }
+                if (!parseEnqueueHeader(headerBuf, eh)) { corrupt("bad enqueue header"); break; }
+                if (eh.payloadBytes > config_.maxRecordBytes) { corrupt("payload exceeds max record size"); break; }
+
                 const std::uint32_t totalEventBytes = kEnqueueOverheadBytes + eh.payloadBytes;
-                if (totalEventBytes > remaining) break; // overflow-safe
+                if (totalEventBytes > remaining) { torn(); break; }
 
                 std::string payloadAndTrailer;
                 if (!f->readAt(name, offset + kEnqueueHeaderBytes,
-                               eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
-                if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) break;
+                               eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) { torn(); break; }
+                if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) { torn(); break; }
 
-                const std::string   payload     = payloadAndTrailer.substr(0, eh.payloadBytes);
-                const std::uint32_t expectedCrc = enqueueEventCrc(eh, payload);
-                const std::uint32_t storedCrc   = readLE32(payloadAndTrailer, eh.payloadBytes);
+                const std::string   payload      = payloadAndTrailer.substr(0, eh.payloadBytes);
+                const std::uint32_t expectedCrc  = enqueueEventCrc(eh, payload);
+                const std::uint32_t storedCrc    = readLE32(payloadAndTrailer, eh.payloadBytes);
                 const std::uint32_t storedFooter = readLE32(payloadAndTrailer, eh.payloadBytes + 4);
 
-                if (storedCrc != expectedCrc) {
-                    addErr(ValidationIssueCode::SlotCrcMismatch,
-                        "CRC mismatch for event at offset " + std::to_string(offset) + " in " + name);
-                    break;
-                }
-                if (storedFooter != kFooterMagic) {
-                    addErr(ValidationIssueCode::JournalCorrupt,
-                        "missing commit footer at offset " + std::to_string(offset) + " in " + name);
-                    break;
-                }
+                if (storedCrc != expectedCrc || storedFooter != kFooterMagic) { corrupt("CRC or footer mismatch"); break; }
 
                 ++result.checkedRecords;
                 offset += totalEventBytes;
 
             } else if (magic == kPopMagic) {
-                if (remaining < kPopEventBytes) break;
+                if (remaining < kPopEventBytes) { torn(); break; }
                 std::string popBuf;
-                if (!f->readAt(name, offset, kPopEventBytes, popBuf).ok()) break;
+                if (!f->readAt(name, offset, kPopEventBytes, popBuf).ok()) { torn(); break; }
                 PopEvent pe;
-                if (!parsePopEvent(popBuf, pe)) {
-                    addErr(ValidationIssueCode::JournalCorrupt,
-                        "invalid pop event at offset " + std::to_string(offset) + " in " + name);
-                    break;
-                }
+                if (!parsePopEvent(popBuf, pe)) { corrupt("bad pop event"); break; }
                 ++result.checkedRecords;
                 offset += kPopEventBytes;
 
             } else {
+                corrupt("unknown event magic");
                 break;
             }
         }
+
+        // Corrupt data is always an error. Torn data is ok only in the tail segment.
+        if (scanExit == ScanExit::Corrupt) {
+            addErr(ValidationIssueCode::JournalCorrupt,
+                "corrupt data in segment " + name + ": " + corruptReason);
+        } else if (scanExit == ScanExit::Torn && !isTail) {
+            addErr(ValidationIssueCode::JournalCorrupt,
+                "incomplete (torn) data in sealed segment " + name);
+        }
+    };
+
+    for (const auto& r : winning.ranges) {
+        for (std::uint32_t g = r.startGen; g <= r.endGen; ++g) {
+            if (result.stoppedEarly) break;
+            scanSegment(g, false);
+        }
+        if (result.stoppedEarly) break;
     }
+    if (hasTail && !result.stoppedEarly) scanSegment(tailGen, true);
 
     return result;
 }

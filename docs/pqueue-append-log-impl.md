@@ -15,6 +15,11 @@ coverage for `collectLiveRecords()` FIFO ordering after rewrite+compact+remount,
 transition-matrix section with one test per ugly operation sequence: pop→compact→remount,
 rewrite→compact→remount, pop→rewrite→compact→remount, rewrite→pop→compact→remount,
 rewrite-old/rotate-tail→compact→remount, subrange-compact→remount, compactFull→remount.
+`tests/posix/pqueue_append_log_validate.cpp` covers validateUnlocked: fresh store, missing
+segment, both slots corrupt, overlapping ranges, nextGeneration below max ref, wrong header
+generation, corrupt CRC in sealed segment, torn tail in tail (ok), torn tail in sealed
+(JournalCorrupt), dangling segment ignored. Tests call AppendLogStore::validateUnlocked
+directly to bypass the queue lock (which requires a successful mount).
 Run with `make -j12 test`.
 
 ---
