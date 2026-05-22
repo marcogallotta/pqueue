@@ -164,7 +164,7 @@ Response Esp32ArduinoTransport::post(
 
     emitTransportEvent(
         config_.common,
-        code > 0 ? Severity::Debug : Severity::Info,
+        Severity::Debug,
         code > 0
             ? Status::success()
             : Status::failure(StatusCode::SendFailed, "HTTPClient POST returned an error", code),
