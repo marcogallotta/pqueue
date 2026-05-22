@@ -11,281 +11,164 @@ keep AppendLog-native tests unchanged.
 
 ## POSIX tests
 
-### Keep unchanged
+The POSIX test suite has been migrated to AppendLog config. All FixedSlot-specific
+test files (`pqueue_file_store.cpp`, `pqueue_rebuild_metadata.cpp`,
+`pqueue_diagnostics.cpp`) have been deleted. The following files are current:
 
-These are AppendLog-specific or storage-independent and require no changes:
+- `pqueue_append_log.cpp` -- AppendLog store unit tests (unchanged)
+- `pqueue_append_log_manifest.cpp` -- manifest tests (unchanged)
+- `pqueue_append_log_rollover.cpp` -- segment rollover tests (unchanged)
+- `pqueue_append_log_compaction.cpp` -- compaction tests (unchanged)
+- `pqueue_append_log_seq_edges.cpp` -- sequence edge cases (unchanged)
+- `pqueue_append_log_validate.cpp` -- AppendLog validate tests (unchanged)
+- `pqueue_append_log_support.h` -- AppendLog test helpers (unchanged)
+- `pqueue_envelope.cpp` -- envelope codec tests (unchanged)
+- `pqueue_http_request_envelope.cpp` -- HTTP envelope tests (unchanged)
+- `pqueue_http_outbox.cpp` -- HTTP outbox tests (unchanged)
+- `pqueue.cpp` -- Queue API tests on AppendLog config; 9 FixedSlot tests killed,
+  13 ported, 1 rewritten (budget-based QueueFull)
+- `pqueue_full_queue_policy.cpp` -- all 5 DropOldest/RejectNewest tests on AppendLog
+  config; uses `maxSegmentBytes=50` to force per-record rotation
+- `pqueue_queue_edges.cpp` -- 5 edge tests on AppendLog config; 1 deferred (see below)
+- `pqueue_outbox.cpp` -- 29 Outbox behavioral tests on AppendLog config; 3 spool-
+  corruption tests killed; FakeFileSystem tests replaced with FaultInjectingFs
+- `pqueue_repair.cpp` -- 5 format/lock tests on AppendLog config; 7 FixedSlot repair
+  tests killed; 1 deferred (see below)
 
-- `pqueue_append_log.cpp`
-- `pqueue_append_log_manifest.cpp`
-- `pqueue_append_log_rollover.cpp`
-- `pqueue_append_log_compaction.cpp`
-- `pqueue_append_log_seq_edges.cpp`
-- `pqueue_append_log_support.h`
-- `pqueue_envelope.cpp`
-- `pqueue_http_request_envelope.cpp`
-- `pqueue_http_outbox.cpp`
+### Notes on ported behavior
 
-### Delete entirely
+**Multiple live Queue objects:** AppendLog mounts lazily on first operation. A second
+Queue/Outbox instance mounts from disk and sees existing records in its in-RAM state.
+Its own stats reflect disk state after mount plus its own subsequent writes.
 
-Fixed-slot implementation tests with no AppendLog equivalent:
+**Pop failure injection:** AppendLog pop writes a POP event via `writeAt` on the
+segment file. `FaultInjectingFs` uses `failNextWriteAtTo = "seg-"` to inject this.
 
-- `pqueue_file_store.cpp` (29 tests) -- spool layout, checkpoint slots, journal replay,
-  partial writes, config mismatch. Straight delete.
-- `pqueue_rebuild_metadata.cpp` (6 tests) -- scans spool slots, writes fresh checkpoint.
-  No AppendLog analog.
-- `pqueue_diagnostics.cpp` (3 tests) -- operates only on `FileStoreLayoutDiagnostic`.
-  Goes with `diagnostics.h`.
-- `tests/support/pqueue_file_store_support.h` -- replaced by a new backend-agnostic
-  support header (see below).
+**`recoverStaleLock` with v2 lock format:** POSIX recovery uses PID-only checking
+(`removeStalePosixLock`). Tests that use `lockContentsForBoot` must supply a non-zero
+PID: dead PID (e.g. 999999) for stale cases, current PID for live cases.
 
-### New support header
+**Outbox corrupt-drop-limit test:** Ported by direct `Queue::enqueue("invalid-data")`
+instead of spool-byte corruption. Records fail envelope decode (`DecodeFailed`) rather
+than storage CRC (`CrcMismatch`); expected code updated accordingly.
 
-Create `tests/support/pqueue_queue_support.h` replacing `pqueue_file_store_support.h`:
+**QueueFull sizing for Outbox test:** Outbox envelope overhead is 14 bytes (10-byte
+header + 4-byte CRC) plus payload. First record costs 20 (seg header) + 24 (record
+overhead) + envelope bytes. `reservedBytes = 61` holds exactly one envelope for a
+3-byte payload ("one").
 
-- Keep: `FakeFileSystem`, `captureEvent` -- backend-agnostic, used by AppendLog tests too.
-- Add: `makeAppendLogQueueConfig` -- constructs an AppendLog `Config` with explicit
-  budget fields (`maxSegmentBytes`, `maxSegments`, `reservedBytes` (maps to internal
-  `maxTotalBytes`), `storeLayout = AppendLog`).
-- Delete: `makeStore` (constructs `FileStore`), `corruptSlotHeader`, `corruptSlotPayload`,
-  `slotSize` -- all spool-offset arithmetic, gone with FixedSlot.
-
-### pqueue.cpp -- port semantic tests, kill FixedSlot internals
-
-**Kill (9 tests):**
-
-- `pqueue validate detects corrupt active slot payload`
-- `pqueue validate ignores inactive corrupt slots`
-- `pqueue validate caps reported errors`
-- `pqueue validate fails when active lock file exists`
-- `pqueue validate reports corrupt checkpoint slots even when fallback checkpoint exists`
-- `pqueue validate reports corrupt journal entry before later journal data`
-- `pqueue recovers enqueued records from journal before checkpoint`
-- `pqueue recovers popped records from journal before checkpoint`
-- `pqueue ignores torn final journal entry and keeps valid prefix`
-
-Also delete helpers `testRecordRegionOffset`, `testCheckpointOffset`,
-`testJournalOffset`, `testSlotOffset` -- all spool offset arithmetic.
-
-**Port to AppendLog config (13 tests):**
-
-- `pqueue starts empty`
-- `pqueue preserves FIFO order`
-- `pqueue supports multiple live Queue objects on the same base path`
-- `pqueue survives reopening from disk`
-- `pqueue rewriteFront updates the front record without popping it`
-- `pqueue accepts records exactly at the configured max size`
-- `pqueue rejects records over the configured max size`
-- `pqueue matches std::deque over deterministic random operations`
-- `pqueue active lock file prevents queue operation`
-- `pqueue lock timeout emits a clear diagnostic event`
-- `pqueue recovers stale POSIX pid lock`
-- `pqueue releases lock after each operation`
-- `pqueue validate reports clean active records`
-
-**Rewrite (1 test):**
-
-- `pqueue rejects newest record when the fixed ring is full` -- the slot-count capacity
-  model disappears entirely. Rewrite as an AppendLog budget/full test: fill by
-  `reservedBytes`, expect `QueueFull`, verify existing records survive.
-
-### pqueue_full_queue_policy.cpp -- port all 5
-
-Port to AppendLog config. Replace "160 bytes = 3 slots" capacity assumption with
-explicit AppendLog budget config. All 5 test intents survive:
-
-- `RejectNewest returns QueueFull when full`
-- `DropOldest evicts front record when full`
-- `DropOldest emits warning event on eviction`
-- `DropOldest preserves FIFO order after evictions`
-- `DropOldest on empty queue enqueues normally`
-
-### pqueue_queue_edges.cpp -- port 5, defer 1
-
-**Port (5 tests):**
-
-- `pqueue reports invalid storage config` -- AppendLog also validates config (e.g.
-  zero `maxSegmentBytes`); use an AppendLog-invalid config case.
-- `pqueue rewriteFront rejects oversized record and keeps front unchanged`
-- `pqueue visitRecords rejects null visitor`
-- `pqueue visitRecords stops when visitor returns false`
-- `pqueue pop preserves front when index write fails` -- rewrite failure injection
-  for AppendLog append failure rather than spool writeAt failure.
-
-**Defer (1 test):**
+### Deferred POSIX tests
 
 - `pqueue visitRecords returns read failure from active record` -- needs AppendLog
-  segment read-failure setup, not spool offset injection. Defer to a later patch.
-
-### pqueue_outbox.cpp -- port behavioral tests, defer corruption tests
-
-**Port to AppendLog config (28 tests):** all retry/backoff, rate limiting, drop policy,
-FIFO order, persistence, attempts counter, send error paths, QueueFull on retry, drain
-rate, and unknown decision tests. These are pure Outbox semantics with no storage
-coupling.
-
-**Kill or defer (3 tests + helpers):**
-
-- `pqueue outbox drops corrupt front records`
-- `pqueue outbox drops front record with corrupt storage payload CRC`
-- `pqueue outbox drops front record with corrupt storage header`
-
-Also delete `outboxSlotOffset`, `flipSpoolByte`, `corruptOutboxSlotHeader`,
-`corruptOutboxSlotPayload` helpers. AppendLog-native outbox corruption testing
-(via segment/event corruption) is deferred to a later patch.
-
-The one remaining test in this area -- `pqueue outbox emits dropped event when stored
-envelope cannot be decoded` -- tests envelope-level corruption, not spool-level, and
-survives unchanged.
-
-### pqueue_repair.cpp -- keep format and lock recovery, kill the rest
-
-**Keep/port (5 tests):**
-
-- `queue format clears records and allows reuse` -- AppendLog has `format()`.
-- `queue recoverStaleLock removes previous-boot token lock`
-- `queue recoverStaleLock refuses current-boot token lock`
-- `queue recoverStaleLock removes stale POSIX pid lock`
-- `queue recoverStaleLock refuses live POSIX pid lock`
-
-**Defer/inspect (1 test):**
-
-- `queue format recovers corrupt metadata explicitly` -- may corrupt checkpoint/spool
-  metadata directly; needs inspection before porting. AppendLog equivalent would target
-  manifest/segment corruption. Do not port blindly.
-
-**Kill (7 tests):** `dropFrontIfCorrupt` tests (3), `validate suggests format/dropFront`
-tests (3), `validate reports MetadataMissing` (1). All FixedSlot repair policy with no
-AppendLog equivalent.
-
-### Patch order
-
-1. Create `pqueue_queue_support.h`; update all consumers; keep old support header
-   temporarily.
-2. Migrate `pqueue.cpp`, `pqueue_full_queue_policy.cpp`, `pqueue_queue_edges.cpp`.
-3. Migrate `pqueue_outbox.cpp`; strip spool corruption helpers.
-4. Migrate `pqueue_repair.cpp`; strip FixedSlot repair tests.
-5. Delete `pqueue_file_store.cpp`, `pqueue_rebuild_metadata.cpp`,
-   `pqueue_diagnostics.cpp`, old `pqueue_file_store_support.h`.
-6. Grep pass: `FileStore`, `FileStoreConfig`, `storage_common`, `pqueue.spool`,
-   checkpoint/journal constants, `RecordHeader`, slot offset helpers.
+  segment read-failure injection; not yet supported by FaultInjectingFs.
+- `queue format recovers corrupt metadata explicitly` -- requires manifest/segment
+  file corruption setup on real POSIX FS. Defer until a targeted helper exists.
+- Outbox storage-layer corruption tests (`drops corrupt front records`,
+  `drops front record with corrupt storage payload CRC`,
+  `drops front record with corrupt storage header`) -- need AppendLog-native
+  segment/event corruption injection. Deferred to a later patch.
 
 ---
 
 ## Arduino / LittleFS tests
 
-Four test suites exist. `test_pqueue_compaction` is AppendLog-only and is untouched.
-The other three require migration.
+All four suites migrated. `test_pqueue_compaction` was AppendLog-only and untouched.
 
-### test_pqueue_littlefs (fast suite)
+### test_pqueue_littlefs (fast suite) -- DONE
 
-Rewrite in place. Strip all FixedSlot tests and helpers; keep and expand the
-AppendLog block.
+All FixedSlot tests and helpers removed. Suite is AppendLog-only. 15 tests run via
+`pio test`.
 
-**Delete the existing FixedSlot implementations of all tests in this suite, then
-re-add or keep their semantic intent as AppendLog tests where listed below.**
+Tests present:
 
-Also delete without replacement:
+- `test_quick_reboot_persistence` -- 3-phase reboot smoke (enqueue/pop+rewrite/verify)
+  using AppendLog config
+- `test_append_log_basic_fifo`
+- `test_append_log_remount_persistence`
+- `test_append_log_pop_persistence`
+- `test_append_log_rewrite_front_persistence`
+- `test_append_log_capacity_full_behavior` -- fills to `reservedBytes = 200` with
+  distinct payloads "r00".."rNN", asserts `QueueFull` is hit, remounts, drains all
+  accepted records in FIFO order, asserts empty
+- `test_append_log_validate_clean_queue`
+- `test_append_log_record_size_boundary`
+- `test_append_log_multiple_queue_objects_share_same_base_path` -- both Queue objects
+  enqueue within a scope block, scope closes (both destroyed), fresh remount verifies
+  both records in FIFO order; tests that concurrent independent objects can share a path
+  without losing writes
+- `test_append_log_lock_released_after_each_operation`
+- `test_append_log_locks_are_independent_across_base_paths`
+- `test_append_log_outbox_backlog_persistence`
+- `test_append_log_retryable_failure_does_not_drop`
+- `test_append_log_compact_idle_survives_remount`
+- `test_append_log_drop_oldest_evicts_and_continues` -- 12-byte payloads, `maxSegmentBytes
+  = 80` (1 record per sealed segment), `reservedBytes = 600`; attempts 20 enqueues with
+  DropOldest, recording only accepted payloads (not all 20 may succeed -- manifest range
+  accumulation can block compaction after enough eviction cycles); remounts, finds front
+  in accepted list, asserts `startIdx > 0` (at least 1 eviction), asserts
+  `count == accepted.size() - startIdx`, drains accepted suffix in FIFO order, asserts empty
 
-- `corruptSlotPayload`, `slotSize`, `recordRegionOffset`, `recordSlotOffset`, `kSpoolPath`
-- `test_corrupt_active_record` -- direct spool offset injection; torn-tail recovery is
-  transparent in AppendLog and covered by POSIX tests
-- `test_outbox_drops_corrupt_front_record_on_littlefs` -- no AppendLog spool equivalent;
-  defer segment-level corruption testing to a later patch
+`appendLogQueueConfigForBase` is self-contained: `reservedBytes = 0` (no footprint
+cap), `minFreeBytes = 0`, `maxSegmentBytes = 256`, `maxSegments = 8`. Capacity tests
+override `reservedBytes` locally. `storage_common.h` no longer included.
 
-**Rewrite for AppendLog (keep intent):**
+### test_pqueue_littlefs_slow (reboot suite) -- DONE
 
-- Quick reboot smoke preamble (`runQuickRebootSmokePhaseIfNeeded`) -- rewrite using
-  AppendLog config; keep the same 3-phase structure (enqueue, pop+rewrite, verify)
-- `appendLogQueueConfigForBase` helper -- currently chains through `queueConfigForBase`
-  which calls `slotSize()` from `storage_common.h`; rewrite as self-contained. Set
-  `reservedBytes = 0` (disables footprint cap) for the default config; tight
-  `reservedBytes` values belong only in the capacity and DropOldest tests. Remove
-  `queueConfig`, `queueConfigForBase`, and all FixedSlot slot-size helpers.
+All FixedSlot tests and helpers removed. Suite is AppendLog-only. 6 tests run via
+`pio test`.
 
-**Port as AppendLog variants (currently FixedSlot-only):**
+FixedSlot tests killed (no AppendLog equivalent): `test_reboot_wraparound`,
+`test_reboot_index_fallback`, `test_reboot_missing_metadata_fails_safely`,
+`test_reboot_corrupt_metadata_fails_safely`, `test_reboot_record_size_mismatch_fails_safely`,
+`test_reboot_capacity_mismatch_fails_safely`, `test_reboot_tmp_orphan_ignored`,
+`test_reboot_queue_full_safe` (covered by fast suite capacity test).
 
-- `test_basic_fifo`
-- `test_remount_persistence`
-- `test_pop_persistence`
-- `test_rewrite_front_persistence`
-- `test_validate_clean_queue`
-- `test_record_size_boundary`
-- `test_multiple_queue_objects_share_same_base_path`
-- `test_queue_lock_released_after_each_operation`
-- `test_littlefs_locks_are_independent_across_base_paths`
-- `test_outbox_backlog_persistence`
-- `test_retryable_failure_does_not_drop`
+`appendLogQueueConfigForBase` mirrors the fast suite helper. Tests that need multiple
+segments use `maxSegmentBytes = 128` (3-char payloads at 27 bytes/record, 4 records per
+segment). The compaction test uses `maxSegmentBytes = 45` (one 1-byte record per segment).
 
-**Keep as-is (already AppendLog):**
+Tests present:
 
-All existing `test_append_log_*` tests stay unchanged. This includes
-`test_append_log_compact_idle_survives_remount`, which already covers the
-rewrite+compactIdle+remount scenario (enqueue A/B/C, rewriteFront, compactIdle,
-remount, verify).
+- `test_reboot_fifo_many` -- enqueue 20 records (5 sealed segments), reboot, drain all
+  in FIFO order; validates replay across multiple sealed segments
+- `test_reboot_pop_remaining` -- enqueue 10, pop 4 across the first segment boundary,
+  reboot, drain remaining 6 in FIFO order
+- `test_reboot_rewrite_front` -- enqueue "old-front" and "tail", rewriteFront to
+  "new-front", reboot, verify "new-front" then "tail"
+- `test_reboot_outbox_drain` -- submit to AppendLog Outbox with RetryLater, reboot,
+  drain with Sent decision; asserts attempt count and payload
+- `test_reboot_compaction` -- 3-phase: phase 0 enqueue A/B/C (one per segment), reboot;
+  phase 1 pop A, rewrite B->X, compactIdle (all in one boot so activeTailDependenciesTracked_
+  is true, enabling the active segment to be folded into the compaction range), reboot;
+  phase 2 verify X then C and drain. Validates compaction durability after a real power cycle.
+- `test_churn_without_reboot` -- 5 rounds of enqueue 6/rewriteFront/pop-half/compactIdle
+  against a model vector; verifies count after each round, drains the model at end
 
-**Add new:**
+### test_pqueue_littlefs_soak -- DONE
 
-- `test_append_log_capacity_full_behavior` -- fill to `reservedBytes`, verify
-  `QueueFull` is returned and existing records survive; uses AppendLog budget fields,
-  not slot-count capacity
-- `test_append_log_drop_oldest_evicts_and_continues` -- configure `DropOldest` policy,
-  enqueue past `reservedBytes`, verify oldest is evicted and queue stays usable
+All FixedSlot tests and helpers removed. Suite is AppendLog-only. 1 test run via
+`pio test`.
 
-### test_pqueue_littlefs_slow (reboot suite)
+Removed: `storage_common.h`, `kCapacityRecords`, `kRecordSizeBytes`, `slotSize`,
+per-cycle `mountLittleFs`, `verifyAndRestoreModel` (the old drain-and-re-enqueue
+pattern that is unnecessary for AppendLog since remount already holds correct state).
 
-Rewrite in place (same folder and env name). All FixedSlot reboot tests are deleted.
-New content is AppendLog-only.
+Config: `maxSegmentBytes=128`, `reservedBytes=0`, `maxSegments=16`, `kCycles=30`.
 
-**Kill entirely (no AppendLog equivalent):**
+Test present:
 
-- `test_reboot_wraparound` -- fixed-slot ring-buffer wraparound
-- `test_reboot_index_fallback` -- checkpoint slot A/B election
-- `test_reboot_missing_metadata_fails_safely` -- checkpoint format
-- `test_reboot_corrupt_metadata_fails_safely` -- checkpoint format
-- `test_reboot_record_size_mismatch_fails_safely` -- spool geometry check
-- `test_reboot_capacity_mismatch_fails_safely` -- spool geometry check
-- `test_reboot_tmp_orphan_ignored` -- fixed-slot `.tmp` file convention
+- `test_model_driven_remount_soak` -- 30 cycles; each cycle: enqueue 1 record, pop
+  if backlog > 8, extra pop every 3 cycles. After each cycle: `LittleFS.end()` +
+  `LittleFS.begin(true)` (real filesystem remount), then a fresh Queue verifies count
+  and front match the model. Final pass: `queue.validate()` (asserts ok and zero
+  errors), full drain in FIFO order, assert empty.
 
-**Port as AppendLog variants (keep intent, rewrite config and setup):**
+Scope notes:
 
-- `test_reboot_fifo_many` -- enqueue 20 records spanning multiple segments, reboot,
-  drain all; validates segment replay across multiple sealed segments
-- `test_reboot_pop_remaining` -- enqueue, pop some across a segment boundary, reboot,
-  verify remainder
-- `test_reboot_rewrite_front` -- enqueue, rewrite front, reboot, verify
-- `test_reboot_outbox_drain` -- submit to AppendLog Outbox, reboot, drain
-- `test_churn_without_reboot` -- rewrite for AppendLog with `rewriteFront` and
-  periodic `compactIdle`
+- `compactIdle` excluded: compaction outputs higher-generation segments; when the old
+  active tail later rotates it becomes non-contiguous, fragmenting manifest ranges
+  under `kManifestMaxRanges=4`. Append-log compaction is covered by focused POSIX
+  tests. A dedicated LittleFS compaction soak is deferred.
+- `rewriteFront` excluded: rewrite+remount interactions are covered by targeted POSIX
+  tests. A dedicated LittleFS rewrite soak can be added separately.
 
-**Add new:**
-
-- 4-phase compaction reboot: phase 0 enqueue A/B/C, reboot; phase 1 pop A and
-  rewrite B to X, reboot; phase 2 `compactIdle`, reboot; phase 3 verify X and C and
-  drain. Validates compaction durability after real power cycles, not just in-process
-  remount.
-
-### test_pqueue_littlefs_soak
-
-Rewrite in place. Not a config swap: the soak is deliberately re-parameterised for
-AppendLog behavior.
-
-Parameters: `maxSegmentBytes` small enough to exercise rotation and compaction across
-cycles; `maxSegments` high enough not to deadlock the model; `compactIdle(N)` called
-every few cycles.
-
-Each cycle: perform enqueue/pop/rewriteFront operations against the existing queue and
-model; optionally call `compactIdle`; destroy and recreate the Queue object (remount);
-verify live queue contents match the model. Do not rebuild state by re-enqueuing model
-contents -- after remount the queue already holds the correct state. Final pass: full
-drain and validate.
-
-Fixed-slot capacity assumptions (`kCapacityRecords * slotSize`) are removed. Capacity
-is defined by `reservedBytes`.
-
-### Patch order (Arduino)
-
-Patch 1: fast suite (`test_pqueue_littlefs`). Run on device before proceeding.
-Patch 2: slow reboot suite (`test_pqueue_littlefs_slow`).
-Patch 3: soak (`test_pqueue_littlefs_soak`).
-`test_pqueue_compaction` and `platformio.ini` env names are untouched until Patch 1
-is confirmed green.
