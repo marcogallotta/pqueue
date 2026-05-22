@@ -32,7 +32,6 @@ std::filesystem::path repairDir(const char* name) {
 pqueue::Config makeRepairConfig(const std::filesystem::path& dir) {
     pqueue::Config cfg;
     cfg.basePath = dir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.minFreeBytes = 0;
     return cfg;
 }

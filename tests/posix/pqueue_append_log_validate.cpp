@@ -4,7 +4,6 @@
 
 #include "pqueue/queue.h"
 #include "pqueue/append_log_store.h"
-#include "pqueue/file_store.h"
 
 #include <filesystem>
 #include <fstream>

@@ -38,7 +38,6 @@ void writeActiveLockFile() {
 pqueue::Config makeConfig() {
     pqueue::Config cfg;
     cfg.basePath = kSpoolDir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.maxSegmentBytes = 1024;
     cfg.minFreeBytes = 0;
     return cfg;

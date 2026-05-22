@@ -36,7 +36,6 @@ struct SlowState {
 pqueue::Config appendLogQueueConfigForBase(const char* basePath) {
     pqueue::Config cfg;
     cfg.basePath       = basePath;
-    cfg.storeLayout    = pqueue::StoreLayout::AppendLog;
     cfg.reservedBytes  = 0;
     cfg.minFreeBytes   = 0;
     cfg.maxSegmentBytes = 256;

@@ -67,7 +67,6 @@ pqueue::OutboxConfig testOutboxConfig() {
 pqueue::Config makeOutboxQueueConfig() {
     pqueue::Config cfg;
     cfg.basePath = kOutboxSpoolDir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.minFreeBytes = 0;
     return cfg;
 }

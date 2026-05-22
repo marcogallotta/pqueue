@@ -25,7 +25,6 @@ void cleanSpool() {
 pqueue::Config makeConfig(pqueue::FullQueuePolicy policy = pqueue::FullQueuePolicy::RejectNewest) {
     pqueue::Config cfg;
     cfg.basePath = kSpoolDir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.maxSegmentBytes = 50;
     cfg.reservedBytes = 179;
     cfg.minFreeBytes = 0;

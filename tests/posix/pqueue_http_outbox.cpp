@@ -560,7 +560,6 @@ TEST_CASE("pqueue http outbox compactIdle removes dead sealed segments") {
     // maxSegmentBytes=100 holds exactly 1 record per sealed segment (20+53=73 < 100, 20+106=126 > 100).
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.queue.storeLayout = pqueue::StoreLayout::AppendLog;
     httpConfig.queue.maxSegmentBytes = 100;
     httpConfig.queue.minFreeBytes = 0;
     httpConfig.outbox.retryDelayMs = 1000;

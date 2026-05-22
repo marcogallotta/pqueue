@@ -16,7 +16,6 @@
 inline pqueue::Config makeAppendLogQueueConfig(const std::string& basePath) {
     pqueue::Config cfg;
     cfg.basePath = basePath;
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.maxSegmentBytes = 1024;
     cfg.minFreeBytes = 0;
     return cfg;

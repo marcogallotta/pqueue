@@ -28,7 +28,6 @@ constexpr std::size_t kMaxBacklog = 8;
 pqueue::Config queueConfig() {
     pqueue::Config cfg;
     cfg.basePath        = kBasePath;
-    cfg.storeLayout     = pqueue::StoreLayout::AppendLog;
     cfg.storageBackend  = pqueue::StorageBackend::LittleFS;
     cfg.reservedBytes   = 0;
     cfg.minFreeBytes    = 0;

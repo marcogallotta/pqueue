@@ -28,7 +28,6 @@ void cleanEdgesSpool() {
 pqueue::Config makeEdgesConfig() {
     pqueue::Config cfg;
     cfg.basePath = kEdgesSpoolDir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.maxSegmentBytes = 1024;
     cfg.minFreeBytes = 0;
     return cfg;

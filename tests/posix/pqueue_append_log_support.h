@@ -161,7 +161,6 @@ inline void expectRecordsAfterRemount(const pqueue::AppendLogConfig& cfg,
 inline pqueue::Config makeConfig() {
     pqueue::Config cfg;
     cfg.basePath = kSpoolDir.string();
-    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
     cfg.recordSizeBytes = 256;
     cfg.reservedBytes = 64 * 1024;
     cfg.maxSegmentBytes = 1024; // small to force rotation in tests
