@@ -316,24 +316,12 @@ void test_compaction_burst_workload() {
             std::uint32_t t0;
 
             t0 = millis();
-            const auto st = store.writeRecord(nextSeq, makePayload(nextSeq));
+            const auto st = store.commitEnqueue(nextSeq, makePayload(nextSeq));
             t_wr += millis() - t0;
 
             if (st.ok()) {
-                pqueue::QueueIndex dummy;
-                t0 = millis();
-                const auto idxSt = store.writeIndex(dummy);
-                t_widx += millis() - t0;
-                if (idxSt.ok()) {
-                    ++nextSeq;
-                    ++queueSize;
-                } else {
-                    Serial.printf("[enq] writeIndex failed: code=%d ranges=%u q=%u\n",
-                        static_cast<int>(idxSt.code),
-                        static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
-                        queueSize);
-                    Serial.flush();
-                }
+                ++nextSeq;
+                ++queueSize;
             } else {
                 bool reclaimable = false;
                 for (const auto& rs : buildRangeStats(store)) {
@@ -352,21 +340,19 @@ void test_compaction_burst_workload() {
         for (std::uint32_t i = 0; i < toPop; ++i) {
             std::uint32_t t0;
             pqueue::QueueIndex idx;
-            t0 = millis();
-            const bool ok = store.readIndex(idx).ok() && idx.count > 0;
-            t_ridx += millis() - t0;
-            if (ok) {
-                idx.head++;
-                idx.count--;
+            if (!store.readIndex(idx).ok() || idx.count == 0) {
+                continue;
+            }
+            {
                 t0 = millis();
-                const auto idxSt = store.writeIndex(idx);
+                const auto idxSt = store.commitPop(idx.head);
                 t_widx += millis() - t0;
                 if (idxSt.ok()) {
                     --queueSize;
                 } else {
-                    Serial.printf("[pop] writeIndex failed: code=%d ranges=%u q=%u\n",
+                    Serial.printf("[pop] commitPop failed: code=%d ranges=%u q=%u\n",
                         static_cast<int>(idxSt.code),
-                        static_cast<unsigned>(static_cast<unsigned>(store.manifestRanges().size())),
+                        static_cast<unsigned>(store.manifestRanges().size()),
                         queueSize);
                     Serial.flush();
                 }

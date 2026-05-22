@@ -13,6 +13,7 @@ COV_DIR := $(BUILD_DIR)/coverage
 COV_TARGET := $(COV_DIR)/pqueue-tests-cov
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 APPENDLOG_DIAG_TARGET := $(BUILD_DIR)/pqueue-appendlog-diag
+DOCTOR_DUMP_TARGET := $(BUILD_DIR)/pqueue-doctor-dump
 PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
 SIM_TARGET := $(BUILD_DIR)/pqueue-compaction-sim
 
@@ -57,7 +58,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool appendlog-diag profiling sim docs coverage clean .FORCE
+.PHONY: all test tests run-tests repair-tool appendlog-diag doctor-dump profiling sim docs coverage clean .FORCE
 
 all: test
 
@@ -76,6 +77,8 @@ run-tests: $(TEST_TARGET)
 repair-tool: $(REPAIR_TOOL_TARGET)
 
 appendlog-diag: $(APPENDLOG_DIAG_TARGET)
+
+doctor-dump: $(DOCTOR_DUMP_TARGET)
 
 profiling: $(PROFILING_TARGET)
 
@@ -96,6 +99,10 @@ $(REPAIR_TOOL_TARGET): tools/pqueue_repair_tool.cpp $(PQUEUE_SRC)
 $(APPENDLOG_DIAG_TARGET): tools/pqueue_appendlog_diag.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(DOCTOR_DUMP_TARGET): tools/pqueue_doctor_dump_posix.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -Itools $^ -o $@ $(LDFLAGS)
 
 $(TEST_TARGET): $(OBJ)
 	@mkdir -p $(dir $@)

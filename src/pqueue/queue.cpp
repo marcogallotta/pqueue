@@ -74,7 +74,7 @@ bool isFormatRepairIssue(ValidationIssueCode code) {
         case ValidationIssueCode::JournalCorrupt:
             return true;
         case ValidationIssueCode::InvalidConfig:
-        case ValidationIssueCode::SlotCrcMismatch:
+        case ValidationIssueCode::RecordCrcMismatch:
         case ValidationIssueCode::OutboxEnvelopeInvalid:
         case ValidationIssueCode::HttpRequestEnvelopeInvalid:
             return false;
@@ -91,7 +91,7 @@ void addRepairHints(ValidationResult& result, std::uint32_t head) {
             issue.repairAction = ValidationRepairAction::Format;
             continue;
         }
-        if (issue.code == ValidationIssueCode::SlotCrcMismatch) {
+        if (issue.code == ValidationIssueCode::RecordCrcMismatch) {
             if (issue.hasExpectedSequence && issue.expectedSequence == head) {
                 issue.repairAction = ValidationRepairAction::DropFrontIfCorrupt;
             } else {
@@ -223,7 +223,7 @@ Status Queue::recoverStaleLock() {
 }
 
 Status Queue::loadLatestIndex() {
-    const Status st = store_->readIndexFromDisk(index_);
+    const Status st = store_->readIndex(index_);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "loadLatestIndex");
     }
@@ -242,7 +242,7 @@ Status Queue::enqueue(const std::string& record) {
     if (record.size() > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "enqueue");
     }
-    if (!store_->canEnqueue(record.size(), index_.count)) {
+    if (!store_->canEnqueue(record.size())) {
         if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest) {
             const Status evictStatus = evictFront();
             if (!evictStatus.ok()) {
@@ -255,30 +255,20 @@ Status Queue::enqueue(const std::string& record) {
     }
 
     const std::uint32_t sequence = index_.tail;
-    st = store_->writeRecord(sequence, record);
+    st = store_->commitEnqueue(sequence, record);
     if (!st.ok() && st.code == StatusCode::QueueFull &&
         config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
-        // writeRecord may return QueueFull when maxTotalBytes is exhausted and compaction
-        // finds nothing to reclaim. Evicting the front record creates dead bytes that the
-        // next writeRecord call can compact away to make room.
         const Status evictStatus = evictFront();
         if (!evictStatus.ok()) return evictStatus;
         diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
-        st = store_->writeRecord(sequence, record);
+        st = store_->commitEnqueue(sequence, record);
     }
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "enqueue");
     }
 
-    QueueIndex next = index_;
-    next.tail += 1;
-    next.count += 1;
-    st = store_->writeIndex(next);
-    if (!st.ok()) {
-        return diagnostic(Severity::Error, st, "enqueue");
-    }
-
-    index_ = next;
+    index_.tail += 1;
+    index_.count += 1;
     return Status::success();
 }
 
@@ -310,18 +300,13 @@ Status Queue::pop() {
         return Status::failure(StatusCode::QueueEmpty, "queue is empty");
     }
 
-    const std::uint32_t oldHead = index_.head;
-    QueueIndex next = index_;
-    next.head += 1;
-    next.count -= 1;
-
-    st = store_->writeIndex(next);
+    st = store_->commitPop(index_.head);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "pop");
     }
 
-    index_ = next;
-    store_->removeRecord(oldHead);
+    index_.head += 1;
+    index_.count -= 1;
     return Status::success();
 }
 
@@ -347,18 +332,13 @@ Status Queue::rewriteFront(const std::string& record) {
 
 
 Status Queue::evictFront() {
-    const std::uint32_t oldHead = index_.head;
-    QueueIndex next = index_;
-    next.head += 1;
-    next.count -= 1;
-
-    const Status st = store_->writeIndex(next);
+    const Status st = store_->commitPop(index_.head);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "evictFront");
     }
 
-    index_ = next;
-    store_->removeRecord(oldHead);
+    index_.head += 1;
+    index_.count -= 1;
     return Status::success();
 }
 
@@ -385,18 +365,13 @@ Status Queue::dropFrontIfCorrupt() {
         return st;
     }
 
-    const std::uint32_t corruptHead = index_.head;
-    QueueIndex next = index_;
-    next.head += 1;
-    next.count -= 1;
-
-    st = store_->writeIndex(next);
+    st = store_->commitPop(index_.head);
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "dropFrontIfCorrupt");
     }
 
-    index_ = next;
-    store_->removeRecord(corruptHead);
+    index_.head += 1;
+    index_.count -= 1;
     return Status::success();
 }
 
@@ -490,7 +465,7 @@ ValidationResult Queue::validate(const ValidationOptions& options) {
     }
 
     QueueIndex diskIndex;
-    const Status st = store_->readIndexFromDisk(diskIndex);
+    const Status st = store_->readIndex(diskIndex);
     if (!st.ok()) {
         addQueueValidationError(result, options, makeQueueIssue(ValidationIssueCode::QueueLoadFailed, st.message, ValidationRepairAction::Format));
         return result;

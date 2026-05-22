@@ -498,7 +498,7 @@ TEST_CASE("maxTotalBytes: enqueue blocked when footprint full and nothing to com
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b"); // on-disk footprint = 70 bytes; cap reached
 
-    const auto st = store.writeRecord(3, "c");
+    const auto st = store.commitEnqueue(3, "c");
     CHECK_FALSE(st.ok());
     CHECK_EQ(st.code, pqueue::StatusCode::QueueFull);
     CHECK_FALSE(std::filesystem::exists(segmentPath(2)));
@@ -518,16 +518,13 @@ TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
     storePop(store); // POP overflows gen=1 → rotation; gen=1: 70b (full), gen=2: 40b
 
     // footprint=110; +25 for enqueue=135 > 120 → compact gen=1; then fits
-    CHECK(store.writeRecord(3, "c").ok());
-    pqueue::QueueIndex idx;
-    CHECK(store.readIndex(idx).ok());
-    CHECK(store.writeIndex(idx).ok());
+    CHECK(store.commitEnqueue(3, "c").ok());
 
     expectRecords(store, {{2,"b"},{3,"c"}});
     expectRecordsAfterRemount(cfg, {{2,"b"},{3,"c"}});
 }
 
-TEST_CASE("maxTotalBytes: DropOldest evicts and retries when writeRecord returns QueueFull") {
+TEST_CASE("maxTotalBytes: DropOldest evicts and retries when commitEnqueue returns QueueFull") {
     resetSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 100;
@@ -546,15 +543,26 @@ TEST_CASE("maxTotalBytes: DropOldest evicts and retries when writeRecord returns
     REQUIRE(q.peek(out).ok()); CHECK_EQ(out, "c");
 }
 
-TEST_CASE("sequence exhaustion: writeRecord fails closed at UINT32_MAX") {
+TEST_CASE("sequence exhaustion: commitEnqueue fails closed at UINT32_MAX") {
     resetSpool();
     auto cfg = makeStoreConfig();
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
-    const auto st = store.writeRecord(std::numeric_limits<std::uint32_t>::max(), "data");
+    const auto st = store.commitEnqueue(std::numeric_limits<std::uint32_t>::max(), "data");
     CHECK_FALSE(st.ok());
     CHECK_EQ(st.code, pqueue::StatusCode::SequenceExhausted);
+}
+
+TEST_CASE("commitPop: sequence mismatch returns InvalidIndex") {
+    resetSpool();
+    pqueue::AppendLogStore store(makeStoreConfig());
+    CHECK(store.mount().ok());
+    CHECK(store.commitEnqueue(0, "a").ok());
+
+    const auto st = store.commitPop(99);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::InvalidIndex);
 }
 
 // ---------------------------------------------------------------------------

@@ -229,10 +229,9 @@ records have their `segmentGeneration` and `payloadOffset` updated in-place by
 payload. Reads are batched: records are grouped by segment generation and each
 segment file is read once with `readFile`, slicing payloads by offset.
 
-**`removeRecord()` is a no-op for AppendLog.** POP tombstones are written by
-`appendPopEvent()` inside `writeIndex()`, not by `removeRecord()`. This is
-intentional: the Store interface calls both, but for AppendLog the tombstone is
-already committed by the time `removeRecord` is reached.
+**`commitPop(expectedSequence)`** appends the POP tombstone via `appendPopEvent()`
+and pops `records_.front()` in a single call. It fails closed with `InvalidIndex`
+if `records_` is empty or `records_.front().sequence != expectedSequence`.
 
 ### compactRange
 
@@ -352,7 +351,7 @@ where `moreWorkLikely` is true only when the loop stopped by budget exhaustion
 after at least one successful compaction. `Queue::compactIdle` is a lock-guarded
 thin wrapper.
 
-`writeRecord` calls `compactOneSegment()` directly (one bounded step per
+`commitEnqueue` calls `compactOneSegment()` directly (one bounded step per
 enqueue) when `needsCompaction()` is true. `needsCompaction()` triggers on
 segment count (`activeGenerations_.size() > maxSegments`) or low free space
 (`freeBytes < minFreeBytes`); it does not trigger on dead ratio alone. Under
@@ -365,7 +364,7 @@ one wasted attempt per enqueue until records are popped.
 ## Capacity enforcement
 
 **`maxTotalBytes`** caps total on-disk footprint (live + dead bytes, including
-dangling files). `writeRecord` is the enforcement point: before appending, it
+dangling files). `commitEnqueue` is the enforcement point: before appending, it
 computes `totalOnDiskBytes() + appendGrowthBytes(recordSize)`. If this exceeds
 `maxTotalBytes`, it loops `compactOneSegment()` until the footprint fits or
 compaction returns noOp, then returns `QueueFull`. The hard FS floor
@@ -382,15 +381,15 @@ generation file may be overwritten. `cleanupOneDanglingSegment` subtracts on
 successful `removeFile`. Initialised on mount by summing all `seg-*.bin` file
 sizes from disk including dangling files.
 
-**`canEnqueue()`** performs only the hard FS floor check: returns false if
+**`canEnqueue(recordSize)`** performs only the hard FS floor check: returns false if
 `freeBytes() < minFreeBytes`. It does not check `maxTotalBytes` or require free
-space for the record itself -- `writeRecord` is authoritative for both.
+space for the record itself -- `commitEnqueue` is authoritative for both.
 
 **`FullQueuePolicy::DropOldest`** with `maxTotalBytes`: `Queue::enqueue()` calls
-`canEnqueue()` before `writeRecord()`. Since `canEnqueue()` does not check
-`maxTotalBytes`, a footprint-full queue returns `QueueFull` from `writeRecord`.
-`Queue::enqueue()` handles this: if `writeRecord()` returns `QueueFull` and the
-policy is `DropOldest`, it evicts the front record and retries `writeRecord()`
+`canEnqueue()` before `commitEnqueue()`. Since `canEnqueue()` does not check
+`maxTotalBytes`, a footprint-full queue returns `QueueFull` from `commitEnqueue`.
+`Queue::enqueue()` handles this: if `commitEnqueue()` returns `QueueFull` and the
+policy is `DropOldest`, it evicts the front record and retries `commitEnqueue()`
 once. A second `QueueFull` is returned as an error without further eviction.
 
 ---

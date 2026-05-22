@@ -283,9 +283,7 @@ TEST_CASE("manifest-mount: referenced segment missing returns DataCorrupt") {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::QueueIndex dummy{};
-        REQUIRE(store.writeRecord(0, "A").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.commitEnqueue(0, "A").ok());
 
         ManifestData md;
         md.tailGeneration = 1; md.nextGeneration = 2;
@@ -321,13 +319,9 @@ TEST_CASE("manifest-mount: normal mount with manifest recovers records") {
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::QueueIndex dummy{};
-        REQUIRE(store.writeRecord(0, "alpha").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
-        REQUIRE(store.writeRecord(1, "beta").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
-        REQUIRE(store.writeRecord(2, "gamma").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.commitEnqueue(0, "alpha").ok());
+        REQUIRE(store.commitEnqueue(1, "beta").ok());
+        REQUIRE(store.commitEnqueue(2, "gamma").ok());
 
         ManifestData md;
         md.tailGeneration = 1; md.nextGeneration = 2;
@@ -355,13 +349,9 @@ TEST_CASE("manifest-mount: corrupt inactive slot does not affect mount (critical
         pqueue::AppendLogStore store(storeCfg);
         REQUIRE(store.mount().ok());
 
-        pqueue::QueueIndex dummy{};
-        REQUIRE(store.writeRecord(0, "one").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
-        REQUIRE(store.writeRecord(1, "two").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
-        REQUIRE(store.writeRecord(2, "three").ok());
-        REQUIRE(store.writeIndex(dummy).ok());
+        REQUIRE(store.commitEnqueue(0, "one").ok());
+        REQUIRE(store.commitEnqueue(1, "two").ok());
+        REQUIRE(store.commitEnqueue(2, "three").ok());
 
         ManifestData md;
         md.tailGeneration = 1; md.nextGeneration = 2;

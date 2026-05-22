@@ -544,10 +544,8 @@ CompactionBurstResult scenarioCompactionBurst(
 
     for (std::uint32_t cycle = 0; cycle < cycles; ++cycle) {
         for (std::uint32_t i = 0; i < burstSize; ++i) {
-            const auto st = store.writeRecord(nextSeq, payload);
+            const auto st = store.commitEnqueue(nextSeq, payload);
             if (st.ok()) {
-                pqueue::QueueIndex dummy;
-                store.writeIndex(dummy);
                 ++nextSeq;
                 ++queueSize;
             } else {
@@ -563,8 +561,7 @@ CompactionBurstResult scenarioCompactionBurst(
         for (std::uint32_t i = 0; i < toPop; ++i) {
             pqueue::QueueIndex idx;
             if (store.readIndex(idx).ok() && idx.count > 0) {
-                idx.head++; idx.count--;
-                store.writeIndex(idx);
+                store.commitPop(idx.head);
                 --queueSize;
             }
             checkAndCompact();
@@ -632,11 +629,9 @@ IdleCompactionResult scenarioIdleCompaction(
         // Rotations produce no readFile; compactions read input segments.
         for (std::uint32_t i = 0; i < burstSize; ++i) {
             const std::uint64_t rfBefore = counting->counters().readFile;
-            const auto st = store.writeRecord(nextSeq, payload);
+            const auto st = store.commitEnqueue(nextSeq, payload);
             if (counting->counters().readFile > rfBefore) ++result.hotCompactions;
             if (st.ok()) {
-                pqueue::QueueIndex dummy;
-                store.writeIndex(dummy);
                 ++nextSeq;
                 ++queueSize;
             } else {
@@ -653,8 +648,7 @@ IdleCompactionResult scenarioIdleCompaction(
         for (std::uint32_t i = 0; i < toPop; ++i) {
             pqueue::QueueIndex idx;
             if (store.readIndex(idx).ok() && idx.count > 0) {
-                idx.head++; idx.count--;
-                store.writeIndex(idx);
+                store.commitPop(idx.head);
                 --queueSize;
             }
         }

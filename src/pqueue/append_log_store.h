@@ -36,13 +36,11 @@ public:
 
     Status mount() override;
     Status readIndex(QueueIndex& out) override;
-    Status readIndexFromDisk(QueueIndex& out) override;
-    Status writeIndex(const QueueIndex& index) override;
 
-    Status writeRecord(std::uint32_t sequence, const std::string& record) override;
+    Status commitEnqueue(std::uint32_t sequence, const std::string& record) override;
+    Status commitPop(std::uint32_t expectedSequence) override;
     Status rewriteRecord(std::uint32_t sequence, const std::string& record) override;
     Status readRecord(std::uint32_t sequence, std::string& out) override;
-    Status removeRecord(std::uint32_t sequence) override;
 
     Status publishManifest(const append_log_detail::ManifestData& manifest);
     bool readManifest(append_log_detail::ManifestData& out);
@@ -91,7 +89,7 @@ public:
     Status recoverStaleLockFile(const std::string& name, const std::string& currentContents) override;
 
     std::uint64_t freeBytes() const override;
-    bool canEnqueue(std::size_t recordSize, std::uint32_t currentCount) const override;
+    bool canEnqueue(std::size_t recordSize) const override;
 
     Status format() override;
     Status rebuildMetadata() override;
@@ -190,9 +188,6 @@ private:
     // queue does not reset to sequence 0 on remount.
     std::uint32_t nextSequence_ = 0;
 
-    // Pending enqueue state (set in writeRecord, cleared in writeIndex)
-    bool hasPendingEnqueue_ = false;
-    SegmentRecord pendingRecord_;
 };
 
 } // namespace pqueue

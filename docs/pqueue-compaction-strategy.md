@@ -182,7 +182,7 @@ compaction has nothing to reclaim and should be a no-op. During a drain burst,
 pops create dead data but no new enqueues arrive.
 
 **Pops do not trigger compaction.** `needsCompaction()` is only checked in
-`writeRecord`. The drain phase never stalls for compaction, which is correct for
+`commitEnqueue`. The drain phase never stalls for compaction, which is correct for
 latency. Dead data from a completed drain sits on flash until the next enqueue
 triggers pressure or `compactIdle` runs explicitly.
 

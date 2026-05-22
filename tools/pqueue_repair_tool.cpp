@@ -10,20 +10,6 @@
 
 namespace {
 
-const char* issueCodeName(pqueue::ValidationIssueCode code) {
-    switch (code) {
-        case pqueue::ValidationIssueCode::InvalidConfig: return "invalid_config";
-        case pqueue::ValidationIssueCode::MetadataCorrupt: return "metadata_corrupt";
-        case pqueue::ValidationIssueCode::JournalCorrupt: return "journal_corrupt";
-        case pqueue::ValidationIssueCode::ConfigMismatch: return "config_mismatch";
-        case pqueue::ValidationIssueCode::SlotCrcMismatch: return "slot_crc_mismatch";
-        case pqueue::ValidationIssueCode::QueueLoadFailed: return "queue_load_failed";
-        case pqueue::ValidationIssueCode::QueueIndexMismatch: return "queue_index_mismatch";
-        case pqueue::ValidationIssueCode::OutboxEnvelopeInvalid: return "outbox_envelope_invalid";
-        case pqueue::ValidationIssueCode::HttpRequestEnvelopeInvalid: return "http_request_envelope_invalid";
-        default: return "unknown";
-    }
-}
 
 const char* repairActionHuman(pqueue::ValidationRepairAction action) {
     switch (action) {
@@ -91,11 +77,11 @@ int runValidate(pqueue::Queue& queue) {
     for (std::size_t i = 0; i < validation.errors.size(); ++i) {
         const auto& issue = validation.errors[i];
         std::cout << "\nIssue " << (i + 1) << ":\n"
-                  << "  code: " << issueCodeName(issue.code) << "\n"
+                  << "  code: " << pqueue::validationIssueCodeName(issue.code) << "\n"
                   << "  message: " << issue.message << "\n"
                   << "  repair hint: " << repairActionHuman(issue.repairAction) << "\n";
-        if (issue.hasSlotIndex) {
-            std::cout << "  slot: " << issue.slotIndex << "\n";
+        if (issue.hasRecordIndex) {
+            std::cout << "  record: " << issue.recordIndex << "\n";
         }
         if (issue.hasExpectedSequence) {
             std::cout << "  expected sequence: " << issue.expectedSequence << "\n";

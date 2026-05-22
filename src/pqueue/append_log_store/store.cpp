@@ -514,11 +514,8 @@ Status AppendLogStore::readIndex(QueueIndex& out) {
     return Status::success();
 }
 
-Status AppendLogStore::readIndexFromDisk(QueueIndex& out) {
-    return readIndex(out);
-}
 
-Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& record) {
+Status AppendLogStore::commitEnqueue(std::uint32_t sequence, const std::string& record) {
 #ifdef ARDUINO
     const std::uint32_t t_wr_start = millis();
     std::uint32_t ms_ensure = 0, ms_compact = 0, ms_rotate = 0, ms_ensure_seg = 0, ms_append = 0;
@@ -537,18 +534,18 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     if (record.size() > config_.maxRecordBytes) {
         return diagnostic(Severity::Warning,
             Status::failure(StatusCode::RecordTooLarge, "record exceeds append-log maximum record size"),
-            "writeRecord");
+            "commitEnqueue");
     }
     if (kSegmentHeaderBytes + kEnqueueOverheadBytes + record.size() > config_.maxSegmentBytes) {
         return diagnostic(Severity::Warning,
             Status::failure(StatusCode::RecordTooLarge, "record too large to fit in a segment"),
-            "writeRecord");
+            "commitEnqueue");
     }
 
     if (sequence == std::numeric_limits<std::uint32_t>::max()) {
         return diagnostic(Severity::Error,
             Status::failure(StatusCode::SequenceExhausted, "sequence space exhausted; format() required"),
-            "writeRecord");
+            "commitEnqueue");
     }
 
     const std::uint32_t eventBytes = kEnqueueOverheadBytes + static_cast<std::uint32_t>(record.size());
@@ -559,11 +556,11 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 #endif
         while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) > config_.maxTotalBytes) {
             Status compact = compactOneSegment();
-            if (!compact.ok()) return diagnostic(Severity::Error, compact, "writeRecord");
+            if (!compact.ok()) return diagnostic(Severity::Error, compact, "commitEnqueue");
             if (compact.isNoOp()) {
                 return diagnostic(Severity::Warning,
                     Status::failure(StatusCode::QueueFull, "queue footprint limit reached"),
-                    "writeRecord");
+                    "commitEnqueue");
             }
 #ifdef ARDUINO
             did_compact = true;
@@ -580,7 +577,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
         if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth) {
             return diagnostic(Severity::Warning,
                 Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
-                "writeRecord");
+                "commitEnqueue");
         }
     }
 
@@ -588,7 +585,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes) {
         if (needsCompaction()) {
             Status cst = compactOneSegment();
-            if (!cst.ok()) return diagnostic(Severity::Error, cst, "writeRecord");
+            if (!cst.ok()) return diagnostic(Severity::Error, cst, "commitEnqueue");
 #ifdef ARDUINO
             did_compact = true;
 #endif
@@ -603,7 +600,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
             ms_rotate = millis() - _tr;
             did_rotate = true;
 #endif
-            if (!rst.ok()) return diagnostic(Severity::Error, rst, "writeRecord");
+            if (!rst.ok()) return diagnostic(Severity::Error, rst, "commitEnqueue");
         }
     }
 
@@ -614,7 +611,7 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 #ifdef ARDUINO
     ms_ensure_seg = millis() - _t_ensure_seg;
 #endif
-    if (!est.ok()) return diagnostic(Severity::Error, est, "writeRecord");
+    if (!est.ok()) return diagnostic(Severity::Error, est, "commitEnqueue");
 
     const std::uint32_t payloadOffset = activeSegmentBytes_ + kEnqueueHeaderBytes;
     const std::string eventData = serializeEnqueueEvent(sequence, record);
@@ -626,12 +623,12 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
 #ifdef ARDUINO
     ms_append = millis() - _t_append;
 #endif
-    if (!ast.ok()) return diagnostic(Severity::Error, ast, "writeRecord");
+    if (!ast.ok()) return diagnostic(Severity::Error, ast, "commitEnqueue");
 
 #ifdef ARDUINO
     const std::uint32_t ms_total = millis() - t_wr_start;
     if (ms_total > 500) {
-        Serial.printf("[writeRecord] seq=%u recBytes=%u rotate=%u compact=%u "
+        Serial.printf("[commitEnqueue] seq=%u recBytes=%u rotate=%u compact=%u "
             "ensure_ms=%u compact_ms=%u rotate_ms=%u ensure_seg_ms=%u append_ms=%u total_ms=%u\n",
             sequence, static_cast<unsigned>(record.size()),
             static_cast<unsigned>(did_rotate), static_cast<unsigned>(did_compact),
@@ -640,40 +637,28 @@ Status AppendLogStore::writeRecord(std::uint32_t sequence, const std::string& re
     }
 #endif
 
-    pendingRecord_.sequence = sequence;
-    pendingRecord_.segmentGeneration = activeGeneration_;
-    pendingRecord_.payloadOffset = payloadOffset;
-    pendingRecord_.payloadBytes = static_cast<std::uint32_t>(record.size());
-    hasPendingEnqueue_ = true;
+    records_.push_back({sequence, activeGeneration_, payloadOffset,
+                        static_cast<std::uint32_t>(record.size())});
     return Status::success();
 }
 
-Status AppendLogStore::writeIndex(const QueueIndex& index) {
+Status AppendLogStore::commitPop(std::uint32_t expectedSequence) {
     Status st = ensureMounted();
     if (!st.ok()) return st;
-
-    if (hasPendingEnqueue_) {
-        // Commit the enqueue that was just written by writeRecord
-        records_.push_back(pendingRecord_);
-        hasPendingEnqueue_ = false;
-        return Status::success();
+    if (records_.empty() || records_.front().sequence != expectedSequence) {
+        return diagnostic(Severity::Error,
+            Status::failure(StatusCode::InvalidIndex, "commitPop: sequence mismatch"),
+            "commitPop");
     }
 
-    // Detect pop: head advanced
-    const QueueIndex current = indexFromRecords();
-    if (index.head > current.head && !records_.empty()) {
-        const std::uint32_t poppedSeq = records_.front().sequence;
-        const std::uint32_t poppedGen = records_.front().segmentGeneration;
-        st = appendPopEvent(poppedSeq);
-        if (!st.ok()) {
-            return diagnostic(Severity::Error, st, "writeIndex");
-        }
-        if (activeTailDependenciesTracked_) {
-            activeTailAffectedGenerations_.insert(poppedGen);
-        }
-        records_.pop_front();
+    const std::uint32_t poppedSeq = records_.front().sequence;
+    const std::uint32_t poppedGen = records_.front().segmentGeneration;
+    st = appendPopEvent(poppedSeq);
+    if (!st.ok()) return diagnostic(Severity::Error, st, "commitPop");
+    if (activeTailDependenciesTracked_) {
+        activeTailAffectedGenerations_.insert(poppedGen);
     }
-
+    records_.pop_front();
     return Status::success();
 }
 
@@ -722,11 +707,6 @@ Status AppendLogStore::readRecord(std::uint32_t sequence, std::string& out) {
     return Status::success();
 }
 
-Status AppendLogStore::removeRecord(std::uint32_t) {
-    // No-op: POP events are written by writeIndex.
-    return Status::success();
-}
-
 Status AppendLogStore::tryAcquireLockFile(const std::string& name, const std::string& contents) {
     Status st = ensureMounted();
     if (!st.ok()) return st;
@@ -749,9 +729,9 @@ std::uint64_t AppendLogStore::freeBytes() const {
     return fs_ ? fs_->freeBytes() : 0;
 }
 
-bool AppendLogStore::canEnqueue(std::size_t /*recordSize*/, std::uint32_t /*currentCount*/) const {
+bool AppendLogStore::canEnqueue(std::size_t /*recordSize*/) const {
     // Only checks the hard FS floor. Finer admission (maxTotalBytes cap, required record
-    // headroom) is enforced inside writeRecord() after a compaction attempt. Checking any
+    // headroom) is enforced inside commitEnqueue() after a compaction attempt. Checking any
     // of that here would block the write that triggers compaction.
     return freeBytes() >= config_.minFreeBytes;
 }
@@ -785,7 +765,6 @@ Status AppendLogStore::format() {
     activeGenerations_.clear();
     sealedSegmentBytes_.clear();
     records_.clear();
-    hasPendingEnqueue_ = false;
     cachedWrittenSlot_ = nullptr;
     cachedWrittenEpoch_ = 0;
     activeGeneration_ = 0;
@@ -803,7 +782,6 @@ Status AppendLogStore::rebuildMetadata() {
     // For append-log, rebuilding means re-scanning all segments from scratch.
     activeGenerations_.clear();
     records_.clear();
-    hasPendingEnqueue_ = false;
     mounted_ = false;
     return mount();
 }

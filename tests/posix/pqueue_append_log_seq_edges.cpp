@@ -66,7 +66,7 @@ TEST_CASE("seq-edges: near-UINT32_MAX records survive remount and drain in FIFO 
 
 TEST_CASE("seq-edges: next enqueue after draining near-UINT32_MAX queue fails with SequenceExhausted") {
     // After both records are popped index_.tail == kMax.
-    // writeRecord(kMax, ...) must return SequenceExhausted.
+    // commitEnqueue(kMax, ...) must return SequenceExhausted.
     plantLayout({
         .ranges   = {},
         .tail     = 1u,
