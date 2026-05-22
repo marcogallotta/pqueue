@@ -19,7 +19,7 @@ enum class FullQueuePolicy {
 struct Config {
     std::string basePath = kDefaultBasePath;
     StorageBackend storageBackend = StorageBackend::Default;
-    StoreLayout storeLayout = StoreLayout::FixedSlot;
+    StoreLayout storeLayout = StoreLayout::AppendLog;
     std::uint32_t reservedBytes = 128 * 1024;
     std::size_t recordSizeBytes = 492;
     std::uint32_t journalBytes = 4096;

@@ -158,15 +158,12 @@ will have a dangling `pqueue.spool` that AppendLog ignores.
 
 ## Remaining removal steps
 
-1. **Flip defaults.** Change `Config::storeLayout` default from `FixedSlot` to
-   `AppendLog`. Smoke-test that nothing regresses with the new default.
+1. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
 
-2. **Migrate the app.** Migration plan: `docs/outbox-appendlog-migration.md`.
-
-3. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
+2. **Clean tools and docs.** Remove or update simulator flags, profiling modes,
    and documentation sections that reference FixedSlot.
 
-4. **Eliminate FixedSlot.** Delete the files listed above, strip the dead
+3. **Eliminate FixedSlot.** Delete the files listed above, strip the dead
    `Config` fields, collapse `makeStore()`, and remove `StoreLayout`.
 
 One prerequisite still blocked: remove FixedSlot-only `ValidationIssueCode` values
