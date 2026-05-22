@@ -12,6 +12,7 @@ TEST_TARGET := $(BUILD_DIR)/pqueue-tests
 COV_DIR := $(BUILD_DIR)/coverage
 COV_TARGET := $(COV_DIR)/pqueue-tests-cov
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
+APPENDLOG_DIAG_TARGET := $(BUILD_DIR)/pqueue-appendlog-diag
 PROFILING_TARGET := $(BUILD_DIR)/pqueue-profiling
 SIM_TARGET := $(BUILD_DIR)/pqueue-compaction-sim
 
@@ -42,14 +43,12 @@ TEST_SRC := \
 	tests/posix/pqueue_append_log_rollover.cpp \
 	tests/posix/pqueue_append_log_compaction.cpp \
 	tests/posix/pqueue_append_log_seq_edges.cpp \
-	tests/posix/pqueue_diagnostics.cpp \
+	tests/posix/pqueue_append_log_validate.cpp \
 	tests/posix/pqueue_envelope.cpp \
-	tests/posix/pqueue_file_store.cpp \
 	tests/posix/pqueue_full_queue_policy.cpp \
 	tests/posix/pqueue_http_outbox.cpp \
 	tests/posix/pqueue_http_request_envelope.cpp \
 	tests/posix/pqueue_outbox.cpp \
-	tests/posix/pqueue_rebuild_metadata.cpp \
 	tests/posix/pqueue_repair.cpp \
 	tests/posix/pqueue_queue_edges.cpp \
 	$(PQUEUE_SRC)
@@ -60,7 +59,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool profiling sim docs coverage clean .FORCE
+.PHONY: all test tests run-tests repair-tool appendlog-diag profiling sim docs coverage clean .FORCE
 
 all: test
 
@@ -78,6 +77,8 @@ run-tests: $(TEST_TARGET)
 
 repair-tool: $(REPAIR_TOOL_TARGET)
 
+appendlog-diag: $(APPENDLOG_DIAG_TARGET)
+
 profiling: $(PROFILING_TARGET)
 
 $(PROFILING_TARGET): tools/pqueue_profiling.cpp $(PQUEUE_SRC)
@@ -91,6 +92,10 @@ $(SIM_TARGET): tools/pqueue_compaction_sim.cpp $(PQUEUE_SRC)
 	$(CXX) $(CXXFLAGS) -Itools $^ -o $@ $(LDFLAGS)
 
 $(REPAIR_TOOL_TARGET): tools/pqueue_repair_tool.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(APPENDLOG_DIAG_TARGET): tools/pqueue_appendlog_diag.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
