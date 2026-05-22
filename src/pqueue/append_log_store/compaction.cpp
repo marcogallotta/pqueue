@@ -142,13 +142,14 @@ Status AppendLogStore::compactRange(const CompactionRange& range,
     bool did_rotate = false;
     std::uint32_t n_live = 0, n_in = 0, n_out = 0;
     auto logLine = [&](const char* status) {
-        Serial.printf(
-            "[compactRange] req=[%u,%u] hypoEnd=%u eff=[%u,%u] rotate=%u "
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "req=[%u,%u] hypoEnd=%u eff=[%u,%u] rotate=%u "
             "liveRecs=%u inSegs=%u outSegs=%u "
             "exist_ms=%u pre_scan_ms=%u pre_size_ms=%u "
             "rotate_ms=%u resolve_ms=%u collect_ms=%u "
             "pack_ms=%u write_ms=%u publish_ms=%u "
-            "cleanup_ms=%u replace_ms=%u total_ms=%u %s\n",
+            "cleanup_ms=%u replace_ms=%u total_ms=%u %s",
             range.startGen, range.endGen, hypo_e, eff_s, eff_e,
             static_cast<unsigned>(did_rotate),
             n_live, n_in, n_out,
@@ -156,7 +157,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range,
             ms_rotate, ms_resolve, ms_collect,
             ms_pack, ms_write, ms_publish,
             ms_cleanup, ms_replace, millis() - t_start, status);
-        Serial.flush();
+        diagnostic(Severity::Debug, Status{StatusCode::Ok, 0, buf}, "compactRange");
     };
     #define CR_T0(var) const std::uint32_t _t0_##var = millis()
     #define CR_T1(var) var = millis() - _t0_##var
@@ -653,7 +654,9 @@ void AppendLogStore::cleanupInputSegments(const CompactionRange& effectiveRange)
         const std::uint32_t sz = sit != sealedSegmentBytes_.end() ? sit->second : 0;
 #ifdef ARDUINO
         if (sz == 0 && sit == sealedSegmentBytes_.end()) {
-            Serial.printf("[cleanup] warn: gen=%u not in sealedSegmentBytes_\n", gen);
+            char buf[64];
+            snprintf(buf, sizeof(buf), "gen=%u not in sealedSegmentBytes", gen);
+            diagnostic(Severity::Warning, Status{StatusCode::DataCorrupt, 0, buf}, "cleanupInputSegments");
         }
 #endif
         if (f->removeFile(name).ok()) {
@@ -668,9 +671,12 @@ void AppendLogStore::cleanupInputSegments(const CompactionRange& effectiveRange)
 #endif
     }
 #ifdef ARDUINO
-    Serial.printf("[cleanup] deleted=%u failed=%u bytes=%u range=[%u,%u]\n",
-        nDeleted, nFailed, bytesFreed, effectiveRange.startGen, effectiveRange.endGen);
-    Serial.flush();
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "deleted=%u failed=%u bytes=%u range=[%u,%u]",
+            nDeleted, nFailed, bytesFreed, effectiveRange.startGen, effectiveRange.endGen);
+        diagnostic(Severity::Debug, Status{StatusCode::Ok, 0, buf}, "cleanupInputSegments");
+    }
 #endif
 }
 
@@ -708,9 +714,10 @@ void AppendLogStore::cleanupOneDanglingSegment() {
 #ifdef ARDUINO
         const std::uint32_t ms_total = millis() - t_cl_start;
         if (ms_total > 50) {
-            Serial.printf("[cleanup] none list_ms=%u scan_ms=%u total_ms=%u\n",
+            char buf[96];
+            snprintf(buf, sizeof(buf), "none list_ms=%u scan_ms=%u total_ms=%u",
                 ms_list, ms_scan, ms_total);
-            Serial.flush();
+            diagnostic(Severity::Debug, Status{StatusCode::Ok, 0, buf}, "cleanupDangling");
         }
 #endif
         return;
@@ -738,14 +745,13 @@ void AppendLogStore::cleanupOneDanglingSegment() {
 #ifdef ARDUINO
     const std::uint32_t ms_total = millis() - t_cl_start;
     if (ms_total > 50 || removed) {
-        if (removed) {
-            Serial.printf("[cleanup] deleted=%s list_ms=%u scan_ms=%u size_ms=%u remove_ms=%u total_ms=%u\n",
-                dangling.c_str(), ms_list, ms_scan, ms_size, ms_remove, ms_total);
-        } else {
-            Serial.printf("[cleanup] rm-failed=%s list_ms=%u scan_ms=%u size_ms=%u remove_ms=%u total_ms=%u\n",
-                dangling.c_str(), ms_list, ms_scan, ms_size, ms_remove, ms_total);
-        }
-        Serial.flush();
+        char buf[160];
+        snprintf(buf, sizeof(buf), "%s=%s list_ms=%u scan_ms=%u size_ms=%u remove_ms=%u total_ms=%u",
+            removed ? "deleted" : "rm-failed",
+            dangling.c_str(), ms_list, ms_scan, ms_size, ms_remove, ms_total);
+        diagnostic(removed ? Severity::Debug : Severity::Warning,
+            Status{removed ? StatusCode::Ok : StatusCode::RemoveFailed, 0, buf},
+            "cleanupDangling");
     }
 #endif
 }
