@@ -103,8 +103,10 @@ Upload/restore of append-log directories is deferred. If a genuine field case ar
 
 ## Staging
 
-1. Delete fixed-slot upload/restore semantics with the fixed-slot backend.
-2. No append-log upload/restore path is built.
-3. Build `pqueue_doctor` as the replacement read-only dump and on-device maintenance tool.
-4. Delete `esp32_spool_transfer` once `pqueue_doctor` covers dump and diagnosis. If the old tool cannot compile after fixed-slot removal, delete it then and make the loss explicit.
-5. Move the command set into production firmware once the interface is proven.
+1. No append-log upload/restore path is built.
+2. Build `pqueue_doctor` as the replacement read-only dump and on-device maintenance tool.
+3. Delete `esp32_spool_transfer` once `pqueue_doctor` covers dump and diagnosis.
+   Note: `tools/esp32_spool_transfer/` includes `pqueue/file_store.h`, which was deleted
+   in commit b457a6c. The tool does not build as of that commit. It is kept as a reference
+   for the protocol but is not functional.
+4. Move the command set into production firmware once the interface is proven.

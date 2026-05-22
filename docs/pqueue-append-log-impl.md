@@ -437,7 +437,3 @@ with larger flash queueing megabytes of data, compaction latency scales with
 queue size. More ranges (e.g. 8 ranges = 94B) would enable more subrange splits
 and tighter per-step latency bounds. Deferred: touches the manifest binary
 format, requires a version bump, and expands the test matrix significantly.
-
-**`compactIdle` not exposed on Outbox.** `pqueue::Outbox` and
-`pqueue::http::Outbox` do not expose `compactIdle`. Callers who need explicit
-idle compaction must use `Queue` directly.
