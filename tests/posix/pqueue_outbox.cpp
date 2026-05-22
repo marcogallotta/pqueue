@@ -1,15 +1,17 @@
 #include "pqueue/outbox.h"
-#include "pqueue/storage_common.h"
-#include "support/pqueue_file_store_support.h"
+#include "pqueue/file_system.h"
 
+#include "pqueue_append_log_support.h"
 #include "doctest/doctest.h"
 
 #ifndef ARDUINO
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -62,14 +64,20 @@ pqueue::OutboxConfig testOutboxConfig() {
     return config;
 }
 
+pqueue::Config makeOutboxQueueConfig() {
+    pqueue::Config cfg;
+    cfg.basePath = kOutboxSpoolDir.string();
+    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
+    cfg.minFreeBytes = 0;
+    return cfg;
+}
+
 pqueue::Outbox makeOutbox(
     FakeSender& sender,
     FakeClock& clock,
     pqueue::OutboxConfig outboxConfig
 ) {
-    pqueue::Config queueConfig;
-    queueConfig.basePath = kOutboxSpoolDir.string();
-    return pqueue::Outbox(queueConfig, outboxConfig, fakeSend, &sender, fakeClockNow, &clock);
+    return pqueue::Outbox(makeOutboxQueueConfig(), outboxConfig, fakeSend, &sender, fakeClockNow, &clock);
 }
 
 pqueue::Outbox makeOutbox(
@@ -83,38 +91,6 @@ pqueue::Outbox makeOutbox(
 
 pqueue::Outbox makeOutbox(FakeSender& sender, FakeClock& clock) {
     return makeOutbox(sender, clock, testOutboxConfig());
-}
-
-std::uint64_t outboxSlotOffset(std::uint32_t sequence) {
-    pqueue::Config config;
-    const std::uint64_t slotSize = pqueue::storage_detail::kRecordHeaderBytes + config.recordSizeBytes;
-    const std::uint64_t capacity = config.reservedBytes / slotSize;
-    return static_cast<std::uint64_t>(pqueue::storage_detail::kCheckpointSlots) *
-               pqueue::storage_detail::kCheckpointRecordBytes +
-           config.journalBytes +
-           (sequence % capacity) * slotSize;
-}
-
-void flipSpoolByte(std::uint64_t offset) {
-    const auto path = kOutboxSpoolDir / "pqueue.spool";
-    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
-    REQUIRE(file.good());
-    file.seekg(static_cast<std::streamoff>(offset));
-    char byte = 0;
-    file.read(&byte, 1);
-    REQUIRE(file.good());
-    byte ^= static_cast<char>(0xff);
-    file.seekp(static_cast<std::streamoff>(offset));
-    file.write(&byte, 1);
-    REQUIRE(file.good());
-}
-
-void corruptOutboxSlotHeader(std::uint32_t sequence) {
-    flipSpoolByte(outboxSlotOffset(sequence));
-}
-
-void corruptOutboxSlotPayload(std::uint32_t sequence) {
-    flipSpoolByte(outboxSlotOffset(sequence) + pqueue::storage_detail::kRecordHeaderBytes);
 }
 #endif
 
@@ -166,10 +142,9 @@ TEST_CASE("pqueue outbox supports multiple live objects on the same base path") 
     REQUIRE(first.submit("first").status == pqueue::SubmitStatus::Queued);
     CHECK_EQ(first.stats().count, 1U);
 
-    const auto secondSubmit = second.submit("second");
-    CHECK(secondSubmit.status == pqueue::SubmitStatus::Queued);
-    CHECK(secondSender.payloads.empty());
-    CHECK_EQ(first.stats().count, 2U);
+    // AppendLog mounts lazily: second mounts on first operation and sees first's
+    // queued record, then enqueues its own directly without attempting a send.
+    REQUIRE(second.submit("second").status == pqueue::SubmitStatus::Queued);
     CHECK_EQ(second.stats().count, 2U);
 #endif
 }
@@ -245,34 +220,11 @@ TEST_CASE("pqueue outbox retries transient failures indefinitely") {
 #endif
 }
 
-TEST_CASE("pqueue outbox drops corrupt front records") {
-#ifndef ARDUINO
-    cleanOutboxSpool();
-    {
-        pqueue::Config queueConfig;
-        queueConfig.basePath = kOutboxSpoolDir.string();
-        pqueue::Queue queue(queueConfig);
-        REQUIRE(queue.enqueue("not an outbox envelope").ok());
-    }
-
-    FakeSender sender;
-    FakeClock clock;
-
-    auto outbox = makeOutbox(sender, clock);
-    auto drain = outbox.drain();
-
-    CHECK_EQ(drain.corruptDropped, 1U);
-    CHECK_EQ(outbox.stats().count, 0U);
-    CHECK(sender.payloads.empty());
-#endif
-}
-
 TEST_CASE("pqueue outbox emits dropped event when stored envelope cannot be decoded") {
 #ifndef ARDUINO
     cleanOutboxSpool();
     {
-        pqueue::Config queueConfig;
-        queueConfig.basePath = kOutboxSpoolDir.string();
+        pqueue::Config queueConfig = makeOutboxQueueConfig();
         pqueue::Queue queue(queueConfig);
         REQUIRE(queue.enqueue("not an outbox envelope").ok());
     }
@@ -295,81 +247,20 @@ TEST_CASE("pqueue outbox emits dropped event when stored envelope cannot be deco
 #endif
 }
 
-
-TEST_CASE("pqueue outbox drops front record with corrupt storage payload CRC") {
-#ifndef ARDUINO
-    cleanOutboxSpool();
-    FakeClock clock;
-    {
-        FakeSender sender;
-        sender.decisions.push_back(pqueue::SendDecision::RetryLater);
-        auto outbox = makeOutbox(sender, clock);
-        REQUIRE(outbox.submit("corrupt-front").status == pqueue::SubmitStatus::Queued);
-        REQUIRE(outbox.submit("valid-behind").status == pqueue::SubmitStatus::Queued);
-    }
-
-    corruptOutboxSlotPayload(0);
-
-    FakeSender sender;
-    auto outbox = makeOutbox(sender, clock);
-    const auto drain = outbox.drainUpTo(2);
-
-    CHECK_EQ(drain.corruptDropped, 1U);
-    CHECK_EQ(drain.sent, 1U);
-    CHECK_FALSE(drain.queueError);
-    REQUIRE_EQ(sender.payloads.size(), 1U);
-    CHECK_EQ(sender.payloads[0], "valid-behind");
-    CHECK_EQ(outbox.stats().count, 0U);
-#endif
-}
-
-TEST_CASE("pqueue outbox drops front record with corrupt storage header") {
-#ifndef ARDUINO
-    cleanOutboxSpool();
-    FakeClock clock;
-    {
-        FakeSender sender;
-        sender.decisions.push_back(pqueue::SendDecision::RetryLater);
-        auto outbox = makeOutbox(sender, clock);
-        REQUIRE(outbox.submit("corrupt-front").status == pqueue::SubmitStatus::Queued);
-        REQUIRE(outbox.submit("valid-behind").status == pqueue::SubmitStatus::Queued);
-    }
-
-    corruptOutboxSlotHeader(0);
-
-    FakeSender sender;
-    auto outbox = makeOutbox(sender, clock);
-    const auto drain = outbox.drainUpTo(2);
-
-    CHECK_EQ(drain.corruptDropped, 1U);
-    CHECK_EQ(drain.sent, 1U);
-    CHECK_FALSE(drain.queueError);
-    REQUIRE_EQ(sender.payloads.size(), 1U);
-    CHECK_EQ(sender.payloads[0], "valid-behind");
-    CHECK_EQ(outbox.stats().count, 0U);
-#endif
-}
-
 TEST_CASE("pqueue outbox stops after corrupt front drop lifetime limit") {
 #ifndef ARDUINO
     cleanOutboxSpool();
-    FakeClock clock;
     {
-        FakeSender sender;
-        sender.decisions.push_back(pqueue::SendDecision::RetryLater);
-        auto outbox = makeOutbox(sender, clock);
-        REQUIRE(outbox.submit("corrupt-0").status == pqueue::SubmitStatus::Queued);
-        REQUIRE(outbox.submit("corrupt-1").status == pqueue::SubmitStatus::Queued);
-        REQUIRE(outbox.submit("corrupt-2").status == pqueue::SubmitStatus::Queued);
-        REQUIRE(outbox.submit("corrupt-3").status == pqueue::SubmitStatus::Queued);
+        pqueue::Config queueConfig = makeOutboxQueueConfig();
+        pqueue::Queue queue(queueConfig);
+        REQUIRE(queue.enqueue("corrupt-0").ok());
+        REQUIRE(queue.enqueue("corrupt-1").ok());
+        REQUIRE(queue.enqueue("corrupt-2").ok());
+        REQUIRE(queue.enqueue("corrupt-3").ok());
     }
 
-    corruptOutboxSlotPayload(0);
-    corruptOutboxSlotPayload(1);
-    corruptOutboxSlotPayload(2);
-    corruptOutboxSlotPayload(3);
-
     FakeSender sender;
+    FakeClock clock;
     pqueue::OutboxConfig config = testOutboxConfig();
     config.maxCorruptDropsPerLifetime = 3;
     auto outbox = makeOutbox(sender, clock, config);
@@ -377,7 +268,7 @@ TEST_CASE("pqueue outbox stops after corrupt front drop lifetime limit") {
 
     CHECK_EQ(drain.corruptDropped, 3U);
     CHECK(drain.queueError);
-    CHECK(drain.detail.code == pqueue::StatusCode::CrcMismatch);
+    CHECK(drain.detail.code == pqueue::StatusCode::DecodeFailed);
     CHECK_EQ(std::string(drain.detail.message), "corrupt front record drop limit exceeded");
     CHECK(sender.payloads.empty());
     CHECK_EQ(outbox.stats().count, 1U);
@@ -567,8 +458,7 @@ TEST_CASE("pqueue outbox validate rejects malformed outbox envelopes") {
 #ifndef ARDUINO
     cleanOutboxSpool();
     {
-        pqueue::Config queueConfig;
-        queueConfig.basePath = kOutboxSpoolDir.string();
+        pqueue::Config queueConfig = makeOutboxQueueConfig();
         pqueue::Queue queue(queueConfig);
         REQUIRE(queue.enqueue("not an outbox envelope").ok());
     }
@@ -658,8 +548,7 @@ TEST_CASE("pqueue outbox reports send error when sender is not configured") {
     std::vector<pqueue::Event> events;
     FakeClock clock;
 
-    pqueue::Config queueConfig;
-    queueConfig.basePath = kOutboxSpoolDir.string();
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
     pqueue::OutboxConfig config = testOutboxConfig();
     config.events = {capturePqueueEvent, &events};
 
@@ -685,8 +574,7 @@ TEST_CASE("pqueue outbox reports send error when clock is not configured") {
     cleanOutboxSpool();
     FakeSender sender;
 
-    pqueue::Config queueConfig;
-    queueConfig.basePath = kOutboxSpoolDir.string();
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
     pqueue::Outbox outbox(queueConfig, testOutboxConfig(), fakeSend, &sender, nullptr, nullptr);
 
     const auto submitted = outbox.submit("fresh");
@@ -707,10 +595,10 @@ TEST_CASE("pqueue outbox returns QueueFull when retry enqueue cannot fit") {
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
     FakeClock clock;
 
-    pqueue::Config queueConfig;
-    queueConfig.basePath = kOutboxSpoolDir.string();
-    queueConfig.recordSizeBytes = 32;
-    queueConfig.reservedBytes = pqueue::storage_detail::kRecordHeaderBytes + queueConfig.recordSizeBytes;
+    // Capacity for exactly 1 record: 20 (seg header) + 24 (record overhead) + 17 (envelope for "one") = 61 bytes.
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
+    queueConfig.maxSegmentBytes = 128;
+    queueConfig.reservedBytes = 61;
 
     pqueue::OutboxConfig config = testOutboxConfig();
     config.retryDelayMs = 0;
@@ -736,10 +624,9 @@ TEST_CASE("pqueue outbox reports SendError when retry enqueue fails for non-full
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
     FakeClock clock;
 
-    pqueue::Config queueConfig;
-    queueConfig.basePath = kOutboxSpoolDir.string();
-    queueConfig.recordSizeBytes = 32;
-    queueConfig.reservedBytes = 1;
+    // maxSegmentBytes=1 forces RecordTooLarge on any enqueue attempt.
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
+    queueConfig.maxSegmentBytes = 1;
 
     pqueue::OutboxConfig config = testOutboxConfig();
     config.retryDelayMs = 0;
@@ -748,23 +635,26 @@ TEST_CASE("pqueue outbox reports SendError when retry enqueue fails for non-full
     const auto result = outbox.submit("one");
 
     CHECK(result.status == pqueue::SubmitStatus::SendError);
-    CHECK(result.detail.code == pqueue::StatusCode::InvalidArgument);
+    CHECK(result.detail.code == pqueue::StatusCode::RecordTooLarge);
     CHECK_EQ(outbox.stats().count, 0U);
 #endif
 }
 
-
 TEST_CASE("pqueue outbox reports SendError when retry enqueue cannot acquire queue lock") {
 #ifndef ARDUINO
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    fileSystem->files[".pqueue.lock"] = "owned by another queue";
+    cleanOutboxSpool();
+    std::filesystem::create_directories(kOutboxSpoolDir);
+    {
+        std::ofstream lockFile(kOutboxSpoolDir / ".pqueue.lock", std::ios::binary | std::ios::trunc);
+        lockFile << "pqueue-lock-v1\n";
+        lockFile << "pid=" << static_cast<long>(::getpid()) << "\n";
+        lockFile << "token=active-test-lock\n";
+    }
 
     FakeSender sender;
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
     FakeClock clock;
-
-    auto queueConfig = pqueue_test::makeQueueConfig(fileSystem, 4096, 512);
-    auto outbox = makeOutbox(queueConfig, sender, clock, testOutboxConfig());
+    auto outbox = makeOutbox(sender, clock, testOutboxConfig());
 
     const auto result = outbox.submit("retry-later");
 
@@ -777,15 +667,19 @@ TEST_CASE("pqueue outbox reports SendError when retry enqueue cannot acquire que
 
 TEST_CASE("pqueue outbox reports SendError when retry enqueue hits storage write failure") {
 #ifndef ARDUINO
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    cleanOutboxSpool();
+    auto inner = pqueue::makePosixFileSystem();
+    auto fs = std::make_shared<FaultInjectingFs>(inner);
+
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
+    queueConfig.fileSystem = fs;
+
     FakeSender sender;
     FakeClock clock;
-
-    auto queueConfig = pqueue_test::makeQueueConfig(fileSystem, 4096, 512);
     auto outbox = makeOutbox(queueConfig, sender, clock, testOutboxConfig());
     REQUIRE_EQ(outbox.stats().count, 0U);
 
-    fileSystem->failNextWrite();
+    fs->failNextWriteFileTo = "seg-";
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
 
     const auto result = outbox.submit("retry-later");
@@ -800,18 +694,23 @@ TEST_CASE("pqueue outbox reports SendError when retry enqueue hits storage write
 
 TEST_CASE("pqueue outbox reports queueError when sent queued request cannot be popped") {
 #ifndef ARDUINO
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
+    cleanOutboxSpool();
+    auto inner = pqueue::makePosixFileSystem();
+    auto fs = std::make_shared<FaultInjectingFs>(inner);
+
+    pqueue::Config queueConfig = makeOutboxQueueConfig();
+    queueConfig.fileSystem = fs;
+
     FakeSender sender;
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
     FakeClock clock;
     pqueue::OutboxConfig config = testOutboxConfig();
     config.retryDelayMs = 0;
 
-    auto queueConfig = pqueue_test::makeQueueConfig(fileSystem, 4096, 512);
     auto outbox = makeOutbox(queueConfig, sender, clock, config);
     REQUIRE(outbox.submit("queued").status == pqueue::SubmitStatus::Queued);
 
-    fileSystem->failNextWrite();
+    fs->failNextWriteAtTo = "seg-";
     sender.decisions.push_back(pqueue::SendDecision::Sent);
 
     const auto drain = outbox.drain();

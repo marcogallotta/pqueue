@@ -1,18 +1,55 @@
 #include "pqueue/queue.h"
-#include "support/pqueue_file_store_support.h"
 
 #include "doctest/doctest.h"
 
 #ifndef ARDUINO
 
+#include <algorithm>
+#include <filesystem>
 #include <string>
 #include <vector>
 
-TEST_CASE("queue RejectNewest returns QueueFull when full (default)") {
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    pqueue::Queue queue(pqueue_test::makeQueueConfig(fileSystem));
+namespace {
 
-    // Fill to capacity (160 bytes / 52 bytes per slot = 3 records)
+const std::filesystem::path kSpoolDir = "build/pqueue-spools/pqueue_full_queue_policy_spool";
+
+void cleanSpool() {
+    std::error_code ec;
+    std::filesystem::remove_all(kSpoolDir, ec);
+}
+
+// maxSegmentBytes=50: each record rotates into a sealed segment before the next one.
+// reservedBytes=179: capacity for exactly 3 records of the payloads used below.
+// DropOldest relies on compactOneSegment reclaiming the evicted record's dead bytes
+// from sealed segments; single-segment queues cannot compact and would stall.
+pqueue::Config makeConfig(pqueue::FullQueuePolicy policy = pqueue::FullQueuePolicy::RejectNewest) {
+    pqueue::Config cfg;
+    cfg.basePath = kSpoolDir.string();
+    cfg.storeLayout = pqueue::StoreLayout::AppendLog;
+    cfg.maxSegmentBytes = 50;
+    cfg.reservedBytes = 179;
+    cfg.minFreeBytes = 0;
+    cfg.fullQueuePolicy = policy;
+    return cfg;
+}
+
+struct CapturedEvent {
+    pqueue::EventKind kind;
+    pqueue::Severity severity;
+    pqueue::StatusCode code;
+};
+
+void captureEvent(const pqueue::Event& event, void* user) {
+    auto* events = static_cast<std::vector<CapturedEvent>*>(user);
+    events->push_back({event.kind, event.severity, event.status.code});
+}
+
+} // namespace
+
+TEST_CASE("queue RejectNewest returns QueueFull when full (default)") {
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
     REQUIRE(queue.enqueue("one").ok());
     REQUIRE(queue.enqueue("two").ok());
     REQUIRE(queue.enqueue("three").ok());
@@ -23,10 +60,8 @@ TEST_CASE("queue RejectNewest returns QueueFull when full (default)") {
 }
 
 TEST_CASE("queue DropOldest evicts front record when full") {
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem);
-    config.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
-    pqueue::Queue queue(config);
+    cleanSpool();
+    pqueue::Queue queue(makeConfig(pqueue::FullQueuePolicy::DropOldest));
 
     REQUIRE(queue.enqueue("one").ok());
     REQUIRE(queue.enqueue("two").ok());
@@ -41,12 +76,11 @@ TEST_CASE("queue DropOldest evicts front record when full") {
 }
 
 TEST_CASE("queue DropOldest emits warning event on eviction") {
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem);
-    config.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
+    cleanSpool();
+    pqueue::Config config = makeConfig(pqueue::FullQueuePolicy::DropOldest);
 
-    std::vector<pqueue_test::CapturedEvent> events;
-    config.events.sink = pqueue_test::captureEvent;
+    std::vector<CapturedEvent> events;
+    config.events.sink = captureEvent;
     config.events.user = &events;
 
     pqueue::Queue queue(config);
@@ -58,17 +92,15 @@ TEST_CASE("queue DropOldest emits warning event on eviction") {
 
     REQUIRE(queue.enqueue("four").ok());
 
-    const bool hasEvictionWarning = std::any_of(events.begin(), events.end(), [](const pqueue_test::CapturedEvent& e) {
+    const bool hasEvictionWarning = std::any_of(events.begin(), events.end(), [](const CapturedEvent& e) {
         return e.severity == pqueue::Severity::Warning && e.code == pqueue::StatusCode::QueueFull;
     });
     CHECK(hasEvictionWarning);
 }
 
 TEST_CASE("queue DropOldest preserves FIFO order after evictions") {
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem);
-    config.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
-    pqueue::Queue queue(config);
+    cleanSpool();
+    pqueue::Queue queue(makeConfig(pqueue::FullQueuePolicy::DropOldest));
 
     REQUIRE(queue.enqueue("a").ok());
     REQUIRE(queue.enqueue("b").ok());
@@ -86,10 +118,8 @@ TEST_CASE("queue DropOldest preserves FIFO order after evictions") {
 }
 
 TEST_CASE("queue DropOldest on empty queue enqueues normally") {
-    auto fileSystem = pqueue_test::makeFakeFileSystem();
-    pqueue::Config config = pqueue_test::makeQueueConfig(fileSystem);
-    config.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
-    pqueue::Queue queue(config);
+    cleanSpool();
+    pqueue::Queue queue(makeConfig(pqueue::FullQueuePolicy::DropOldest));
 
     CHECK(queue.enqueue("only").ok());
     CHECK_EQ(queue.stats().count, 1U);
