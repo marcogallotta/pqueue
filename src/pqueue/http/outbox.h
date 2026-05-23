@@ -28,12 +28,13 @@ enum class TransportError {
 
 struct Response {
     Response() = default;
-    Response(int statusCode, TransportError error, std::string body = {})
-        : statusCode(statusCode), error(error), body(body) {}
+    Response(int statusCode, TransportError error, std::string body = {}, std::uint32_t retryAfterMs = 0)
+        : statusCode(statusCode), error(error), body(body), retryAfterMs(retryAfterMs) {}
 
     int statusCode = kNoStatusCode;
     TransportError error = TransportError::Unknown;
     std::string body;
+    std::uint32_t retryAfterMs = 0; // populated by transport when server sends Retry-After
 };
 
 struct TransportConfig {

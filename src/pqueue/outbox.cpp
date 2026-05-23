@@ -1,5 +1,6 @@
 #include "outbox.h"
 
+#include <cstdint>
 #include <limits>
 #include <utility>
 
@@ -85,13 +86,17 @@ Outbox::Outbox(
     SendCallback send,
     void* sendContext,
     ClockCallback clock,
-    void* clockContext
+    void* clockContext,
+    RandCallback rand,
+    void* randContext
 ) : queue_(queueConfig),
     config_(config),
     send_(send),
     sendContext_(sendContext),
     clock_(clock),
-    clockContext_(clockContext) {}
+    clockContext_(clockContext),
+    rand_(rand),
+    randContext_(randContext) {}
 
 Outbox::Outbox(
     Config queueConfig,
@@ -99,13 +104,17 @@ Outbox::Outbox(
     RawSendCallback send,
     void* sendContext,
     ClockCallback clock,
-    void* clockContext
+    void* clockContext,
+    RandCallback rand,
+    void* randContext
 ) : queue_(queueConfig),
     config_(config),
     rawSend_(send),
     rawSendContext_(sendContext),
     clock_(clock),
-    clockContext_(clockContext) {}
+    clockContext_(clockContext),
+    rand_(rand),
+    randContext_(randContext) {}
 
 void Outbox::emit(Event event) const {
     config_.events.emit(event);
@@ -140,6 +149,39 @@ void Outbox::emitRequestEvent(
     event.queueCount = queueCount;
     event.remainingMs = remainingMs;
     emit(event);
+}
+
+std::uint32_t Outbox::computeRetryDelay(std::uint8_t exponent, std::uint32_t serverHintMs) const {
+    std::uint32_t base;
+    if (serverHintMs > 0) {
+        base = serverHintMs < config_.maxRetryDelayMs ? serverHintMs : config_.maxRetryDelayMs;
+    } else {
+        std::uint64_t v = config_.initialRetryDelayMs;
+        for (std::uint8_t i = 0; i < exponent && v < config_.maxRetryDelayMs; ++i) {
+            v *= 2;
+        }
+        base = v < config_.maxRetryDelayMs ? static_cast<std::uint32_t>(v) : config_.maxRetryDelayMs;
+    }
+    if (rand_ == nullptr || config_.jitterPct == 0 || base == 0) {
+        return base;
+    }
+    const std::uint64_t jitterRange64 = static_cast<std::uint64_t>(base) * config_.jitterPct / 100;
+    if (jitterRange64 == 0) {
+        return base;
+    }
+    const std::uint32_t jitterRange = jitterRange64 > std::numeric_limits<std::uint32_t>::max()
+        ? std::numeric_limits<std::uint32_t>::max()
+        : static_cast<std::uint32_t>(jitterRange64);
+    const std::uint64_t randRange64 = static_cast<std::uint64_t>(jitterRange) * 2;
+    const std::uint32_t randRange = randRange64 > std::numeric_limits<std::uint32_t>::max()
+        ? std::numeric_limits<std::uint32_t>::max()
+        : static_cast<std::uint32_t>(randRange64);
+    const std::uint32_t sample = rand_(randContext_, randRange);
+    if (sample < jitterRange) {
+        return sample < base ? base - sample : 0;
+    }
+    const std::uint32_t add = sample - jitterRange;
+    return add <= config_.maxRetryDelayMs - base ? base + add : config_.maxRetryDelayMs;
 }
 
 SendResult Outbox::dispatchSend(const std::string& payload, const RetryState& retry) {
@@ -188,8 +230,9 @@ SubmitResult Outbox::submit(Span payload) {
         case SendDecision::RetryLater: {
             const auto queued = enqueueRecord(payloadStr, 1);
             if (queued.status == SubmitStatus::Queued) {
-                setFrontCooldown(clock_(clockContext_) + config_.retryDelayMs);
-                emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, config_.retryDelayMs, 1);
+                const std::uint32_t delayMs = computeRetryDelay(0, result.retryAfterMs);
+                setFrontCooldown(clock_(clockContext_) + delayMs);
+                emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, delayMs, 1);
             }
             return queued;
         }
@@ -359,8 +402,9 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
                 emitDiagnostic(Severity::Error, st, "drain");
                 return result;
             }
-            setFrontCooldown(nowMs + config_.retryDelayMs);
-            emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "drain", nextAttempts, config_.retryDelayMs);
+            const std::uint32_t delayMs = computeRetryDelay(decoded.attempts, sendResult.retryAfterMs);
+            setFrontCooldown(nowMs + delayMs);
+            emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "drain", nextAttempts, delayMs);
             return result;
         }
     }

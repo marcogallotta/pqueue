@@ -31,7 +31,7 @@ static pqueue::http::Config makeConfig() {
     cfg.queue.maxSegments     = 16;
 
     // Outbox retry policy
-    cfg.outbox.retryDelayMs              = 15000;  // 15 s between retry attempts
+    cfg.outbox.initialRetryDelayMs       = 15000;  // 15 s initial retry delay (doubles each attempt)
     cfg.outbox.maxDrainAttemptsPerSecond = 2;
 
     cfg.baseUrl = "https://api.example.com";

@@ -23,12 +23,14 @@ bool validateHttpRequestPayload(void*, const std::string& payload, ValidationIss
     return false;
 }
 
+bool isPermanentErrorStatus(int statusCode) {
+    return statusCode == 501 || statusCode == 505 || statusCode == 508;
+}
+
 bool isRetryableStatus(int statusCode) {
-    // Simple v1 policy: retry all server-side failures, plus explicit client-side throttling/timeouts.
-    // TODO: respect Retry-After for 429 and 503.
-    // TODO: add exponential backoff with jitter for repeated 5xx/transport failures.
-    // TODO: consider special handling/alerts for 501/505/506/508/510 server capability/config errors.
-    // TODO: consider app-configurable handling for 409 and oversized payloads such as 413.
+    if (isPermanentErrorStatus(statusCode)) {
+        return false;
+    }
     return statusCode == 408 ||
            statusCode == 429 ||
            (statusCode >= 500 && statusCode < 600);
@@ -159,7 +161,7 @@ SendResult Outbox::sendStoredRequest(const std::string& encodedRequest, const Re
         notifyDrop(&request, DropReason::ServerRejected, &response);
     }
 
-    return {decision};
+    return {decision, response.retryAfterMs};
 }
 
 void Outbox::notifyResponse(const RequestEnvelope& request, const Response& response) const {

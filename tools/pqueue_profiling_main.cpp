@@ -160,7 +160,7 @@ pqueue::http::Config makeHttpConfig(std::shared_ptr<CountingFileSystem> fs, uint
     pqueue::http::Config cfg;
     cfg.queue = makeQueueConfig(fs, recordSizeBytes);
     cfg.outbox.maxDrainAttemptsPerSecond = 1000;
-    cfg.outbox.retryDelayMs = 1;
+    cfg.outbox.initialRetryDelayMs = 1;
     cfg.baseUrl = "https://example.test";
     return cfg;
 }
