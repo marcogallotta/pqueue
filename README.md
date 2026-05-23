@@ -241,6 +241,6 @@ DONE                      -- exit (reboots into maintenance firmware)
 - `examples/outbox.cpp` -- runnable POSIX example: store-and-forward with retry
 - `examples/esp32_http_outbox/main.cpp` -- ESP32 firmware reference sketch
 - `docs/benchmark.md` -- benchmark and CI regression workflow
-- `data/benchmark-results-esp32s3.md` -- POSIX structural benchmark baseline and interpretation
+- `data/benchmark-results-posix.md` -- POSIX structural benchmark baseline and interpretation
 - `tools/pqueue_benchmark.cpp` -- POSIX benchmark source
 - `tools/pqueue_compaction_sim.cpp` -- compaction correctness sweep

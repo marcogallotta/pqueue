@@ -503,7 +503,7 @@ make -j12 benchmark
 make benchmark-markdown
 ```
 
-See `data/benchmark-results-esp32s3.md` for the baseline and interpretation of each
+See `data/benchmark-results-posix.md` for the baseline and interpretation of each
 scenario. The key metric for idle compaction is `hot_compactions = 0`, which confirms
 the clean-storage invariant holds for your workload parameters.
 

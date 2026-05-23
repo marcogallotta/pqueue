@@ -11,7 +11,7 @@ import json
 import sys
 
 NUMERIC = [
-    "writeFile", "writeAt", "readAt", "remove",
+    "writeFile", "writeAt", "readAt", "remove", "listFiles",
     "write_amp", "read_bpp",
     "idle_steps", "idle_noops", "hot_compactions", "cap_exhausted",
 ]

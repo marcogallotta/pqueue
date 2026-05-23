@@ -157,7 +157,7 @@ struct BenchmarkResult {
     // bytes written/read per payload byte / per record
     double write_amp = 0.0, read_bpp = 0.0;
     // I/O op counts, per-run average across repeats
-    std::uint64_t writeFile = 0, writeAt = 0, readAt = 0, remove = 0;
+    std::uint64_t writeFile = 0, writeAt = 0, readAt = 0, remove = 0, listFiles = 0;
     // idle compaction specific (zero for non-idle scenarios)
     std::uint32_t idle_steps      = 0;
     std::uint32_t idle_noops      = 0;
@@ -231,7 +231,7 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
     SampleSet samples;
 
     std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
-    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0, totalListFiles = 0;
     bool anyFail = false;
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
@@ -257,6 +257,7 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
         totalWriteAt      += after.writeAt      - before.writeAt;
         totalReadAt       += after.readAt       - before.readAt;
         totalRemove       += after.removeFile   - before.removeFile;
+        totalListFiles    += after.listFiles    - before.listFiles;
     }
 
     const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
@@ -280,6 +281,7 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
     res.writeAt      = totalWriteAt   / repeat;
     res.readAt       = totalReadAt    / repeat;
     res.remove       = totalRemove    / repeat;
+    res.listFiles    = totalListFiles / repeat;
     res.ok           = !anyFail;
     return res;
 }
@@ -291,7 +293,7 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
     SampleSet samples;
 
     std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
-    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0, totalListFiles = 0;
     bool anyFail = false;
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
@@ -322,6 +324,7 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
         totalWriteAt      += after.writeAt      - before.writeAt;
         totalReadAt       += after.readAt       - before.readAt;
         totalRemove       += after.removeFile   - before.removeFile;
+        totalListFiles    += after.listFiles    - before.listFiles;
     }
 
     const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
@@ -345,6 +348,7 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
     res.writeAt      = totalWriteAt   / repeat;
     res.readAt       = totalReadAt    / repeat;
     res.remove       = totalRemove    / repeat;
+    res.listFiles    = totalListFiles / repeat;
     res.ok           = !anyFail;
     return res;
 }
@@ -354,7 +358,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
     SampleSet samples;
 
     std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
-    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0, totalListFiles = 0;
     bool anyFail = false;
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
@@ -388,6 +392,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
         totalWriteAt      += after.writeAt      - before.writeAt;
         totalReadAt       += after.readAt       - before.readAt;
         totalRemove       += after.removeFile   - before.removeFile;
+        totalListFiles    += after.listFiles    - before.listFiles;
     }
 
     BenchmarkResult res;
@@ -414,6 +419,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
     res.writeAt      = totalWriteAt   / repeat;
     res.readAt       = totalReadAt    / repeat;
     res.remove       = totalRemove    / repeat;
+    res.listFiles    = totalListFiles / repeat;
     res.ok           = !anyFail;
     return res;
 }
@@ -507,7 +513,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
     SampleSet samples;
 
     std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
-    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0, totalListFiles = 0;
     bool anyFail = false;
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
@@ -543,6 +549,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
         totalWriteAt      += after.writeAt      - before.writeAt;
         totalReadAt       += after.readAt       - before.readAt;
         totalRemove       += after.removeFile   - before.removeFile;
+        totalListFiles    += after.listFiles    - before.listFiles;
     }
 
     const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
@@ -567,6 +574,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
     res.writeAt      = totalWriteAt   / repeat;
     res.readAt       = totalReadAt    / repeat;
     res.remove       = totalRemove    / repeat;
+    res.listFiles    = totalListFiles / repeat;
     res.ok           = !anyFail;
     return res;
 }
@@ -598,9 +606,10 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
                     (unsigned long long)r.p50_us, (unsigned long long)r.p90_us,
                     (unsigned long long)r.p99_us, (unsigned long long)r.max_us);
         std::printf("      \"write_amp\": %.3f, \"read_bpp\": %.1f,\n", r.write_amp, r.read_bpp);
-        std::printf("      \"writeFile\": %llu, \"writeAt\": %llu, \"readAt\": %llu, \"remove\": %llu",
+        std::printf("      \"writeFile\": %llu, \"writeAt\": %llu, \"readAt\": %llu, \"remove\": %llu, \"listFiles\": %llu",
                     (unsigned long long)r.writeFile, (unsigned long long)r.writeAt,
-                    (unsigned long long)r.readAt, (unsigned long long)r.remove);
+                    (unsigned long long)r.readAt, (unsigned long long)r.remove,
+                    (unsigned long long)r.listFiles);
         if (r.scenario == "idle_compaction") {
             std::printf(",\n      \"idle_steps\": %u, \"idle_noops\": %u, "
                         "\"hot_compactions\": %u, \"cap_exhausted\": %u",
@@ -770,12 +779,12 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Enqueue\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt"),L("listFiles")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
                              D(fmtF(r->write_amp)),
-                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
+                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt)), R(fmtU64(r->listFiles))});
             printTable(t);
             std::printf("\n");
         }
@@ -788,11 +797,12 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Peek + pop\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("writeAt"),L("readAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("writeAt"),L("readAt"),L("listFiles")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->read_bpp)), R(fmtU64(r->writeAt)), R(fmtU64(r->readAt))});
+                             D(fmtF(r->read_bpp)), R(fmtU64(r->writeAt)), R(fmtU64(r->readAt)),
+                             R(fmtU64(r->listFiles))});
             printTable(t);
             std::printf("\n");
         }
@@ -805,12 +815,12 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Outbox offline submit\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt"),L("listFiles")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
                              D(fmtF(r->write_amp)),
-                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
+                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt)), R(fmtU64(r->listFiles))});
             printTable(t);
             std::printf("\n");
         }
@@ -823,11 +833,11 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Mount\n\nrepeat=%u, payload=256B fixed%s\n\n",
                         repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("records"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("readAt")});
+            t.push_back({L("records"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("readAt"),L("listFiles")});
             for (const auto* r : rows)
                 t.push_back({R(fmtU32(r->records)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->read_bpp)), R(fmtU64(r->readAt))});
+                             D(fmtF(r->read_bpp)), R(fmtU64(r->readAt)), R(fmtU64(r->listFiles))});
             printTable(t);
             std::printf("\n");
         }
