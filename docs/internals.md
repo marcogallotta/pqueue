@@ -621,3 +621,87 @@ practice.
 accumulates until the next enqueue or explicit `compactIdle`. An idle-hint
 callback -- fired after a drain empties the queue -- would let the application
 know compaction is productive without coupling the timing to the write path.
+
+---
+
+## Design decisions
+
+| Decision | Outcome |
+|---|---|
+| Manifest publish on rotation vs self-describing tail chain | Manifest publish on rotation. Tail chain complexity not justified by measured cost. |
+| Manifest stores queue head/tail/count | No. Layout only. Head/tail/count come from replay. |
+| Target segment size | 4 KB. Measured flush cost cliff at 4 KB -> 8 KB makes this the clear winner (see LittleFS timing reference below). |
+| Manifest size target | <= 64 B. LittleFS inline file threshold -- staying below it saves ~7 ms per rollover. |
+| Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful -- dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
+| Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behavior wins. |
+| Event frame format | Shared frame with a type field (ENQUEUE/POP/REWRITE). Exact layout is an implementation detail. |
+
+---
+
+## LittleFS timing reference (ESP32-S3)
+
+Measured with the on-device profiler (`pqueue_profiling_main.cpp`). These are
+the authoritative numbers for design decisions on the ESP32-S3. Other devices
+will scale proportionally -- the ratios and the 4 KB block-size cliff hold
+across LittleFS targets.
+
+### Flush cost curve (128 B write, open/flush/close per iter)
+
+| File size | Open (us) | Flush (us) | Total (us) | Flush w/ persistent handle |
+|---|---|---|---|---|
+| 512 B | 10,604 | 13,150 | 23,849 | 9,361 |
+| 1 KB | 17,547 | 35,823 | 53,465 | 31,736 |
+| 2 KB | 14,174 | 41,725 | 55,993 | 36,077 |
+| 4 KB | 14,395 | 46,904 | 61,393 | 45,175 |
+| 8 KB | 9,004 | 78,672 | 87,772 | 77,632 |
+| 16 KB | 13,780 | 74,009 | 87,884 | 75,836 |
+| 32 KB | 12,824 | 75,073 | 87,992 | 76,551 |
+
+The cliff between 4 KB and 8 KB is the LittleFS block size boundary. It is
+structural, not tunable.
+
+### writeAt breakdown (512 B file, open/write/flush/close)
+
+| Phase | Cost (us) |
+|---|---|
+| open | 10,844 |
+| write | 60 |
+| flush | 13,529 |
+| close | 95 |
+| total | 24,528 |
+
+The write itself is trivially fast. Open and flush dominate.
+
+### readAt breakdown (512 B file)
+
+| Phase | Cost (us) |
+|---|---|
+| open | 4,628 |
+| read | 32 |
+| close | 71 |
+| total | 4,732 |
+
+### Rotation cost (20 B segment header + manifest publish, dual-manifest A/B)
+
+| Manifest size | Seg create (us) | Manifest pub (us) | Rotation total (us) |
+|---|---|---|---|
+| 64 B | 19,358 | 25,732 | 45,090 |
+| 128 B | 19,358 | 32,625 | 51,983 |
+| 256 B | 19,358 | 31,940 | 51,298 |
+
+The 64 B -> 128 B cost jump (~7 ms) is the LittleFS inline file threshold
+(`LFS_INLINE_MAX`, default 64 B). Files <= 64 B are stored inline in the
+directory entry with no separate data block allocation. The manifest is
+designed to fit in 64 B to stay below this threshold.
+
+### Amortized rollover overhead per enqueue (128 B manifest)
+
+| Segment size | Records/seg | Amortized (us/enq) |
+|---|---|---|
+| 4 KB | 7 | 7,426 |
+| 8 KB | 15 | 3,465 |
+| 16 KB | 31 | 1,676 |
+| 32 KB | 63 | 825 |
+
+At 4 KB segments with a 64 B manifest (rollover = 45 ms), amortized overhead
+= 45,090 / 7 ~ 6,441 us/enq -- about 14% of the 45 ms flush cost. Acceptable.
