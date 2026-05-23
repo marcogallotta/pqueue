@@ -22,14 +22,16 @@ using Clock = std::chrono::steady_clock;
 // Benchmark-wide store config constants.
 // maxTotalBytes is sized for N=1000 records at the largest recordSizeBytes
 // in the test matrix (2048B), so no scenario rejects enqueues by capacity.
-// kEnqueueOverheadBytes = 24 (see binary format in docs/internals.md).
-// (1000+8) * (24 + 2048) = 1008 * 2072 = 2,088,576
+// At 2048B payload only one record fits per 4096B segment, so each record
+// pays the full 20B segment header cost. Formula accounts for that:
+//   kSegmentHeaderBytes=20, kEnqueueOverheadBytes=24
+//   (1000+8) * (20 + 24 + 2048) = 1008 * 2092 = 2,108,736
 // ---------------------------------------------------------------------------
 
 static constexpr std::uint32_t kBenchmarkN           = 1000;
 static constexpr std::uint32_t kMaxRecordSizeBytes   = 2048;
 static constexpr std::uint32_t kBenchmarkMaxTotalBytes =
-    (kBenchmarkN + 8u) * (24u + kMaxRecordSizeBytes);
+    (kBenchmarkN + 8u) * (20u + 24u + kMaxRecordSizeBytes);
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -171,6 +173,16 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
     std::vector<std::string> v;
     if (!r.ok)
         v.push_back("ok=false: not all operations succeeded");
+    if (r.scenario == "enqueue") {
+        if (r.writeAt != r.records)
+            v.push_back("writeAt != records: expected exactly one writeAt per enqueue");
+        if (r.readAt != 0)
+            v.push_back("readAt != 0: unexpected reads on the enqueue hot path");
+        if (r.read_bpp != 0.0)
+            v.push_back("read_bpp != 0: unexpected reads on the enqueue hot path");
+        if (r.remove != 0)
+            v.push_back("remove != 0: unexpected segment removal on enqueue-only path");
+    }
     if (r.scenario == "outbox_offline_submit") {
         if (r.writeAt != r.records)
             v.push_back("writeAt != records: expected exactly one writeAt per enqueue");
@@ -185,6 +197,71 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
 // ---------------------------------------------------------------------------
 // Scenarios
 // ---------------------------------------------------------------------------
+
+BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
+                                 std::uint32_t records,
+                                 std::uint32_t repeat) {
+    const auto lat  = littleFsSimLatency();
+    const auto data = makePayload(payloadBytes);
+    SampleSet samples;
+
+    std::uint64_t totalBytesWritten = 0, totalBytesRead = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    bool anyFail = false;
+
+    for (std::uint32_t r = 0; r < repeat; ++r) {
+        auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+        fs->setLatency(lat);
+
+        pqueue::Queue q(queueConfig(tempBase("enqueue"), fs, payloadBytes));
+        (void)q.stats();  // trigger mount
+        fs->resetCounters();
+
+        for (std::uint32_t i = 0; i < records; ++i) {
+            const std::uint64_t simBefore = fs->counters().simLatencyUs;
+            const auto t0 = Clock::now();
+            const auto st = q.enqueue(data);
+            const auto t1 = Clock::now();
+            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
+                        static_cast<double>(fs->counters().simLatencyUs - simBefore));
+            if (!st.ok()) { anyFail = true; break; }
+        }
+
+        const auto& c = fs->counters();
+        totalBytesWritten += c.bytesWritten;
+        totalBytesRead    += c.bytesRead;
+        totalWriteFile    += c.writeFile;
+        totalWriteAt      += c.writeAt;
+        totalReadAt       += c.readAt;
+        totalRemove       += c.removeFile;
+    }
+
+    const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
+
+    BenchmarkResult res;
+    res.scenario     = "enqueue";
+    res.payloadBytes = payloadBytes;
+    res.records      = records;
+    res.repeat       = repeat;
+    res.p50_us       = samples.wallP50();
+    res.p90_us       = samples.wallP90();
+    res.p99_us       = samples.wallP99();
+    res.max_us       = samples.wallMax();
+    res.sim_p99_ms   = samples.simP99Ms();
+    res.sim_max_ms   = samples.simMaxMs();
+    res.write_amp    = (totalOps > 0 && payloadBytes > 0)
+                     ? static_cast<double>(totalBytesWritten) / static_cast<double>(totalOps * payloadBytes)
+                     : 0.0;
+    res.read_bpp     = totalOps > 0
+                     ? static_cast<double>(totalBytesRead) / static_cast<double>(totalOps)
+                     : 0.0;
+    res.writeFile    = totalWriteFile / repeat;
+    res.writeAt      = totalWriteAt   / repeat;
+    res.readAt       = totalReadAt    / repeat;
+    res.remove       = totalRemove    / repeat;
+    res.ok           = !anyFail;
+    return res;
+}
 
 BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
                                              std::uint32_t records,
@@ -359,6 +436,8 @@ int main(int argc, char** argv) {
     cfg.gitHash = getGitHash();
 
     std::vector<BenchmarkResult> results;
+    for (std::uint32_t payload : {64u, 256u, 1024u, 2048u})
+        results.push_back(scenarioEnqueue(payload, kBenchmarkN, repeat));
     for (std::uint32_t payload : {256u, 1024u})
         results.push_back(scenarioOutboxOfflineSubmit(payload, kBenchmarkN, repeat));
 
