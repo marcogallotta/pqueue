@@ -453,10 +453,10 @@ TEST_CASE("append-log: stale pqueue-compact.bin is ignored") {
 // rotate-before-compact dependency guard tests
 // ---------------------------------------------------------------------------
 
-TEST_CASE("compaction: rotate-before-compact is skipped after remount when tail dependencies are unknown") {
-    // After remount activeTailDependenciesTracked_ is false. Even if the tail is
-    // contiguous with the last range and the range has dead bytes, rotate must not fire.
-    // The compaction should still make progress (compact the range without rotating).
+TEST_CASE("compaction: rotate-before-compact fires after remount when tail dependencies are tracked") {
+    // After remount activeTailDependenciesTracked_ is true (tail rescanned at mount).
+    // The tail is contiguous with the last range and the range has dead bytes, so
+    // rotate-before-compact fires: the tail is sealed and included in the compaction.
     using namespace pqueue::append_log_detail;
     resetSpool();
 
@@ -469,31 +469,31 @@ TEST_CASE("compaction: rotate-before-compact is skipped after remount when tail 
         REQUIRE(store.mount().ok());
         storeEnqueue(store, 1, "a"); // gen=1
         storeEnqueue(store, 2, "b"); // gen=1 full → rotate; gen=2 tail
-        storePop(store);             // pop seq=1: dead bytes in gen=1, seq=2 still live
+        storePop(store);             // pop seq=1 (source gen=1): POP in tail gen=2
         storeEnqueue(store, 3, "c"); // goes to gen=2
     }
-    // Remount: tracking becomes false.
+    // Remount: tail scan populates tracking from POP(seq=1) → affected={1}.
     pqueue::AppendLogStore store(cfg);
     REQUIRE(store.mount().ok());
 
     // State: ranges=[{1,1}], tail=2 (contiguous: 1+1=2). Dead bytes in gen=1.
+    // tailDepsContained: gen=1 ∈ [1,2] → true → wouldRotate=true.
     REQUIRE_EQ(store.manifestRanges().size(), 1U);
     CHECK_EQ(store.manifestRanges()[0].startGen, 1U);
     CHECK_EQ(store.manifestRanges()[0].endGen,   1U);
     CHECK_EQ(store.tailGeneration(), 2U);
 
-    // Without rotate: compact only {1,1} → output at gen=3, tail stays gen=2.
-    // With rotate (if it had fired): rotate gen=2 → new tail=gen=3, compact {1,2} → output gen=4.
+    // rotate gen=2 → new tail=gen=3, compact {1,2} → output gen=4.
     auto st = store.compactOneSegment();
     CHECK(st.ok());
 
-    // Tail must NOT have been rotated: still gen=2.
-    CHECK_EQ(store.tailGeneration(), 2U);
-    // Output range must be gen=3 (not gen=4, which would only appear after a rotate).
+    // Tail was rotated and a fresh tail was created.
+    CHECK_EQ(store.tailGeneration(), 3U);
+    // Compaction output is gen=4 (covers the rotated range {1,2}).
     REQUIRE_EQ(store.manifestRanges().size(), 1U);
-    CHECK_EQ(store.manifestRanges()[0].startGen, 3U);
-    CHECK_EQ(store.manifestRanges()[0].endGen,   3U);
-    CHECK(std::filesystem::exists(segmentPath(2))); // old tail still present, not rotated
+    CHECK_EQ(store.manifestRanges()[0].startGen, 4U);
+    CHECK_EQ(store.manifestRanges()[0].endGen,   4U);
+    CHECK_FALSE(std::filesystem::exists(segmentPath(2))); // old tail rotated and compacted away
 
     // Live records remain readable.
     std::string out;
@@ -670,5 +670,80 @@ TEST_CASE("compaction: rotate-before-compact is blocked by cross-range tail pop 
         CHECK(store.readRecord(5, out).ok()); CHECK_EQ(out, p5);
         CHECK(store.readRecord(6, out).ok()); CHECK_EQ(out, p6);
         CHECK(store.readRecord(7, out).ok()); CHECK_EQ(out, p7);
+    }
+}
+
+TEST_CASE("compaction: cross-range tail deps reconstructed after remount; no resurrection") {
+    // Verifies the activeTailDependenciesTracked_ suppression-window fix:
+    // after remount, the tail scan must reconstruct activeTailAffectedGenerations_
+    // so that cross-range deps are detected and popped records do not resurrect.
+    //
+    // Layout: ranges=[{1,1},{3,3}], tail=4 (contiguous: 3+1=4).
+    // gen=1: seq=1,2 (both dead -- popped via POP events in tail gen=4).
+    // gen=3: seq=3 (live).
+    // gen=4: POP(1)+POP(2) [cross-range deps on gen=1] + ENQUEUE(4,p4).
+    //
+    // 25-byte payloads; maxSegmentBytes=150.
+    using namespace pqueue::append_log_detail;
+
+    const std::string p1(25, 'a'), p2(25, 'b'), p3(25, 'c'), p4(25, 'd');
+
+    plantLayout({
+        .ranges   = {{1u, 1u}, {3u, 3u}},
+        .tail     = 4u,
+        .next     = 5u,
+        .segments = {
+            {1u, 1u, serializeEnqueueEvent(1, p1) + serializeEnqueueEvent(2, p2)},
+            {3u, 3u, serializeEnqueueEvent(3, p3)},
+            {4u, 3u, serializePopEvent(1) + serializePopEvent(2) + serializeEnqueueEvent(4, p4)},
+        },
+    });
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 150;
+
+    // Remount: tail scan must reconstruct affected={1}, tracking=true.
+    // Cross-range dep gen=1 is NOT in [3,4] → tailDepsContained=false → rotate suppressed if
+    // {3,3} were chosen. {1,1} is fully dead → dead-range fast path chosen first (not last
+    // range, no rotate risk). After dead-range removal, gen=1 is cleared from affected.
+    {
+        pqueue::AppendLogStore store(cfg);
+        REQUIRE(store.mount().ok());
+
+        REQUIRE_EQ(store.manifestRanges().size(), 2U);
+        CHECK_EQ(store.manifestRanges()[0].startGen, 1U);
+        CHECK_EQ(store.manifestRanges()[0].endGen,   1U);
+        CHECK_EQ(store.manifestRanges()[1].startGen, 3U);
+        CHECK_EQ(store.manifestRanges()[1].endGen,   3U);
+        CHECK_EQ(store.tailGeneration(), 4U);
+
+        auto st = store.compactOneSegment(); // removes dead range {1,1}
+        CHECK(st.ok());
+        CHECK_FALSE(st.isNoOp());
+
+        // {1,1} removed; {3,3} and tail=4 remain.
+        REQUIRE_EQ(store.manifestRanges().size(), 1U);
+        CHECK_EQ(store.manifestRanges()[0].startGen, 3U);
+        CHECK_EQ(store.manifestRanges()[0].endGen,   3U);
+        CHECK_EQ(store.tailGeneration(), 4U);
+
+        // seq=1,2 popped; seq=3,4 live.
+        std::string out;
+        CHECK_FALSE(store.readRecord(1, out).ok());
+        CHECK_FALSE(store.readRecord(2, out).ok());
+        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, p3);
+        CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, p4);
+    }
+
+    // After remount: verify seq=1,2 did not resurrect.
+    {
+        pqueue::AppendLogStore store(cfg);
+        REQUIRE(store.mount().ok());
+
+        std::string out;
+        CHECK_FALSE(store.readRecord(1, out).ok());
+        CHECK_FALSE(store.readRecord(2, out).ok());
+        CHECK(store.readRecord(3, out).ok()); CHECK_EQ(out, p3);
+        CHECK(store.readRecord(4, out).ok()); CHECK_EQ(out, p4);
     }
 }

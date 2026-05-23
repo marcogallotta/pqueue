@@ -176,6 +176,8 @@ Status AppendLogStore::scanSegments() {
         if (g + 1 > nextGeneration_) nextGeneration_ = g + 1;
     }
 
+    std::unordered_set<std::uint32_t> tailAffectedGens;
+
     for (std::size_t segIdx = 0; segIdx < activeGenerations_.size(); ++segIdx) {
         const std::uint32_t gen = activeGenerations_[segIdx];
         const bool isLastSegment = (segIdx + 1 == activeGenerations_.size());
@@ -249,6 +251,7 @@ Status AppendLogStore::scanSegments() {
                 } else {
                     for (auto& r : records_) {
                         if (r.sequence == eh.sequence) {
+                            if (isLastSegment) tailAffectedGens.insert(r.segmentGeneration);
                             r.segmentGeneration = gen;
                             r.payloadOffset = offset + kEnqueueHeaderBytes;
                             r.payloadBytes = eh.payloadBytes;
@@ -269,6 +272,7 @@ Status AppendLogStore::scanSegments() {
                 if (!parsePopEvent(popBuf, pe)) { corrupt = true; break; }
 
                 if (!records_.empty() && records_.front().sequence == pe.sequence) {
+                    if (isLastSegment) tailAffectedGens.insert(records_.front().segmentGeneration);
                     records_.pop_front();
                 }
                 if (pe.sequence + 1 > nextSequence_) nextSequence_ = pe.sequence + 1;
@@ -327,8 +331,8 @@ Status AppendLogStore::scanSegments() {
         sealedSegmentBytes_[gen] = szU;
     }
 
-    activeTailDependenciesTracked_ = false;
-    activeTailAffectedGenerations_.clear();
+    activeTailDependenciesTracked_ = true;
+    activeTailAffectedGenerations_ = std::move(tailAffectedGens);
     cleanupOneDanglingSegment();
     return Status::success();
 }

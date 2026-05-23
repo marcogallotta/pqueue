@@ -595,11 +595,6 @@ cannot immediately merge with the output range. Range count stays bounded and
 dead-range elimination reclaims it once popped, but the fragmentation is
 inelegant.
 
-**`activeTailDependenciesTracked_` suppression window.** After mount, tracking
-is false until the first rotation creates a fresh tail. During that window
-rotate-before-compact is suppressed entirely. Conservative but correct; a
-mount-time tail rescan would close the gap.
-
 **Cross-range REWRITE test gap.** No test covers the case where the tail
 contains a REWRITE tombstone for a record in a different range (the analogous
 cross-range POP test covers the same guard path and the production code handles
