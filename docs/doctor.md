@@ -93,9 +93,10 @@ values. Always check the app config and pass overrides where they differ.
 
 ## Commands
 
-All commands emit a `RESULT command=X ok=0|1 [fields]` line before `READY`.
+Most commands emit a `RESULT command=X ok=0|1 [fields]` line before `READY`.
 Python uses this line to determine success; human-readable lines are for display
-only.
+only. Exceptions: dump commands use the `DUMP_BEGIN`/`DUMP_END` protocol
+instead, and argument/validation errors emit `error: ...` with no `RESULT`.
 
 ### Read-only
 
@@ -213,5 +214,26 @@ dev  -> RESULT command=VALIDATE ok=1 issues=0
 dev  -> READY
 host -> DONE
 ```
+
+Dump commands use a different protocol — no `RESULT` line. `DUMP_FILE` emits a
+single file block; `DUMP_ALL` wraps multiple file blocks in `DUMP_BEGIN` /
+`DUMP_END`:
+
+```
+host -> DUMP_ALL
+dev  -> DUMP_BEGIN
+dev  -> FILE_BEGIN name=manifest-a.bin size=64
+dev  -> 0102030405060708...  (hex, 256 chars per line)
+dev  -> FILE_END name=manifest-a.bin crc=a1b2c3d4
+dev  -> FILE_BEGIN name=seg-00000000.bin size=4096
+dev  -> ...
+dev  -> FILE_END name=seg-00000000.bin crc=deadbeef
+dev  -> DUMP_END files=2 errors=0
+dev  -> READY
+```
+
+If a file cannot be read, `FILE_ERROR name=<name> message=<code>` appears in
+place of its `FILE_BEGIN`/`FILE_END` block, and `errors` in `DUMP_END` is
+non-zero.
 
 The device reboots after `DONE`.
