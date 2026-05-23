@@ -32,7 +32,7 @@ cfg.storageBackend  = pqueue::StorageBackend::LittleFS;
 cfg.basePath        = "/pqueue";      // directory on LittleFS
 cfg.reservedBytes   = 65536;         // total flash budget
 cfg.maxSegmentBytes = 4096;          // bytes per segment file
-cfg.maxSegments     = 16;            // max segment files on disk
+cfg.maxSegments     = 16;            // compaction pressure threshold (not a hard file-count limit)
 cfg.minFreeBytes    = 4096;          // headroom to leave for LittleFS metadata
 
 pqueue::Queue queue(cfg);
@@ -226,11 +226,11 @@ COMPACT <steps>           -- run compactIdle(steps)
 COMPACT_ALL <max_steps>   -- run compactIdle to completion, up to max_steps
 DROP_FRONT_IF_CORRUPT     -- drop front record only if corruption is proven
 RECOVER_STALE_LOCK        -- remove a stale lock left by a dead process
-FORMAT CONFIRM            -- destructively reinitialize the queue
+FORMAT CONFIRM <name>     -- destructively reinitialize the queue
 DONE                      -- exit (reboots into maintenance firmware)
 ```
 
-`FORMAT` requires the literal argument `CONFIRM` to prevent accidental execution.
+`FORMAT` requires both `CONFIRM` and the target name to prevent accidental execution.
 
 
 ---

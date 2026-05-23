@@ -1,7 +1,5 @@
 # pqueue Usage Guide
 
-**Editing rules:** ASCII only -- no Unicode symbols (no checkmarks, arrows, emoji). This file is compiled to PDF via LaTeX and non-ASCII characters cause build warnings or missing glyphs.
-
 ---
 
 ## Operating contract
@@ -227,10 +225,14 @@ Pass your config values as flags so the simulation matches your deployment:
 ```bash
 ./build/pqueue-profiling idle-sim 500 492 3 \
     --max-segment-bytes 4096 \
-    --max-total-bytes 65536 \
+    --max-total-bytes 393216 \
     --max-output-segments 8 \
     --pop 90
 ```
+
+`--max-total-bytes` maps to `reservedBytes` in your config. Size it to cover the
+burst plus any records carried over from a previous cycle. For 500 records at
+492-byte payload, 384 KB (393216) fits cleanly; 64 KB would hit `capExhausted`.
 
 `Queue` users: leave `--max-output-segments` at 8 (the fixed default). Only
 change it if you construct `AppendLogStore` directly.

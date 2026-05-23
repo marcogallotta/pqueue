@@ -28,10 +28,11 @@ output is paused until `DONE`, then the device reboots.
 
 ### Standalone maintenance firmware
 
-Flash the `esp32s3-pqueue-maintenance` environment once for an incident:
+Flash the maintenance env you added to your app's `platformio.ini` (see README
+for the setup pattern):
 
 ```
-pio run -e esp32s3-pqueue-maintenance --target upload
+pio run -e pqueue-maintenance --target upload
 ```
 
 Then connect without `--trigger`:
