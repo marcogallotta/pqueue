@@ -12,9 +12,8 @@ import sys
 
 NUMERIC = [
     "writeFile", "writeAt", "readAt", "remove",
-    "sim_p99_ms", "sim_max_ms", "write_amp", "read_bpp",
+    "write_amp", "read_bpp",
     "idle_steps", "idle_noops", "hot_compactions", "cap_exhausted",
-    "max_step_sim_ms", "total_idle_sim_ms",
 ]
 
 BOOLEAN = ["ok"]

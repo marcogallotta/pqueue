@@ -493,20 +493,22 @@ config.
 
 ---
 
-## Predicting latency
+## Measuring performance
 
-Use the benchmark binary with simulated latency. The calibrated `sim_*_ms`
-columns are deterministic predicted device milliseconds for the ESP32S3/QSPI
-calibration in `data/calibration-esp32s3.json`.
+The POSIX benchmark reports I/O op counts, write amplification, and idle compaction
+structural metrics. These are deterministic and suitable for CI regression:
 
 ```bash
 make -j12 benchmark
 make benchmark-markdown
 ```
 
-See `data/benchmark-results-esp32s3.md` for the launch baseline and interpretation of
-each scenario. The key metric for idle compaction is `hot_compactions = 0`,
-which confirms the clean-storage invariant holds for your workload parameters.
+See `data/benchmark-results-esp32s3.md` for the baseline and interpretation of each
+scenario. The key metric for idle compaction is `hot_compactions = 0`, which confirms
+the clean-storage invariant holds for your workload parameters.
+
+For real device latency numbers, run `env:esp32s3-idle-sanity` on hardware. The POSIX
+benchmark does not predict device timing.
 
 
 ---

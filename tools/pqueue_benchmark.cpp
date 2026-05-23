@@ -4,7 +4,6 @@
 #include "pqueue/queue.h"
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -46,83 +45,6 @@ static constexpr std::uint32_t kMountMaxTotalBytes =
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-static FsLatency gSimLatency = []() {
-    FsLatency lat;
-    lat.readFileUs         = 345;
-    lat.readAtUs           = 345;
-    lat.writeFileFixedUs   = 1380;
-    lat.writeFilePerKbUs   = 518;
-    lat.writeAtUs          = 138;
-    lat.removeFileUs       = 166;
-    lat.listFilesBaseUs    = 690;
-    lat.listFilesPerFileUs = 86;
-    return lat;
-}();
-
-inline FsLatency littleFsSimLatency() { return gSimLatency; }
-
-bool loadCalibrationFile(const std::string& path, FsLatency& out) {
-    FILE* f = std::fopen(path.c_str(), "r");
-    if (!f) {
-        std::fprintf(stderr, "calibration-file: cannot open '%s'\n", path.c_str());
-        return false;
-    }
-    std::string content;
-    char buf[256];
-    while (std::fgets(buf, sizeof(buf), f)) content += buf;
-    std::fclose(f);
-
-    // Parse a single uint32 field. Accepts "key":value, "key": value, "key" : value.
-    auto extract = [&](const char* key, std::uint32_t& val, bool& foundFlag) {
-        const std::string kq = std::string("\"") + key + "\"";
-        const auto kpos = content.find(kq);
-        if (kpos == std::string::npos) return;
-        // skip whitespace then ':'
-        std::size_t p = kpos + kq.size();
-        while (p < content.size() && std::isspace((unsigned char)content[p])) ++p;
-        if (p >= content.size() || content[p] != ':') return;
-        ++p;
-        while (p < content.size() && std::isspace((unsigned char)content[p])) ++p;
-        char* end = nullptr;
-        const auto v = static_cast<std::uint32_t>(
-            std::strtoul(content.c_str() + p, &end, 10));
-        if (end == content.c_str() + p) return; // no digits
-        val = v;
-        foundFlag = true;
-    };
-
-    struct Field { const char* name; std::uint32_t* val; bool allowZero; bool found = false; };
-    FsLatency lat{};
-    Field fields[] = {
-        { "readAt_us",             &lat.readAtUs,          false },
-        { "readFile_us",           &lat.readFileUs,        false },
-        { "writeFile_fixed_us",    &lat.writeFileFixedUs,  false },
-        { "writeFile_per_kb_us",   &lat.writeFilePerKbUs,  false },
-        { "writeAt_us",            &lat.writeAtUs,         false },
-        { "removeFile_us",         &lat.removeFileUs,      false },
-        { "listFiles_base_us",     &lat.listFilesBaseUs,   true  }, // 0 valid (fit intercept)
-        { "listFiles_per_file_us", &lat.listFilesPerFileUs,false },
-    };
-    for (auto& f : fields) extract(f.name, *f.val, f.found);
-
-    bool ok = true;
-    for (const auto& f : fields) {
-        if (!f.found) {
-            std::fprintf(stderr, "calibration-file: missing field '%s' in '%s'\n",
-                         f.name, path.c_str());
-            ok = false;
-        } else if (!f.allowZero && *f.val == 0) {
-            std::fprintf(stderr, "calibration-file: field '%s' is zero in '%s'\n",
-                         f.name, path.c_str());
-            ok = false;
-        }
-    }
-    if (!ok) return false;
-
-    out = lat;
-    return true;
-}
 
 std::string getGitHash() {
     FILE* f = popen("git rev-parse --short HEAD 2>/dev/null", "r");
@@ -195,9 +117,8 @@ struct FakeTransport final : public pqueue::http::Transport {
 
 struct SampleSet {
     std::vector<double> wallUs;
-    std::vector<double> simUs;
 
-    void add(double wall, double sim) { wallUs.push_back(wall); simUs.push_back(sim); }
+    void add(double wall) { wallUs.push_back(wall); }
 
     static double pct(std::vector<double> v, double p) {
         if (v.empty()) return 0.0;
@@ -211,11 +132,6 @@ struct SampleSet {
         if (wallUs.empty()) return 0;
         return static_cast<std::uint64_t>(*std::max_element(wallUs.begin(), wallUs.end()));
     }
-    double simP99Ms() const { return pct(simUs, 0.99) / 1000.0; }
-    double simMaxMs() const {
-        if (simUs.empty()) return 0.0;
-        return *std::max_element(simUs.begin(), simUs.end()) / 1000.0;
-    }
 };
 
 // ---------------------------------------------------------------------------
@@ -224,11 +140,6 @@ struct SampleSet {
 
 struct BenchmarkConfig {
     std::string   gitHash;
-    std::string   calibrationFile;  // empty = default hardcoded constants
-    FsLatency     latency;
-    // AppendLogConfig defaults (maxSegments, maxSegmentBytes, maxOutputSegments)
-    // plus the shared maxTotalBytes = kBenchmarkMaxTotalBytes, which is what
-    // every scenario passes as reservedBytes.
     std::uint32_t maxSegmentBytes    = 4096;
     std::uint32_t maxSegments        = 200;
     std::uint32_t maxTotalBytes      = kBenchmarkMaxTotalBytes;
@@ -241,21 +152,17 @@ struct BenchmarkResult {
     std::uint32_t payloadBytes = 0;
     std::uint32_t records      = 0;
     std::uint32_t repeat       = 1;
-    // host wall-clock percentiles (us)
+    // host wall-clock percentiles (us) — informational, machine-dependent
     std::uint64_t p50_us = 0, p90_us = 0, p99_us = 0, max_us = 0;
-    // simulated per-op latency (ms)
-    double sim_p99_ms = 0.0, sim_max_ms = 0.0;
     // bytes written/read per payload byte / per record
     double write_amp = 0.0, read_bpp = 0.0;
     // I/O op counts, per-run average across repeats
     std::uint64_t writeFile = 0, writeAt = 0, readAt = 0, remove = 0;
     // idle compaction specific (zero for non-idle scenarios)
-    std::uint32_t idle_steps        = 0;
-    std::uint32_t idle_noops        = 0;
-    std::uint32_t hot_compactions   = 0;
-    std::uint32_t cap_exhausted     = 0;
-    double        max_step_sim_ms   = 0.0;
-    double        total_idle_sim_ms = 0.0;
+    std::uint32_t idle_steps      = 0;
+    std::uint32_t idle_noops      = 0;
+    std::uint32_t hot_compactions = 0;
+    std::uint32_t cap_exhausted   = 0;
     bool ok = true;
 };
 
@@ -320,7 +227,6 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
 BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
                                  std::uint32_t records,
                                  std::uint32_t repeat) {
-    const auto lat  = littleFsSimLatency();
     const auto data = makePayload(payloadBytes);
     SampleSet samples;
 
@@ -330,19 +236,16 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-        fs->setLatency(lat);
 
         pqueue::Queue q(queueConfig(tempBase("enqueue"), fs, payloadBytes));
         (void)q.stats();  // trigger mount
         const auto before = fs->counters();
 
         for (std::uint32_t i = 0; i < records; ++i) {
-            const std::uint64_t simBefore = fs->counters().simLatencyUs;
             const auto t0 = Clock::now();
             const auto st = q.enqueue(data);
             const auto t1 = Clock::now();
-            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
-                        static_cast<double>(fs->counters().simLatencyUs - simBefore));
+            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             if (!st.ok()) { anyFail = true; break; }
         }
 
@@ -367,8 +270,6 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
     res.p90_us       = samples.wallP90();
     res.p99_us       = samples.wallP99();
     res.max_us       = samples.wallMax();
-    res.sim_p99_ms   = samples.simP99Ms();
-    res.sim_max_ms   = samples.simMaxMs();
     res.write_amp    = (totalOps > 0 && payloadBytes > 0)
                      ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
                      : 0.0;
@@ -386,7 +287,6 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
 BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
                                  std::uint32_t records,
                                  std::uint32_t repeat) {
-    const auto lat  = littleFsSimLatency();
     const auto data = makePayload(payloadBytes);
     SampleSet samples;
 
@@ -396,7 +296,6 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-        fs->setLatency(lat);
 
         pqueue::Queue q(queueConfig(tempBase("peek_pop"), fs, payloadBytes));
         for (std::uint32_t i = 0; i < records; ++i) {
@@ -407,13 +306,11 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
 
         std::string out;
         for (std::uint32_t i = 0; i < records; ++i) {
-            const std::uint64_t simBefore = fs->counters().simLatencyUs;
             const auto t0 = Clock::now();
             auto st = q.peek(out);
             if (st.ok()) st = q.pop();
             const auto t1 = Clock::now();
-            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
-                        static_cast<double>(fs->counters().simLatencyUs - simBefore));
+            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             if (!st.ok()) { anyFail = true; break; }
         }
 
@@ -438,8 +335,6 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
     res.p90_us       = samples.wallP90();
     res.p99_us       = samples.wallP99();
     res.max_us       = samples.wallMax();
-    res.sim_p99_ms   = samples.simP99Ms();
-    res.sim_max_ms   = samples.simMaxMs();
     res.write_amp    = (totalOps > 0 && payloadBytes > 0)
                      ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
                      : 0.0;
@@ -455,7 +350,6 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
 }
 
 BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repeat) {
-    const auto lat  = littleFsSimLatency();
     const auto data = makePayload(kMountPayloadBytes);
     SampleSet samples;
 
@@ -478,17 +372,13 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
 
         // Mount phase: fresh fs, same dir. Only the mount (first stats() call) is timed.
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-        fs->setLatency(lat);
         pqueue::Queue q(mountQueueConfig(dir, fs));
 
-        const std::uint64_t simBefore = fs->counters().simLatencyUs;
         const auto before = fs->counters();
         const auto t0 = Clock::now();
         (void)q.stats();
         const auto t1 = Clock::now();
-
-        samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
-                    static_cast<double>(fs->counters().simLatencyUs - simBefore));
+        samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
 
         const auto after = fs->counters();
         totalDataBytesWritten += (after.bytesWritten - after.lockBytesWritten)
@@ -509,8 +399,6 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
     res.p90_us       = samples.wallP90();
     res.p99_us       = samples.wallP99();
     res.max_us       = samples.wallMax();
-    res.sim_p99_ms   = samples.simP99Ms();
-    res.sim_max_ms   = samples.simMaxMs();
     // write_amp: bytes written during mount per preloaded record × payload byte.
     // Clean mounts write nothing, so this is 0 unless torn-tail truncation fires.
     res.write_amp    = (repeat > 0 && preloadedRecords > 0)
@@ -536,20 +424,16 @@ static constexpr std::uint32_t kIdleCycles    = 3;
 static constexpr float         kIdlePopRatio  = 0.90f;
 
 BenchmarkResult scenarioIdleCompaction(std::uint32_t payloadBytes, std::uint32_t repeat) {
-    const auto lat  = littleFsSimLatency();
     const auto data = makePayload(payloadBytes);
 
     std::uint32_t totalIdleSteps      = 0;
     std::uint32_t totalIdleNoOps      = 0;
     std::uint32_t totalHotCompactions = 0;
     std::uint32_t totalCapExhausted   = 0;
-    std::uint64_t maxStepSimUs        = 0;
-    std::uint64_t totalIdleSimUs      = 0;
     bool anyFail = false;
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-        fs->setLatency(lat);
         pqueue::Queue q(queueConfig(tempBase("idle_compaction"), fs, payloadBytes));
         (void)q.stats();  // trigger mount
 
@@ -588,14 +472,11 @@ BenchmarkResult scenarioIdleCompaction(std::uint32_t payloadBytes, std::uint32_t
 
             // Phase 3: compact idle to completion.
             for (;;) {
-                const std::uint64_t simBefore = fs->counters().simLatencyUs;
                 const auto cr = q.compactIdle(1);
-                const std::uint64_t simDelta = fs->counters().simLatencyUs - simBefore;
                 ++totalIdleSteps;
                 if (!cr.status.ok()) { anyFail = true; break; }
                 if (cr.compactions > 0) {
-                    maxStepSimUs    = std::max(maxStepSimUs, simDelta);
-                    totalIdleSimUs += simDelta;
+                    // productive step
                 } else {
                     ++totalIdleNoOps;
                     break;
@@ -607,25 +488,21 @@ BenchmarkResult scenarioIdleCompaction(std::uint32_t payloadBytes, std::uint32_t
     }
 
     BenchmarkResult res;
-    res.scenario          = "idle_compaction";
-    res.payloadBytes      = payloadBytes;
-    res.records           = kIdleBurstSize;
-    res.repeat            = repeat;
-    res.idle_steps        = totalIdleSteps      / repeat;
-    res.idle_noops        = totalIdleNoOps      / repeat;
-    res.hot_compactions   = totalHotCompactions / repeat;
-    res.cap_exhausted     = totalCapExhausted   / repeat;
-    res.max_step_sim_ms   = static_cast<double>(maxStepSimUs) / 1000.0;
-    res.total_idle_sim_ms = static_cast<double>(totalIdleSimUs)
-                            / static_cast<double>(repeat) / 1000.0;
-    res.ok                = !anyFail;
+    res.scenario        = "idle_compaction";
+    res.payloadBytes    = payloadBytes;
+    res.records         = kIdleBurstSize;
+    res.repeat          = repeat;
+    res.idle_steps      = totalIdleSteps      / repeat;
+    res.idle_noops      = totalIdleNoOps      / repeat;
+    res.hot_compactions = totalHotCompactions / repeat;
+    res.cap_exhausted   = totalCapExhausted   / repeat;
+    res.ok              = !anyFail;
     return res;
 }
 
 BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
                                              std::uint32_t records,
                                              std::uint32_t repeat) {
-    const auto lat  = littleFsSimLatency();
     const auto body = makePayload(payloadBytes);
     SampleSet samples;
 
@@ -635,7 +512,6 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
 
     for (std::uint32_t r = 0; r < repeat; ++r) {
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-        fs->setLatency(lat);
 
         FakeTransport transport;
         FakeClock clock;
@@ -651,12 +527,10 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
         const auto before = fs->counters();
 
         for (std::uint32_t i = 0; i < records; ++i) {
-            const std::uint64_t simBefore = fs->counters().simLatencyUs;
             const auto t0  = Clock::now();
             const auto sub = outbox.submitPost("/readings", body);
             const auto t1  = Clock::now();
-            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
-                        static_cast<double>(fs->counters().simLatencyUs - simBefore));
+            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count());
             clock.now += 2;
             if (sub.status != pqueue::SubmitStatus::Queued) { anyFail = true; break; }
         }
@@ -682,8 +556,6 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
     res.p90_us       = samples.wallP90();
     res.p99_us       = samples.wallP99();
     res.max_us       = samples.wallMax();
-    res.sim_p99_ms   = samples.simP99Ms();
-    res.sim_max_ms   = samples.simMaxMs();
     res.write_amp    = (totalOps > 0 && payloadBytes > 0)
                      ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
                      : 0.0;
@@ -711,22 +583,7 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
     std::printf("    \"maxSegments\": %u,\n", cfg.maxSegments);
     std::printf("    \"maxTotalBytes\": %u,\n", cfg.maxTotalBytes);
     std::printf("    \"maxOutputSegments\": %u,\n", cfg.maxOutputSegments);
-    std::printf("    \"platform\": \"%s\",\n", cfg.platform.c_str());
-    if (cfg.calibrationFile.empty()) {
-        std::printf("    \"calibration\": \"default\"\n");
-    } else {
-        std::printf("    \"calibration\": {\n");
-        std::printf("      \"file\": \"%s\",\n", cfg.calibrationFile.c_str());
-        std::printf("      \"readAt_us\": %u,\n",             cfg.latency.readAtUs);
-        std::printf("      \"readFile_us\": %u,\n",           cfg.latency.readFileUs);
-        std::printf("      \"writeFile_fixed_us\": %u,\n",    cfg.latency.writeFileFixedUs);
-        std::printf("      \"writeFile_per_kb_us\": %u,\n",   cfg.latency.writeFilePerKbUs);
-        std::printf("      \"writeAt_us\": %u,\n",            cfg.latency.writeAtUs);
-        std::printf("      \"removeFile_us\": %u,\n",         cfg.latency.removeFileUs);
-        std::printf("      \"listFiles_base_us\": %u,\n",     cfg.latency.listFilesBaseUs);
-        std::printf("      \"listFiles_per_file_us\": %u\n",  cfg.latency.listFilesPerFileUs);
-        std::printf("    }\n");
-    }
+    std::printf("    \"platform\": \"%s\"\n", cfg.platform.c_str());
     std::printf("  },\n");
     std::printf("  \"results\": [\n");
     for (std::size_t i = 0; i < results.size(); ++i) {
@@ -740,20 +597,16 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
         std::printf("      \"p50_us\": %llu, \"p90_us\": %llu, \"p99_us\": %llu, \"max_us\": %llu,\n",
                     (unsigned long long)r.p50_us, (unsigned long long)r.p90_us,
                     (unsigned long long)r.p99_us, (unsigned long long)r.max_us);
-        std::printf("      \"sim_p99_ms\": %.3f, \"sim_max_ms\": %.3f,\n", r.sim_p99_ms, r.sim_max_ms);
         std::printf("      \"write_amp\": %.3f, \"read_bpp\": %.1f,\n", r.write_amp, r.read_bpp);
-        // I/O counts are per-run averages (independent of --repeat).
-        std::printf("      \"writeFile\": %llu, \"writeAt\": %llu, \"readAt\": %llu, \"remove\": %llu,\n",
+        std::printf("      \"writeFile\": %llu, \"writeAt\": %llu, \"readAt\": %llu, \"remove\": %llu",
                     (unsigned long long)r.writeFile, (unsigned long long)r.writeAt,
                     (unsigned long long)r.readAt, (unsigned long long)r.remove);
         if (r.scenario == "idle_compaction") {
-            std::printf("      \"idle_steps\": %u, \"idle_noops\": %u, "
-                        "\"hot_compactions\": %u, \"cap_exhausted\": %u,\n",
+            std::printf(",\n      \"idle_steps\": %u, \"idle_noops\": %u, "
+                        "\"hot_compactions\": %u, \"cap_exhausted\": %u",
                         r.idle_steps, r.idle_noops, r.hot_compactions, r.cap_exhausted);
-            std::printf("      \"max_step_sim_ms\": %.3f, \"total_idle_sim_ms\": %.3f,\n",
-                        r.max_step_sim_ms, r.total_idle_sim_ms);
         }
-        std::printf("      \"ok\": %s\n", r.ok ? "true" : "false");
+        std::printf(",\n      \"ok\": %s\n", r.ok ? "true" : "false");
         std::printf("    }%s\n", comma);
     }
     std::printf("  ]\n");
@@ -882,13 +735,6 @@ static std::string fmtPay(std::uint32_t v)   { char b[32]; std::snprintf(b,sizeo
 // ---------------------------------------------------------------------------
 
 void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkConfig& cfg) {
-    char listFilesStr[64];
-    if (cfg.latency.listFilesBaseUs == 0)
-        std::snprintf(listFilesStr, sizeof(listFilesStr), "%u/file", cfg.latency.listFilesPerFileUs);
-    else
-        std::snprintf(listFilesStr, sizeof(listFilesStr), "%u+%u/file",
-                      cfg.latency.listFilesBaseUs, cfg.latency.listFilesPerFileUs);
-
     std::printf("# Benchmark Results\n\n");
     std::printf("git: `%s`  platform: %s  "
                 "maxSegmentBytes: %u  maxSegments: %u  maxTotalBytes: %u  "
@@ -896,22 +742,8 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
                 cfg.gitHash.c_str(), cfg.platform.c_str(),
                 cfg.maxSegmentBytes, cfg.maxSegments,
                 cfg.maxTotalBytes, cfg.maxOutputSegments);
-    if (cfg.calibrationFile.empty()) {
-        std::printf("sim latency: **default** "
-                    "(readAt=%u writeAt=%u writeFile=%u+%u/KB remove=%u listFiles=%s us)  \n"
-                    "*`sim_*_ms`: multiply by 100 for predicted on-device ms.*\n\n",
-                    cfg.latency.readAtUs, cfg.latency.writeAtUs,
-                    cfg.latency.writeFileFixedUs, cfg.latency.writeFilePerKbUs,
-                    cfg.latency.removeFileUs, listFilesStr);
-    } else {
-        std::printf("sim latency: calibrated from `%s`  \n"
-                    "constants: readAt=%u writeAt=%u writeFile=%u+%u/KB remove=%u listFiles=%s us  \n"
-                    "*`sim_*_ms`: predicted device ms directly.*\n\n",
-                    cfg.calibrationFile.c_str(),
-                    cfg.latency.readAtUs, cfg.latency.writeAtUs,
-                    cfg.latency.writeFileFixedUs, cfg.latency.writeFilePerKbUs,
-                    cfg.latency.removeFileUs, listFilesStr);
-    }
+    std::printf("*Wall-clock times are host-local (POSIX in-memory FS) and machine-dependent. "
+                "Use on-device tests for real latency numbers.*\n\n");
 
     auto collect = [&](const std::string& name) {
         std::vector<const BenchmarkResult*> out;
@@ -938,11 +770,11 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Enqueue\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("write_amp"),L("writeFile"),L("writeAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->sim_max_ms)), D(fmtF(r->write_amp)),
+                             D(fmtF(r->write_amp)),
                              R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
             printTable(t);
             std::printf("\n");
@@ -956,11 +788,10 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Peek + pop\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_p99_ms"),L("sim_max_ms"),L("read_bpp"),L("writeAt"),L("readAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("writeAt"),L("readAt")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->sim_p99_ms)), D(fmtF(r->sim_max_ms)),
                              D(fmtF(r->read_bpp)), R(fmtU64(r->writeAt)), R(fmtU64(r->readAt))});
             printTable(t);
             std::printf("\n");
@@ -974,11 +805,11 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Outbox offline submit\n\nN=%u, repeat=%u%s\n\n",
                         nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("write_amp"),L("writeFile"),L("writeAt")});
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("write_amp"),L("writeFile"),L("writeAt")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->sim_max_ms)), D(fmtF(r->write_amp)),
+                             D(fmtF(r->write_amp)),
                              R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
             printTable(t);
             std::printf("\n");
@@ -992,11 +823,11 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
             std::printf("## Mount\n\nrepeat=%u, payload=256B fixed%s\n\n",
                         repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("records"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("read_bpp"),L("readAt")});
+            t.push_back({L("records"),L("p50_us"),L("p99_us"),L("max_us"),L("read_bpp"),L("readAt")});
             for (const auto* r : rows)
                 t.push_back({R(fmtU32(r->records)),
                              R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
-                             D(fmtF(r->sim_max_ms)), D(fmtF(r->read_bpp)), R(fmtU64(r->readAt))});
+                             D(fmtF(r->read_bpp)), R(fmtU64(r->readAt))});
             printTable(t);
             std::printf("\n");
         }
@@ -1012,12 +843,11 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
                         static_cast<double>(kIdlePopRatio) * 100.0,
                         repeatOf(rows), allOk(rows) ? "" : kAnomaly);
             Table t;
-            t.push_back({L("payload"),L("steps"),L("noops"),L("hot"),L("cap"),L("sim_max_step_ms"),L("sim_total_ms")});
+            t.push_back({L("payload"),L("steps"),L("noops"),L("hot"),L("cap")});
             for (const auto* r : rows)
                 t.push_back({L(fmtPay(r->payloadBytes)),
                              R(fmtU32(r->idle_steps)), R(fmtU32(r->idle_noops)),
-                             R(fmtU32(r->hot_compactions)), R(fmtU32(r->cap_exhausted)),
-                             D(fmtF(r->max_step_sim_ms)), D(fmtF(r->total_idle_sim_ms))});
+                             R(fmtU32(r->hot_compactions)), R(fmtU32(r->cap_exhausted))});
             printTable(t);
             std::printf("\n");
         }
@@ -1031,7 +861,6 @@ int main(int argc, char** argv) {
     bool doMarkdown = false;
     bool strict     = false;
     std::uint32_t repeat = 1;
-    std::string calibrationFile;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -1042,20 +871,11 @@ int main(int argc, char** argv) {
             repeat = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
             if (repeat == 0) repeat = 1;
         }
-        else if (arg == "--calibration-file" && i + 1 < argc) {
-            calibrationFile = argv[++i];
-        }
     }
     if (!doJson && !doMarkdown) doMarkdown = true;
 
-    if (!calibrationFile.empty()) {
-        if (!loadCalibrationFile(calibrationFile, gSimLatency)) return 1;
-    }
-
     BenchmarkConfig cfg;
-    cfg.gitHash         = getGitHash();
-    cfg.calibrationFile = calibrationFile;
-    cfg.latency         = gSimLatency;
+    cfg.gitHash = getGitHash();
 
     std::vector<BenchmarkResult> results;
     for (std::uint32_t payload : {64u, 256u, 1024u, 2048u})

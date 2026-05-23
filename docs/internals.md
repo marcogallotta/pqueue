@@ -482,9 +482,8 @@ Build and upload: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-test
 | burst=100/pop=90%/rec=150B/5cy | 100 | 0 | 1 | 1090ms | 0 | 0 |
 | burst=500/pop=90%/rec=492B/3cy | 17 | 6 | 8 | 4861ms | 0 | 0 |
 
-The heavy workload (Run 4) was the calibration baseline for the sim model. Prior
-to O(1) preflight sizing, bulk collectLiveRecords reads, and targeted cleanup,
-the same workload produced 82580ms MaxLatency; the bottlenecks were directory
+Prior to O(1) preflight sizing, bulk collectLiveRecords reads, and targeted cleanup,
+the heavy workload produced 82580ms MaxLatency; the bottlenecks were directory
 scans and per-record fileSize calls on the hot path.
 
 ---
