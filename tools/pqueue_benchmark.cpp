@@ -183,6 +183,16 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
         if (r.remove != 0)
             v.push_back("remove != 0: unexpected segment removal on enqueue-only path");
     }
+    if (r.scenario == "peek_pop") {
+        if (r.writeAt != r.records)
+            v.push_back("writeAt != records: expected exactly one writeAt (POP event) per pop");
+        if (r.readAt != r.records)
+            v.push_back("readAt != records: expected exactly one readAt (peek) per record");
+        if (r.read_bpp != static_cast<double>(r.payloadBytes))
+            v.push_back("read_bpp != payloadBytes: bytes read per record does not match payload size");
+        if (r.remove != 0)
+            v.push_back("remove != 0: unexpected segment removal on pop-only path");
+    }
     if (r.scenario == "outbox_offline_submit") {
         if (r.writeAt != r.records)
             v.push_back("writeAt != records: expected exactly one writeAt per enqueue");
@@ -205,7 +215,7 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
     const auto data = makePayload(payloadBytes);
     SampleSet samples;
 
-    std::uint64_t totalBytesWritten = 0, totalBytesRead = 0;
+    std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
     std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
     bool anyFail = false;
 
@@ -215,7 +225,7 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
 
         pqueue::Queue q(queueConfig(tempBase("enqueue"), fs, payloadBytes));
         (void)q.stats();  // trigger mount
-        fs->resetCounters();
+        const auto before = fs->counters();
 
         for (std::uint32_t i = 0; i < records; ++i) {
             const std::uint64_t simBefore = fs->counters().simLatencyUs;
@@ -227,13 +237,14 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
             if (!st.ok()) { anyFail = true; break; }
         }
 
-        const auto& c = fs->counters();
-        totalBytesWritten += c.bytesWritten;
-        totalBytesRead    += c.bytesRead;
-        totalWriteFile    += c.writeFile;
-        totalWriteAt      += c.writeAt;
-        totalReadAt       += c.readAt;
-        totalRemove       += c.removeFile;
+        const auto after = fs->counters();
+        totalDataBytesWritten += (after.bytesWritten - after.lockBytesWritten)
+                               - (before.bytesWritten - before.lockBytesWritten);
+        totalBytesRead    += after.bytesRead    - before.bytesRead;
+        totalWriteFile    += after.writeFile    - before.writeFile;
+        totalWriteAt      += after.writeAt      - before.writeAt;
+        totalReadAt       += after.readAt       - before.readAt;
+        totalRemove       += after.removeFile   - before.removeFile;
     }
 
     const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
@@ -250,7 +261,78 @@ BenchmarkResult scenarioEnqueue(std::uint32_t payloadBytes,
     res.sim_p99_ms   = samples.simP99Ms();
     res.sim_max_ms   = samples.simMaxMs();
     res.write_amp    = (totalOps > 0 && payloadBytes > 0)
-                     ? static_cast<double>(totalBytesWritten) / static_cast<double>(totalOps * payloadBytes)
+                     ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
+                     : 0.0;
+    res.read_bpp     = totalOps > 0
+                     ? static_cast<double>(totalBytesRead) / static_cast<double>(totalOps)
+                     : 0.0;
+    res.writeFile    = totalWriteFile / repeat;
+    res.writeAt      = totalWriteAt   / repeat;
+    res.readAt       = totalReadAt    / repeat;
+    res.remove       = totalRemove    / repeat;
+    res.ok           = !anyFail;
+    return res;
+}
+
+BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
+                                 std::uint32_t records,
+                                 std::uint32_t repeat) {
+    const auto lat  = littleFsSimLatency();
+    const auto data = makePayload(payloadBytes);
+    SampleSet samples;
+
+    std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    bool anyFail = false;
+
+    for (std::uint32_t r = 0; r < repeat; ++r) {
+        auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+        fs->setLatency(lat);
+
+        pqueue::Queue q(queueConfig(tempBase("peek_pop"), fs, payloadBytes));
+        for (std::uint32_t i = 0; i < records; ++i) {
+            if (!q.enqueue(data).ok()) { anyFail = true; break; }
+        }
+        if (anyFail) break;
+        const auto before = fs->counters();
+
+        std::string out;
+        for (std::uint32_t i = 0; i < records; ++i) {
+            const std::uint64_t simBefore = fs->counters().simLatencyUs;
+            const auto t0 = Clock::now();
+            auto st = q.peek(out);
+            if (st.ok()) st = q.pop();
+            const auto t1 = Clock::now();
+            samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
+                        static_cast<double>(fs->counters().simLatencyUs - simBefore));
+            if (!st.ok()) { anyFail = true; break; }
+        }
+
+        const auto after = fs->counters();
+        totalDataBytesWritten += (after.bytesWritten - after.lockBytesWritten)
+                               - (before.bytesWritten - before.lockBytesWritten);
+        totalBytesRead    += after.bytesRead    - before.bytesRead;
+        totalWriteFile    += after.writeFile    - before.writeFile;
+        totalWriteAt      += after.writeAt      - before.writeAt;
+        totalReadAt       += after.readAt       - before.readAt;
+        totalRemove       += after.removeFile   - before.removeFile;
+    }
+
+    const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
+
+    BenchmarkResult res;
+    res.scenario     = "peek_pop";
+    res.payloadBytes = payloadBytes;
+    res.records      = records;
+    res.repeat       = repeat;
+    res.p50_us       = samples.wallP50();
+    res.p90_us       = samples.wallP90();
+    res.p99_us       = samples.wallP99();
+    res.max_us       = samples.wallMax();
+    res.sim_p99_ms   = samples.simP99Ms();
+    res.sim_max_ms   = samples.simMaxMs();
+    res.write_amp    = (totalOps > 0 && payloadBytes > 0)
+                     ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
                      : 0.0;
     res.read_bpp     = totalOps > 0
                      ? static_cast<double>(totalBytesRead) / static_cast<double>(totalOps)
@@ -270,7 +352,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
     const auto body = makePayload(payloadBytes);
     SampleSet samples;
 
-    std::uint64_t totalBytesWritten = 0, totalBytesRead = 0;
+    std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
     std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
     bool anyFail = false;
 
@@ -289,7 +371,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
         pqueue::http::Outbox outbox(cfg, transport, fakeClock, &clock);
         (void)outbox.stats();  // trigger mount
         transport.online = false;
-        fs->resetCounters();
+        const auto before = fs->counters();
 
         for (std::uint32_t i = 0; i < records; ++i) {
             const std::uint64_t simBefore = fs->counters().simLatencyUs;
@@ -302,13 +384,14 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
             if (sub.status != pqueue::SubmitStatus::Queued) { anyFail = true; break; }
         }
 
-        const auto& c = fs->counters();
-        totalBytesWritten += c.bytesWritten;
-        totalBytesRead    += c.bytesRead;
-        totalWriteFile    += c.writeFile;
-        totalWriteAt      += c.writeAt;
-        totalReadAt       += c.readAt;
-        totalRemove       += c.removeFile;
+        const auto after = fs->counters();
+        totalDataBytesWritten += (after.bytesWritten - after.lockBytesWritten)
+                               - (before.bytesWritten - before.lockBytesWritten);
+        totalBytesRead    += after.bytesRead    - before.bytesRead;
+        totalWriteFile    += after.writeFile    - before.writeFile;
+        totalWriteAt      += after.writeAt      - before.writeAt;
+        totalReadAt       += after.readAt       - before.readAt;
+        totalRemove       += after.removeFile   - before.removeFile;
     }
 
     const auto totalOps = static_cast<std::uint64_t>(repeat) * records;
@@ -325,7 +408,7 @@ BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
     res.sim_p99_ms   = samples.simP99Ms();
     res.sim_max_ms   = samples.simMaxMs();
     res.write_amp    = (totalOps > 0 && payloadBytes > 0)
-                     ? static_cast<double>(totalBytesWritten) / static_cast<double>(totalOps * payloadBytes)
+                     ? static_cast<double>(totalDataBytesWritten) / static_cast<double>(totalOps * payloadBytes)
                      : 0.0;
     res.read_bpp     = totalOps > 0
                      ? static_cast<double>(totalBytesRead) / static_cast<double>(totalOps)
@@ -438,6 +521,8 @@ int main(int argc, char** argv) {
     std::vector<BenchmarkResult> results;
     for (std::uint32_t payload : {64u, 256u, 1024u, 2048u})
         results.push_back(scenarioEnqueue(payload, kBenchmarkN, repeat));
+    for (std::uint32_t payload : {64u, 256u, 1024u, 2048u})
+        results.push_back(scenarioPeekPop(payload, kBenchmarkN, repeat));
     for (std::uint32_t payload : {256u, 1024u})
         results.push_back(scenarioOutboxOfflineSubmit(payload, kBenchmarkN, repeat));
 

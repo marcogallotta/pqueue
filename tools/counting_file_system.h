@@ -40,6 +40,7 @@ struct FsCounters {
     std::uint64_t lockRelease = 0;
     std::uint64_t bytesRead = 0;
     std::uint64_t bytesWritten = 0;
+    std::uint64_t lockBytesWritten = 0;
 #ifdef ARDUINO
     std::uint32_t msFileSize   = 0;
     std::uint32_t msReadAt     = 0;
@@ -180,7 +181,8 @@ public:
 
     pqueue::Status tryAcquireLockFile(const std::string& name, const std::string& contents) override {
         ++counters_.lockAcquire;
-        counters_.bytesWritten += contents.size();
+        counters_.bytesWritten     += contents.size();
+        counters_.lockBytesWritten += contents.size();
         return inner_->tryAcquireLockFile(name, contents);
     }
 
