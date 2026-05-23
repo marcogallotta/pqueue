@@ -471,9 +471,11 @@ stays at 1 with a single contiguous range.
 
 `tools/pqueue_profiling.cpp` is superseded by the benchmark binary
 (`tools/pqueue_benchmark.cpp`, see `docs/benchmark.md`) and the I/O count
-regression test. It will be deleted once both are complete. Until then it
-remains buildable. Build: `make -j12 profiling`. All modes use an in-memory FS
-and complete in under a second.
+regression test. The benchmark is partially implemented (outbox offline submit
+scenario; enqueue, peek+pop, mount, and idle compaction are pending). Until all
+scenarios are ported, the profiling tool remains buildable. Build:
+`make -j12 profiling`. All modes use an in-memory FS and complete in under a
+second.
 
 ```
 ./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles> [flags]
