@@ -126,7 +126,15 @@ compaction between cycles prevents hot-path compaction during the next burst.
 --max-total-bytes <n>      cfg.maxTotalBytes (default 1048576)
 --max-segments <n>         cfg.maxSegments (default 200)
 --max-output-segments <n>  cfg.maxOutputSegments (default 8)
+--min-free-bytes <n>       cfg.minFreeBytes: FS floor; enqueue fails if freeBytes drops below n (default 0 = disabled)
+--fs-total-bytes <n>       simulated FS total size in bytes (default 0 = effectively unlimited)
 ```
+
+`--fs-total-bytes` and `--min-free-bytes` model the real safety floor: on device, LittleFS free space is shared
+with other files, metadata, and logs, so the queue may be rejected by the FS floor before its own footprint
+cap (`maxTotalBytes`) is hit. Without these flags the sim cannot detect this failure mode. Results report
+`fsFloorHit` (enqueues rejected by FS floor) separately from `capExhausted` (rejected by queue footprint
+cap) so the two failure modes are distinguishable.
 
 **Simulated latency model** (`littleFsSimLatency()`, scaled 100x from observed
 device timings):

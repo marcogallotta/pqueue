@@ -13,8 +13,12 @@
 
 // In-memory FileSystem implementation for simulation use. All I/O stays in
 // RAM; no disk access at all. Reset by constructing a new instance per run.
+// totalBytes: simulated FS capacity; 0 means effectively unlimited (4 GB).
 class MemoryFileSystem final : public pqueue::FileSystem {
 public:
+    explicit MemoryFileSystem(std::uint64_t totalBytes = 0)
+        : totalBytes_(totalBytes == 0 ? (1ULL << 32) : totalBytes) {}
+
     pqueue::Status mount(const std::string&) override {
         files_.clear();
         return pqueue::Status::success();
@@ -112,10 +116,13 @@ public:
     }
 
     std::uint64_t freeBytes() const override {
-        return 1ULL << 32; // 4 GB — effectively unlimited for sim purposes
+        std::uint64_t used = 0;
+        for (const auto& kv : files_) used += kv.second.size();
+        return totalBytes_ > used ? totalBytes_ - used : 0;
     }
 
 private:
+    std::uint64_t                               totalBytes_;
     std::map<std::string, std::vector<uint8_t>> files_;
     std::map<std::string, std::string>          locks_;
 };

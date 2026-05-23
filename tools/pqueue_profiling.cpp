@@ -36,6 +36,8 @@ struct ProfilingConfig {
     std::uint32_t maxTotalBytes     = 1024 * 1024;
     std::uint32_t maxSegments       = 200;
     std::uint32_t maxOutputSegments = 8;
+    std::uint32_t minFreeBytes      = 0;   // FS floor; 0 = disabled
+    std::uint32_t fsTotalBytes      = 0;   // simulated FS size; 0 = effectively unlimited
 };
 
 // ---------------------------------------------------------------------------
@@ -324,6 +326,7 @@ struct CompactionBurstResult {
     std::uint64_t maxLatencyUs    = 0;
     std::uint32_t deadlocks       = 0;
     std::uint32_t capExhausted    = 0;
+    std::uint32_t fsFloorHit      = 0;
     std::uint32_t finalQSize      = 0;
     FsCounters    fs;
     bool          ok              = true;
@@ -461,7 +464,7 @@ pqueue::AppendLogConfig makeStoreCfg(const char* basePath, std::shared_ptr<Count
     cfg.maxSegments        = pcfg.maxSegments;
     cfg.maxTotalBytes      = pcfg.maxTotalBytes;
     cfg.maxOutputSegments  = pcfg.maxOutputSegments;
-    cfg.minFreeBytes       = 0;
+    cfg.minFreeBytes       = pcfg.minFreeBytes;
     cfg.fileSystem         = counting;
     return cfg;
 }
@@ -475,7 +478,7 @@ CompactionBurstResult scenarioCompactionBurst(
     std::uint32_t rangePressureTrigger = 3,
     FsLatency latency = {})
 {
-    auto memFs    = std::make_shared<MemoryFileSystem>();
+    auto memFs    = std::make_shared<MemoryFileSystem>(pcfg.fsTotalBytes);
     auto counting = std::make_shared<CountingFileSystem>(memFs);
     counting->setLatency(latency);
 
@@ -549,11 +552,15 @@ CompactionBurstResult scenarioCompactionBurst(
                 ++nextSeq;
                 ++queueSize;
             } else {
-                bool reclaimable = false;
-                for (const auto& rs : buildCompactRangeStats(store))
-                    if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
-                if (reclaimable) ++result.deadlocks;
-                else             ++result.capExhausted;
+                if (pcfg.minFreeBytes > 0 && std::string_view(st.message) == "insufficient filesystem free space") {
+                    ++result.fsFloorHit;
+                } else {
+                    bool reclaimable = false;
+                    for (const auto& rs : buildCompactRangeStats(store))
+                        if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
+                    if (reclaimable) ++result.deadlocks;
+                    else             ++result.capExhausted;
+                }
             }
             checkAndCompact();
         }
@@ -595,6 +602,7 @@ struct IdleCompactionResult {
     std::uint32_t hotCompactions   = 0;    // compactions triggered on write path (should be 0)
     std::uint32_t deadlocks        = 0;
     std::uint32_t capExhausted     = 0;
+    std::uint32_t fsFloorHit       = 0;
     bool          ok               = true;
 };
 
@@ -605,7 +613,7 @@ IdleCompactionResult scenarioIdleCompaction(
     const ProfilingConfig& pcfg,
     FsLatency latency = {})
 {
-    auto memFs    = std::make_shared<MemoryFileSystem>();
+    auto memFs    = std::make_shared<MemoryFileSystem>(pcfg.fsTotalBytes);
     auto counting = std::make_shared<CountingFileSystem>(memFs);
     counting->setLatency(latency);
 
@@ -635,11 +643,15 @@ IdleCompactionResult scenarioIdleCompaction(
                 ++nextSeq;
                 ++queueSize;
             } else {
-                bool reclaimable = false;
-                for (const auto& rs : buildCompactRangeStats(store))
-                    if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
-                if (reclaimable) ++result.deadlocks;
-                else             ++result.capExhausted;
+                if (pcfg.minFreeBytes > 0 && std::string_view(st.message) == "insufficient filesystem free space") {
+                    ++result.fsFloorHit;
+                } else {
+                    bool reclaimable = false;
+                    for (const auto& rs : buildCompactRangeStats(store))
+                        if (rs.deadRatio() >= 0.01f) { reclaimable = true; break; }
+                    if (reclaimable) ++result.deadlocks;
+                    else             ++result.capExhausted;
+                }
             }
         }
 
@@ -684,10 +696,13 @@ void printIdleCompactionResult(const IdleCompactionResult& r, bool simMode) {
             static_cast<double>(r.totalIdleUs) / 1000.0);
         std::printf("  (multiply ms by 100 for predicted on-device ms at calibrated flash speed)\n");
     }
-    std::printf("  deadlocks=%-4u capExhausted=%-4u\n", r.deadlocks, r.capExhausted);
+    std::printf("  deadlocks=%-4u capExhausted=%-4u fsFloorHit=%-4u\n",
+        r.deadlocks, r.capExhausted, r.fsFloorHit);
     if (!r.ok) std::printf("  FAILED: mount error\n");
     if (r.hotCompactions > 0)
         std::printf("  WARNING: hot-path compactions fired during burst -- clean-storage invariant violated\n");
+    if (r.fsFloorHit > 0)
+        std::printf("  WARNING: enqueue rejected by FS floor (minFreeBytes) -- increase --fs-total-bytes or reduce --min-free-bytes\n");
 }
 
 void printCompactionBurstResult(const CompactionBurstResult& r) {
@@ -696,12 +711,14 @@ void printCompactionBurstResult(const CompactionBurstResult& r) {
     std::printf("  compactions=%-4u noOps=%-4u maxOutSegs=%-3u simMaxLatency=%.1fms\n",
         r.compactions, r.noOps, r.maxOutSegs,
         static_cast<double>(r.maxLatencyUs) / 1000.0);
-    std::printf("  deadlocks=%-4u capExhausted=%-4u finalQ=%-4u\n",
-        r.deadlocks, r.capExhausted, r.finalQSize);
+    std::printf("  deadlocks=%-4u capExhausted=%-4u fsFloorHit=%-4u finalQ=%-4u\n",
+        r.deadlocks, r.capExhausted, r.fsFloorHit, r.finalQSize);
     std::printf("  readFile=%-6lu readAt=%-6lu writeFile=%-6lu listFiles=%-6lu removeFile=%-6lu\n",
         (unsigned long)r.fs.readFile, (unsigned long)r.fs.readAt, (unsigned long)r.fs.writeFile,
         (unsigned long)r.fs.listFiles, (unsigned long)r.fs.removeFile);
     if (!r.ok) std::printf("  FAILED: mount error\n");
+    if (r.fsFloorHit > 0)
+        std::printf("  WARNING: enqueue rejected by FS floor (minFreeBytes) -- increase --fs-total-bytes or reduce --min-free-bytes\n");
 }
 
 void printHeader() {
@@ -779,6 +796,8 @@ ProfilingConfig parseFlags(int argc, char** argv, int firstFlag) {
         else if (flag == "--max-total-bytes")    { pcfg.maxTotalBytes     = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
         else if (flag == "--max-segments")       { pcfg.maxSegments       = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
         else if (flag == "--max-output-segments"){ pcfg.maxOutputSegments = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
+        else if (flag == "--min-free-bytes")     { pcfg.minFreeBytes      = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
+        else if (flag == "--fs-total-bytes")     { pcfg.fsTotalBytes      = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10)); }
     }
     return pcfg;
 }
@@ -796,7 +815,9 @@ void usage(const char* argv0) {
         "  --max-segment-bytes <n>    cfg.maxSegmentBytes (default 4096)\n"
         "  --max-total-bytes <n>      cfg.maxTotalBytes (default 1048576)\n"
         "  --max-segments <n>         cfg.maxSegments (default 200)\n"
-        "  --max-output-segments <n>  cfg.maxOutputSegments (default 8)\n",
+        "  --max-output-segments <n>  cfg.maxOutputSegments (default 8)\n"
+        "  --min-free-bytes <n>       cfg.minFreeBytes: enqueue requires freeBytes >= n + write growth (default 0 = disabled)\n"
+        "  --fs-total-bytes <n>       simulated FS total size in bytes (default 0 = effectively unlimited)\n",
         argv0, argv0, argv0);
 }
 
