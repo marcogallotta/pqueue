@@ -60,7 +60,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests examples run-examples repair-tool appendlog-diag doctor-dump sim benchmark docs coverage clean .FORCE
+.PHONY: all test tests run-tests examples run-examples repair-tool appendlog-diag doctor-dump sim benchmark benchmark-markdown update-benchmark-baseline benchmark-baseline docs coverage clean .FORCE
 
 all: test
 
@@ -97,6 +97,14 @@ appendlog-diag: $(APPENDLOG_DIAG_TARGET)
 doctor-dump: $(DOCTOR_DUMP_TARGET)
 
 benchmark: $(BENCHMARK_TARGET)
+
+benchmark-markdown: $(BENCHMARK_TARGET)
+	./$(BENCHMARK_TARGET) --markdown --strict --repeat 5 --calibration-file data/calibration-esp32s3.json
+
+update-benchmark-baseline: $(BENCHMARK_TARGET)
+	./$(BENCHMARK_TARGET) --json --strict --repeat 5 --calibration-file data/calibration-esp32s3.json > data/benchmark-results-esp32s3.json
+
+benchmark-baseline: update-benchmark-baseline
 
 $(BENCHMARK_TARGET): tools/pqueue_benchmark.cpp $(PQUEUE_SRC)
 	@mkdir -p $(dir $@)

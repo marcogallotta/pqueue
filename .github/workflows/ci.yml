@@ -57,10 +57,13 @@ jobs:
         run: make -j"$(nproc)" benchmark
 
       - name: Run benchmark
-        run: ./build/pqueue-benchmark --json --strict --repeat 5 > /tmp/benchmark-current.json
+        run: ./build/pqueue-benchmark --json --strict --repeat 5 --calibration-file data/calibration-esp32s3.json > /tmp/benchmark-current.json
 
       - name: Regression check
-        run: python3 tools/benchmark_regression.py docs/benchmark-results.json /tmp/benchmark-current.json
+        run: python3 tools/benchmark_regression.py data/benchmark-results-esp32s3.json /tmp/benchmark-current.json
+
+      - name: Calibration smoke check
+        run: python3 tests/benchmark_calibration_smoke.py
 
   docs:
     runs-on: ubuntu-24.04

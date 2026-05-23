@@ -4,6 +4,7 @@
 #include "pqueue/queue.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -46,7 +47,7 @@ static constexpr std::uint32_t kMountMaxTotalBytes =
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-inline FsLatency littleFsSimLatency() {
+static FsLatency gSimLatency = []() {
     FsLatency lat;
     lat.readFileUs         = 345;
     lat.readAtUs           = 345;
@@ -57,6 +58,70 @@ inline FsLatency littleFsSimLatency() {
     lat.listFilesBaseUs    = 690;
     lat.listFilesPerFileUs = 86;
     return lat;
+}();
+
+inline FsLatency littleFsSimLatency() { return gSimLatency; }
+
+bool loadCalibrationFile(const std::string& path, FsLatency& out) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) {
+        std::fprintf(stderr, "calibration-file: cannot open '%s'\n", path.c_str());
+        return false;
+    }
+    std::string content;
+    char buf[256];
+    while (std::fgets(buf, sizeof(buf), f)) content += buf;
+    std::fclose(f);
+
+    // Parse a single uint32 field. Accepts "key":value, "key": value, "key" : value.
+    auto extract = [&](const char* key, std::uint32_t& val, bool& foundFlag) {
+        const std::string kq = std::string("\"") + key + "\"";
+        const auto kpos = content.find(kq);
+        if (kpos == std::string::npos) return;
+        // skip whitespace then ':'
+        std::size_t p = kpos + kq.size();
+        while (p < content.size() && std::isspace((unsigned char)content[p])) ++p;
+        if (p >= content.size() || content[p] != ':') return;
+        ++p;
+        while (p < content.size() && std::isspace((unsigned char)content[p])) ++p;
+        char* end = nullptr;
+        const auto v = static_cast<std::uint32_t>(
+            std::strtoul(content.c_str() + p, &end, 10));
+        if (end == content.c_str() + p) return; // no digits
+        val = v;
+        foundFlag = true;
+    };
+
+    struct Field { const char* name; std::uint32_t* val; bool allowZero; bool found = false; };
+    FsLatency lat{};
+    Field fields[] = {
+        { "readAt_us",             &lat.readAtUs,          false },
+        { "readFile_us",           &lat.readFileUs,        false },
+        { "writeFile_fixed_us",    &lat.writeFileFixedUs,  false },
+        { "writeFile_per_kb_us",   &lat.writeFilePerKbUs,  false },
+        { "writeAt_us",            &lat.writeAtUs,         false },
+        { "removeFile_us",         &lat.removeFileUs,      false },
+        { "listFiles_base_us",     &lat.listFilesBaseUs,   true  }, // 0 valid (fit intercept)
+        { "listFiles_per_file_us", &lat.listFilesPerFileUs,false },
+    };
+    for (auto& f : fields) extract(f.name, *f.val, f.found);
+
+    bool ok = true;
+    for (const auto& f : fields) {
+        if (!f.found) {
+            std::fprintf(stderr, "calibration-file: missing field '%s' in '%s'\n",
+                         f.name, path.c_str());
+            ok = false;
+        } else if (!f.allowZero && *f.val == 0) {
+            std::fprintf(stderr, "calibration-file: field '%s' is zero in '%s'\n",
+                         f.name, path.c_str());
+            ok = false;
+        }
+    }
+    if (!ok) return false;
+
+    out = lat;
+    return true;
 }
 
 std::string getGitHash() {
@@ -159,6 +224,8 @@ struct SampleSet {
 
 struct BenchmarkConfig {
     std::string   gitHash;
+    std::string   calibrationFile;  // empty = default hardcoded constants
+    FsLatency     latency;
     // AppendLogConfig defaults (maxSegments, maxSegmentBytes, maxOutputSegments)
     // plus the shared maxTotalBytes = kBenchmarkMaxTotalBytes, which is what
     // every scenario passes as reservedBytes.
@@ -644,7 +711,22 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
     std::printf("    \"maxSegments\": %u,\n", cfg.maxSegments);
     std::printf("    \"maxTotalBytes\": %u,\n", cfg.maxTotalBytes);
     std::printf("    \"maxOutputSegments\": %u,\n", cfg.maxOutputSegments);
-    std::printf("    \"platform\": \"%s\"\n", cfg.platform.c_str());
+    std::printf("    \"platform\": \"%s\",\n", cfg.platform.c_str());
+    if (cfg.calibrationFile.empty()) {
+        std::printf("    \"calibration\": \"default\"\n");
+    } else {
+        std::printf("    \"calibration\": {\n");
+        std::printf("      \"file\": \"%s\",\n", cfg.calibrationFile.c_str());
+        std::printf("      \"readAt_us\": %u,\n",             cfg.latency.readAtUs);
+        std::printf("      \"readFile_us\": %u,\n",           cfg.latency.readFileUs);
+        std::printf("      \"writeFile_fixed_us\": %u,\n",    cfg.latency.writeFileFixedUs);
+        std::printf("      \"writeFile_per_kb_us\": %u,\n",   cfg.latency.writeFilePerKbUs);
+        std::printf("      \"writeAt_us\": %u,\n",            cfg.latency.writeAtUs);
+        std::printf("      \"removeFile_us\": %u,\n",         cfg.latency.removeFileUs);
+        std::printf("      \"listFiles_base_us\": %u,\n",     cfg.latency.listFilesBaseUs);
+        std::printf("      \"listFiles_per_file_us\": %u\n",  cfg.latency.listFilesPerFileUs);
+        std::printf("    }\n");
+    }
     std::printf("  },\n");
     std::printf("  \"results\": [\n");
     for (std::size_t i = 0; i < results.size(); ++i) {
@@ -678,66 +760,267 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
     std::printf("}\n");
 }
 
-void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkConfig& cfg) {
-    std::printf("# Benchmark Results\n\n");
-    std::printf("git: `%s`  "
-                "maxSegmentBytes: %u  maxSegments: %u  maxTotalBytes: %u  "
-                "maxOutputSegments: %u  platform: %s\n\n",
-                cfg.gitHash.c_str(), cfg.maxSegmentBytes, cfg.maxSegments,
-                cfg.maxTotalBytes, cfg.maxOutputSegments, cfg.platform.c_str());
-    std::printf("I/O counts are per-run averages (independent of --repeat).\n\n");
+// ---------------------------------------------------------------------------
+// Aligned markdown table helpers
+// ---------------------------------------------------------------------------
 
-    std::printf("| scenario | payload | N | repeat"
-                " | p50_us | p90_us | p99_us | max_us"
-                " | sim_p99_ms | sim_max_ms"
-                " | write_amp | read_bpp"
-                " | writeFile | writeAt | readAt | remove | ok |\n");
-    std::printf("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
-    for (const auto& r : results) {
-        if (r.scenario == "idle_compaction") continue;
-        std::printf("| %s | %uB | %u | %u"
-                    " | %llu | %llu | %llu | %llu"
-                    " | %.3f | %.3f"
-                    " | %.3f | %.1f"
-                    " | %llu | %llu | %llu | %llu | %s |\n",
-                    r.scenario.c_str(), r.payloadBytes, r.records, r.repeat,
-                    (unsigned long long)r.p50_us, (unsigned long long)r.p90_us,
-                    (unsigned long long)r.p99_us, (unsigned long long)r.max_us,
-                    r.sim_p99_ms, r.sim_max_ms,
-                    r.write_amp, r.read_bpp,
-                    (unsigned long long)r.writeFile, (unsigned long long)r.writeAt,
-                    (unsigned long long)r.readAt, (unsigned long long)r.remove,
-                    r.ok ? "yes" : "NO");
-    }
-    std::printf("\n*sim_\\* columns: multiply by 100 for predicted on-device ms "
-                "(ESP32S3, QSPI flash, default calibration).*\n");
+struct Cell {
+    std::string text;
+    enum Align { Left, Right, Decimal } align = Left;
+};
 
-    bool hasIdle = false;
-    for (const auto& r : results) {
-        if (r.scenario == "idle_compaction") { hasIdle = true; break; }
-    }
-    if (hasIdle) {
-        std::printf("\n## Idle compaction  "
-                    "(burst=%u cycles=%u pop=%.0f%%)\n\n",
-                    kIdleBurstSize, kIdleCycles,
-                    static_cast<double>(kIdlePopRatio) * 100.0);
-        std::printf("Counts (`idle_steps`, `idle_noops`, `hot_compactions`, `cap_exhausted`) "
-                    "are per-run averages across `--repeat` runs. "
-                    "`max_step_sim_ms` is the worst single step across all runs. "
-                    "`total_idle_sim_ms` is the per-run average.\n\n");
-        std::printf("| payload | repeat"
-                    " | idle_steps | idle_noops | hot_compactions | cap_exhausted"
-                    " | max_step_sim_ms | total_idle_sim_ms | ok |\n");
-        std::printf("|---|---|---|---|---|---|---|---|---|\n");
-        for (const auto& r : results) {
-            if (r.scenario != "idle_compaction") continue;
-            std::printf("| %uB | %u | %u | %u | %u | %u | %.3f | %.3f | %s |\n",
-                        r.payloadBytes, r.repeat,
-                        r.idle_steps, r.idle_noops, r.hot_compactions, r.cap_exhausted,
-                        r.max_step_sim_ms, r.total_idle_sim_ms,
-                        r.ok ? "yes" : "NO");
+using Row   = std::vector<Cell>;
+using Table = std::vector<Row>;
+
+static void printTable(const Table& rows) {
+    if (rows.size() < 2) return;
+    const std::size_t ncols = rows[0].size();
+
+    // Determine effective column alignment from data rows (skip header row 0).
+    std::vector<Cell::Align> colAlign(ncols, Cell::Align::Left);
+    for (std::size_t i = 1; i < rows.size(); ++i)
+        for (std::size_t c = 0; c < rows[i].size() && c < ncols; ++c)
+            if (rows[i][c].align == Cell::Align::Decimal)
+                colAlign[c] = Cell::Align::Decimal;
+            else if (rows[i][c].align == Cell::Align::Right && colAlign[c] == Cell::Align::Left)
+                colAlign[c] = Cell::Align::Right;
+
+    // For decimal columns find max chars left and right of the decimal point.
+    std::vector<std::size_t> decL(ncols, 0), decR(ncols, 0);
+    for (std::size_t i = 1; i < rows.size(); ++i) {
+        for (std::size_t c = 0; c < rows[i].size() && c < ncols; ++c) {
+            if (colAlign[c] != Cell::Align::Decimal) continue;
+            const auto dot = rows[i][c].text.find('.');
+            if (dot == std::string::npos) {
+                decL[c] = std::max(decL[c], rows[i][c].text.size());
+            } else {
+                decL[c] = std::max(decL[c], dot);
+                decR[c] = std::max(decR[c], rows[i][c].text.size() - dot - 1);
+            }
         }
-        std::printf("\n*sim columns: multiply by 100 for predicted on-device ms.*\n");
+    }
+
+    // Column width = max of: header width, data content width.
+    std::vector<std::size_t> widths(ncols, 0);
+    for (std::size_t c = 0; c < ncols; ++c) {
+        if (colAlign[c] == Cell::Align::Decimal)
+            widths[c] = decL[c] + (decR[c] > 0 ? 1 + decR[c] : 0);
+        // header always contributes to width
+        if (c < rows[0].size())
+            widths[c] = std::max(widths[c], rows[0][c].text.size());
+        // non-decimal data rows
+        if (colAlign[c] != Cell::Align::Decimal)
+            for (std::size_t i = 1; i < rows.size(); ++i)
+                if (c < rows[i].size())
+                    widths[c] = std::max(widths[c], rows[i][c].text.size());
+    }
+
+    // Render one data cell with alignment.
+    auto render = [&](const Cell& cell, std::size_t c) -> std::string {
+        const std::size_t w = widths[c];
+        if (colAlign[c] == Cell::Align::Decimal) {
+            const auto dot = cell.text.find('.');
+            std::string lp = dot == std::string::npos ? cell.text : cell.text.substr(0, dot);
+            std::string rp = dot == std::string::npos ? "" : cell.text.substr(dot + 1);
+            std::string s;
+            if (decL[c] > lp.size()) s += std::string(decL[c] - lp.size(), ' ');
+            s += lp;
+            if (decR[c] > 0) {
+                s += '.';
+                s += rp;
+                if (decR[c] > rp.size()) s += std::string(decR[c] - rp.size(), ' ');
+            }
+            while (s.size() < w) s += ' ';
+            return s;
+        }
+        if (colAlign[c] == Cell::Align::Right) {
+            if (cell.text.size() < w) return std::string(w - cell.text.size(), ' ') + cell.text;
+            return cell.text;
+        }
+        // Left
+        if (cell.text.size() < w) return cell.text + std::string(w - cell.text.size(), ' ');
+        return cell.text;
+    };
+
+    // Header row: always left-aligned.
+    std::printf("|");
+    for (std::size_t c = 0; c < ncols; ++c) {
+        const std::string& h = c < rows[0].size() ? rows[0][c].text : "";
+        std::printf(" %-*s |", (int)widths[c], h.c_str());
+    }
+    std::printf("\n");
+
+    // Separator.
+    std::printf("|");
+    for (std::size_t c = 0; c < ncols; ++c)
+        std::printf("-%s-|", std::string(widths[c], '-').c_str());
+    std::printf("\n");
+
+    // Data rows.
+    for (std::size_t i = 1; i < rows.size(); ++i) {
+        std::printf("|");
+        for (std::size_t c = 0; c < ncols; ++c) {
+            const Cell empty{};
+            const Cell& cell = c < rows[i].size() ? rows[i][c] : empty;
+            std::printf(" %s |", render(cell, c).c_str());
+        }
+        std::printf("\n");
+    }
+}
+
+// Cell constructors: L=left, R=right, D=decimal.
+static Cell L(std::string s) { return {std::move(s), Cell::Align::Left}; }
+static Cell R(std::string s) { return {std::move(s), Cell::Align::Right}; }
+static Cell D(std::string s) { return {std::move(s), Cell::Align::Decimal}; }
+
+// String formatters (return plain strings; wrap in L/R/D at call site).
+static std::string fmtU64(std::uint64_t v)  { char b[32]; std::snprintf(b,sizeof(b),"%llu",(unsigned long long)v); return b; }
+static std::string fmtF(double v)            { char b[32]; std::snprintf(b,sizeof(b),"%.3f",v); return b; }
+static std::string fmtU32(std::uint32_t v)   { char b[32]; std::snprintf(b,sizeof(b),"%u",v); return b; }
+static std::string fmtPay(std::uint32_t v)   { char b[32]; std::snprintf(b,sizeof(b),"%uB",v); return b; }
+
+// ---------------------------------------------------------------------------
+
+void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkConfig& cfg) {
+    char listFilesStr[64];
+    if (cfg.latency.listFilesBaseUs == 0)
+        std::snprintf(listFilesStr, sizeof(listFilesStr), "%u/file", cfg.latency.listFilesPerFileUs);
+    else
+        std::snprintf(listFilesStr, sizeof(listFilesStr), "%u+%u/file",
+                      cfg.latency.listFilesBaseUs, cfg.latency.listFilesPerFileUs);
+
+    std::printf("# Benchmark Results\n\n");
+    std::printf("git: `%s`  platform: %s  "
+                "maxSegmentBytes: %u  maxSegments: %u  maxTotalBytes: %u  "
+                "maxOutputSegments: %u\n\n",
+                cfg.gitHash.c_str(), cfg.platform.c_str(),
+                cfg.maxSegmentBytes, cfg.maxSegments,
+                cfg.maxTotalBytes, cfg.maxOutputSegments);
+    if (cfg.calibrationFile.empty()) {
+        std::printf("sim latency: **default** "
+                    "(readAt=%u writeAt=%u writeFile=%u+%u/KB remove=%u listFiles=%s us)  \n"
+                    "*`sim_*_ms`: multiply by 100 for predicted on-device ms.*\n\n",
+                    cfg.latency.readAtUs, cfg.latency.writeAtUs,
+                    cfg.latency.writeFileFixedUs, cfg.latency.writeFilePerKbUs,
+                    cfg.latency.removeFileUs, listFilesStr);
+    } else {
+        std::printf("sim latency: calibrated from `%s`  \n"
+                    "constants: readAt=%u writeAt=%u writeFile=%u+%u/KB remove=%u listFiles=%s us  \n"
+                    "*`sim_*_ms`: predicted device ms directly.*\n\n",
+                    cfg.calibrationFile.c_str(),
+                    cfg.latency.readAtUs, cfg.latency.writeAtUs,
+                    cfg.latency.writeFileFixedUs, cfg.latency.writeFilePerKbUs,
+                    cfg.latency.removeFileUs, listFilesStr);
+    }
+
+    auto collect = [&](const std::string& name) {
+        std::vector<const BenchmarkResult*> out;
+        for (const auto& r : results)
+            if (r.scenario == name) out.push_back(&r);
+        return out;
+    };
+    auto allOk = [](const std::vector<const BenchmarkResult*>& rows) {
+        for (const auto* r : rows) if (!r->ok) return false;
+        return true;
+    };
+    auto repeatOf = [](const std::vector<const BenchmarkResult*>& rows) {
+        return rows.empty() ? 1u : rows[0]->repeat;
+    };
+    auto nOf = [](const std::vector<const BenchmarkResult*>& rows) {
+        return rows.empty() ? 0u : rows[0]->records;
+    };
+    const char* kAnomaly = "  **anomalies present**";
+
+    // --- Enqueue ---
+    {
+        auto rows = collect("enqueue");
+        if (!rows.empty()) {
+            std::printf("## Enqueue\n\nN=%u, repeat=%u%s\n\n",
+                        nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
+            Table t;
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("write_amp"),L("writeFile"),L("writeAt")});
+            for (const auto* r : rows)
+                t.push_back({L(fmtPay(r->payloadBytes)),
+                             R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
+                             D(fmtF(r->sim_max_ms)), D(fmtF(r->write_amp)),
+                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
+            printTable(t);
+            std::printf("\n");
+        }
+    }
+
+    // --- Peek+pop ---
+    {
+        auto rows = collect("peek_pop");
+        if (!rows.empty()) {
+            std::printf("## Peek + pop\n\nN=%u, repeat=%u%s\n\n",
+                        nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
+            Table t;
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_p99_ms"),L("sim_max_ms"),L("read_bpp"),L("writeAt"),L("readAt")});
+            for (const auto* r : rows)
+                t.push_back({L(fmtPay(r->payloadBytes)),
+                             R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
+                             D(fmtF(r->sim_p99_ms)), D(fmtF(r->sim_max_ms)),
+                             D(fmtF(r->read_bpp)), R(fmtU64(r->writeAt)), R(fmtU64(r->readAt))});
+            printTable(t);
+            std::printf("\n");
+        }
+    }
+
+    // --- Outbox offline submit ---
+    {
+        auto rows = collect("outbox_offline_submit");
+        if (!rows.empty()) {
+            std::printf("## Outbox offline submit\n\nN=%u, repeat=%u%s\n\n",
+                        nOf(rows), repeatOf(rows), allOk(rows) ? "" : kAnomaly);
+            Table t;
+            t.push_back({L("payload"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("write_amp"),L("writeFile"),L("writeAt")});
+            for (const auto* r : rows)
+                t.push_back({L(fmtPay(r->payloadBytes)),
+                             R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
+                             D(fmtF(r->sim_max_ms)), D(fmtF(r->write_amp)),
+                             R(fmtU64(r->writeFile)), R(fmtU64(r->writeAt))});
+            printTable(t);
+            std::printf("\n");
+        }
+    }
+
+    // --- Mount ---
+    {
+        auto rows = collect("mount");
+        if (!rows.empty()) {
+            std::printf("## Mount\n\nrepeat=%u, payload=256B fixed%s\n\n",
+                        repeatOf(rows), allOk(rows) ? "" : kAnomaly);
+            Table t;
+            t.push_back({L("records"),L("p50_us"),L("p99_us"),L("max_us"),L("sim_max_ms"),L("read_bpp"),L("readAt")});
+            for (const auto* r : rows)
+                t.push_back({R(fmtU32(r->records)),
+                             R(fmtU64(r->p50_us)), R(fmtU64(r->p99_us)), R(fmtU64(r->max_us)),
+                             D(fmtF(r->sim_max_ms)), D(fmtF(r->read_bpp)), R(fmtU64(r->readAt))});
+            printTable(t);
+            std::printf("\n");
+        }
+    }
+
+    // --- Idle compaction ---
+    {
+        auto rows = collect("idle_compaction");
+        if (!rows.empty()) {
+            std::printf("## Idle compaction\n\n"
+                        "burst=%u, cycles=%u, pop=%.0f%%, repeat=%u%s\n\n",
+                        kIdleBurstSize, kIdleCycles,
+                        static_cast<double>(kIdlePopRatio) * 100.0,
+                        repeatOf(rows), allOk(rows) ? "" : kAnomaly);
+            Table t;
+            t.push_back({L("payload"),L("steps"),L("noops"),L("hot"),L("cap"),L("sim_max_step_ms"),L("sim_total_ms")});
+            for (const auto* r : rows)
+                t.push_back({L(fmtPay(r->payloadBytes)),
+                             R(fmtU32(r->idle_steps)), R(fmtU32(r->idle_noops)),
+                             R(fmtU32(r->hot_compactions)), R(fmtU32(r->cap_exhausted)),
+                             D(fmtF(r->max_step_sim_ms)), D(fmtF(r->total_idle_sim_ms))});
+            printTable(t);
+            std::printf("\n");
+        }
     }
 }
 
@@ -748,6 +1031,7 @@ int main(int argc, char** argv) {
     bool doMarkdown = false;
     bool strict     = false;
     std::uint32_t repeat = 1;
+    std::string calibrationFile;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -758,11 +1042,20 @@ int main(int argc, char** argv) {
             repeat = static_cast<std::uint32_t>(std::strtoul(argv[++i], nullptr, 10));
             if (repeat == 0) repeat = 1;
         }
+        else if (arg == "--calibration-file" && i + 1 < argc) {
+            calibrationFile = argv[++i];
+        }
     }
     if (!doJson && !doMarkdown) doMarkdown = true;
 
+    if (!calibrationFile.empty()) {
+        if (!loadCalibrationFile(calibrationFile, gSimLatency)) return 1;
+    }
+
     BenchmarkConfig cfg;
-    cfg.gitHash = getGitHash();
+    cfg.gitHash         = getGitHash();
+    cfg.calibrationFile = calibrationFile;
+    cfg.latency         = gSimLatency;
 
     std::vector<BenchmarkResult> results;
     for (std::uint32_t payload : {64u, 256u, 1024u, 2048u})
