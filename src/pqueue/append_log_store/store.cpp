@@ -249,14 +249,28 @@ Status AppendLogStore::scanSegments() {
                     sr.payloadBytes = eh.payloadBytes;
                     records_.push_back(sr);
                 } else {
+                    bool found = false;
                     for (auto& r : records_) {
                         if (r.sequence == eh.sequence) {
                             if (isLastSegment) tailAffectedGens.insert(r.segmentGeneration);
                             r.segmentGeneration = gen;
                             r.payloadOffset = offset + kEnqueueHeaderBytes;
                             r.payloadBytes = eh.payloadBytes;
+                            found = true;
                             break;
                         }
+                    }
+                    if (!found) {
+                        // Original ENQUEUE was compacted away; REWRITE is authoritative.
+                        // Insert in sequence order to preserve the deque invariant.
+                        SegmentRecord sr;
+                        sr.sequence = eh.sequence;
+                        sr.segmentGeneration = gen;
+                        sr.payloadOffset = offset + kEnqueueHeaderBytes;
+                        sr.payloadBytes = eh.payloadBytes;
+                        auto it = records_.begin();
+                        while (it != records_.end() && it->sequence < sr.sequence) ++it;
+                        records_.insert(it, sr);
                     }
                 }
                 if (eh.sequence + 1 > nextSequence_) nextSequence_ = eh.sequence + 1;
@@ -450,11 +464,22 @@ Status AppendLogStore::appendPopEvent(std::uint32_t sequence) {
 }
 
 Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::string& record) {
+    // Find the record before touching the segment: if the sequence is not live,
+    // reject now rather than writing a dangling REWRITE event to disk.
+    SegmentRecord* target = nullptr;
+    for (auto& r : records_) {
+        if (r.sequence == sequence) { target = &r; break; }
+    }
+    if (!target) {
+        return Status::failure(StatusCode::InvalidRecord, "sequence not in live record range");
+    }
+
     const std::uint32_t totalBytes = kEnqueueOverheadBytes + static_cast<std::uint32_t>(record.size());
     if (activeSegmentBytes_ > kSegmentHeaderBytes &&
         activeSegmentBytes_ + totalBytes > config_.maxSegmentBytes) {
         Status st = rotateSegment();
         if (!st.ok()) return st;
+        // rotateSegment does not mutate records_; target remains valid.
     }
     Status ensureSt = ensureActiveSegment(sequence);
     if (!ensureSt.ok()) return ensureSt;
@@ -467,18 +492,12 @@ Status AppendLogStore::appendRewriteEvent(std::uint32_t sequence, const std::str
     activeSegmentBytes_ += n;
     totalOnDiskBytes_   += n;
 
-    // Update RAM state for rewritten record
-    for (auto& r : records_) {
-        if (r.sequence == sequence) {
-            if (activeTailDependenciesTracked_) {
-                activeTailAffectedGenerations_.insert(r.segmentGeneration);
-            }
-            r.segmentGeneration = activeGeneration_;
-            r.payloadOffset = payloadOffset;
-            r.payloadBytes = static_cast<std::uint32_t>(record.size());
-            break;
-        }
+    if (activeTailDependenciesTracked_) {
+        activeTailAffectedGenerations_.insert(target->segmentGeneration);
     }
+    target->segmentGeneration = activeGeneration_;
+    target->payloadOffset     = payloadOffset;
+    target->payloadBytes      = static_cast<std::uint32_t>(record.size());
     return Status::success();
 }
 

@@ -77,6 +77,28 @@ when a complete but invalid record is found.
 list, not numeric generation value. After compaction, the tail may not be the
 numerically largest generation.
 
+**Orphaned REWRITE events:** If a REWRITE event references a sequence not yet in
+`records_` (because its original ENQUEUE was in a dead range that was compacted
+away), the REWRITE becomes authoritative: a new `SegmentRecord` is inserted in
+sequence order. This handles the case where the dead-range fast path deleted the
+source segment before the REWRITE event's segment was compacted.
+
+Two invariants make this safe:
+
+1. **No dangling REWRITEs at write time.** `appendRewriteEvent` validates that
+   the sequence exists in `records_` before writing the event. A REWRITE for a
+   non-existent or already-popped sequence is rejected. Therefore every REWRITE
+   event on disk was written while the sequence was live, and POP-then-REWRITE
+   for the same sequence is impossible in any valid store.
+
+2. **Contiguity preserved.** The FIFO constraint ensures no gaps can appear after
+   orphaned-REWRITE insertions are complete. If seq=X is alive (its REWRITE
+   survives), no seq=Y with Y < X can have been popped without first popping X.
+   Any sequence between X and the current head that was also in a deleted range
+   was also REWRITE'd and will be inserted by the same scan pass. Temporary
+   per-segment gaps during scan do not matter because `readRecord` is not called
+   until `scanSegments` returns.
+
 ---
 
 ## Binary format
@@ -594,11 +616,6 @@ orphan later receives live records and rotates, it forms a separate range that
 cannot immediately merge with the output range. Range count stays bounded and
 dead-range elimination reclaims it once popped, but the fragmentation is
 inelegant.
-
-**Cross-range REWRITE test gap.** No test covers the case where the tail
-contains a REWRITE tombstone for a record in a different range (the analogous
-cross-range POP test covers the same guard path and the production code handles
-both identically, but a dedicated REWRITE test would close the gap).
 
 **Configurable `kManifestMaxRanges`.** The current manifest format (30B fixed +
 4x8B = 62B) fits within the LittleFS 64-byte inline threshold. For devices with
