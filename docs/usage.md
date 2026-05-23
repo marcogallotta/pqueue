@@ -495,13 +495,13 @@ config.
 
 ## Predicting latency
 
-Use the benchmark binary with simulated latency. No device needed. The `sim_*`
-columns in the output are deterministic predictions based on calibrated per-op
-LittleFS costs (×100 = predicted on-device ms for ESP32S3 with QSPI flash).
+Use the benchmark binary with simulated latency. The calibrated `sim_*_ms`
+columns are deterministic predicted device milliseconds for the ESP32S3/QSPI
+calibration in `data/calibration-esp32s3.json`.
 
 ```bash
 make -j12 benchmark
-./build/pqueue-benchmark --markdown --repeat 5
+make benchmark-markdown
 ```
 
 See `data/benchmark-results-esp32s3.md` for the launch baseline and interpretation of

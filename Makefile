@@ -99,7 +99,7 @@ doctor-dump: $(DOCTOR_DUMP_TARGET)
 benchmark: $(BENCHMARK_TARGET)
 
 benchmark-markdown: $(BENCHMARK_TARGET)
-	./$(BENCHMARK_TARGET) --markdown --strict --repeat 5 --calibration-file data/calibration-esp32s3.json
+	@./$(BENCHMARK_TARGET) --markdown --strict --repeat 5 --calibration-file data/calibration-esp32s3.json
 
 update-benchmark-baseline: $(BENCHMARK_TARGET)
 	./$(BENCHMARK_TARGET) --json --strict --repeat 5 --calibration-file data/calibration-esp32s3.json > data/benchmark-results-esp32s3.json
