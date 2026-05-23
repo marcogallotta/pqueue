@@ -57,6 +57,11 @@ static pqueue::http::Outbox outbox(makeConfig(), transport, monotonicMs, nullptr
 // Track whether the previous drain left more compaction work pending.
 static bool moreCompactionWork = false;
 
+// Interval between sensor submissions. submitPost() is not called every loop()
+// tick — that would flood the queue with thousands of readings per second.
+static const unsigned long kSubmitIntervalMs = 30000;  // 30 s
+static unsigned long lastSubmitMs = 0;
+
 // --- Arduino lifecycle ---
 
 void setup() {
@@ -64,8 +69,12 @@ void setup() {
 }
 
 void loop() {
-    // Enqueue an event (sensor reading, failed API call, etc.)
-    outbox.submitPost("/readings", R"({"sensor":"temp","v":22.1})");
+    // Enqueue a sensor reading on a fixed interval, not every tick.
+    const unsigned long now = millis();
+    if (now - lastSubmitMs >= kSubmitIntervalMs) {
+        lastSubmitMs = now;
+        outbox.submitPost("/readings", R"({"sensor":"temp","v":22.1})");
+    }
 
     // Drain: attempt up to 5 deliveries per loop tick. The rate limiter
     // (maxDrainAttemptsPerSecond) prevents flooding the backend.

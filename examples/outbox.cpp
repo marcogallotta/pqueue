@@ -1,8 +1,9 @@
 // outbox -- store-and-forward with automatic retry over a custom transport.
 //
 // pqueue::Outbox wraps Queue with a SendCallback, retry backoff, and rate
-// limiting. This example simulates a backend that is offline when records are
-// submitted, then recovers during the drain phase.
+// limiting. This example simulates a backend that is offline during an enqueue
+// burst, then recovers. The compact phase reclaims the dead bytes left behind
+// by the drained records.
 //
 // Build:  make -j12 examples
 // Run:    ./build/examples/outbox
@@ -18,14 +19,12 @@ static const std::filesystem::path kSpoolDir = "build/examples/spools/outbox";
 
 // --- Simulated backend ---
 
-struct Backend { int failsRemaining = 2; };
+struct Backend { bool online = false; };
 
 static pqueue::SendResult trySend(void* ctx, const std::string& payload, const pqueue::RetryState& retry) {
     auto* b = static_cast<Backend*>(ctx);
-    if (b->failsRemaining > 0) {
-        --b->failsRemaining;
-        printf("    backend FAIL  attempt=%-2u  (%d fail(s) remaining in sim)\n",
-               retry.attempts, b->failsRemaining);
+    if (!b->online) {
+        printf("    backend FAIL  attempt=%-2u  (backend offline)\n", retry.attempts);
         return {pqueue::SendDecision::RetryLater};
     }
     printf("    backend SENT  %s\n", payload.c_str());
@@ -47,9 +46,10 @@ int main() {
     std::filesystem::create_directories(kSpoolDir);
 
     pqueue::Config qcfg;
-    qcfg.basePath      = kSpoolDir.string();
-    qcfg.reservedBytes = 32768;
-    qcfg.minFreeBytes  = 0;
+    qcfg.basePath         = kSpoolDir.string();
+    qcfg.reservedBytes    = 32768;
+    qcfg.minFreeBytes     = 0;
+    qcfg.maxSegmentBytes  = 256;  // small segments so the burst spans several sealed ones
 
     pqueue::OutboxConfig ocfg;
     ocfg.retryDelayMs = 10000;
@@ -57,15 +57,23 @@ int main() {
     Backend backend;
     pqueue::Outbox outbox(qcfg, ocfg, trySend, &backend, clockMs, nullptr);
 
-    // --- Submit ---
-    // If the queue is empty, submit() attempts an immediate send. On failure it
-    // queues the record and starts a retry cooldown. Subsequent submits while
-    // the queue is non-empty are queued directly without a send attempt.
-    printf("=== submit ===\n");
+    // --- Submit (backend offline) ---
+    // All records are queued. Enough records are submitted to fill several
+    // segments so there is real dead data to reclaim after the drain.
+    printf("=== submit (backend offline) ===\n");
     const char* payloads[] = {
-        R"({"sensor":"temp","v":22.1})",
-        R"({"sensor":"temp","v":22.3})",
-        R"({"sensor":"temp","v":22.5})",
+        R"({"sensor":"temp","v":21.0})",
+        R"({"sensor":"temp","v":21.2})",
+        R"({"sensor":"temp","v":21.4})",
+        R"({"sensor":"temp","v":21.6})",
+        R"({"sensor":"temp","v":21.8})",
+        R"({"sensor":"temp","v":22.0})",
+        R"({"sensor":"temp","v":22.2})",
+        R"({"sensor":"temp","v":22.4})",
+        R"({"sensor":"temp","v":22.6})",
+        R"({"sensor":"temp","v":22.8})",
+        R"({"sensor":"temp","v":23.0})",
+        R"({"sensor":"temp","v":23.2})",
     };
     for (const char* p : payloads) {
         auto r = outbox.submit(p);
@@ -75,19 +83,22 @@ int main() {
         printf("  submit %-32s -> %s\n", p, s);
     }
 
-    // --- Drain ---
+    // --- Drain (backend online) ---
     // drainUpTo() attempts up to N sends per call, stopping on failure or when
     // the queue is empty. Call it on each main-loop tick until it drains cleanly.
-    printf("\n=== drain ===\n");
-    for (int cycle = 1; cycle <= 4; ++cycle) {
-        printf("  cycle %d:\n", cycle);
+    printf("\n=== drain (backend online) ===\n");
+    backend.online = true;
+    for (int cycle = 1; cycle <= 20; ++cycle) {
         auto dr = outbox.drainUpTo(10);
-        printf("    attempts=%-2u  sent=%-2u  rateLimited=%s\n",
-               dr.attempts, dr.sent, dr.rateLimited ? "yes" : "no");
-        if (dr.attempts == 0) break; // queue empty
+        if (dr.attempts == 0 && !dr.rateLimited) break;
+        printf("  cycle %-2d  attempts=%-2u  sent=%-2u  rateLimited=%s\n",
+               cycle, dr.attempts, dr.sent, dr.rateLimited ? "yes" : "no");
     }
 
     // --- Compact ---
+    // After all records are sent, each sealed segment still holds the original
+    // ENQUEUE bytes as dead data. compactIdle rewrites those segments to reclaim
+    // the space; the tail (never a compaction candidate) is left alone.
     printf("\n=== compact ===\n");
     pqueue::CompactIdleResult cr;
     std::size_t totalSteps = 0;
@@ -96,8 +107,11 @@ int main() {
         cr = outbox.compactIdle(1);
         totalSteps += cr.stepsRun;
         totalReclaimed += cr.bytesReclaimed;
-    } while (cr.compactions > 0);
-    printf("  done  steps=%zu  reclaimed=%u bytes\n", totalSteps, totalReclaimed);
+        if (cr.compactions > 0) {
+            printf("  step %-2zu  reclaimed=%u bytes\n", totalSteps, cr.bytesReclaimed);
+        }
+    } while (cr.moreWorkLikely);
+    printf("  done  steps=%zu  reclaimed=%u bytes total\n", totalSteps, totalReclaimed);
 
     return 0;
 }
