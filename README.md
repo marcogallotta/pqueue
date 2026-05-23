@@ -536,6 +536,103 @@ results, see `docs/pqueue-compaction-strategy.md`.
 
 ---
 
+## Maintenance: pqueue_doctor
+
+`tools/esp32_pqueue_doctor/main.cpp` is a maintenance firmware image. Flash it
+once for an incident; it runs a serial command loop that lets you inspect,
+validate, compact, and dump queue state without modifying the production
+firmware.
+
+### Adding the build env to your app
+
+The doctor must be built with the same board, partition table, and filesystem
+settings as your app. Add this env to your app's `platformio.ini`:
+
+```ini
+[env:pqueue-maintenance]
+extends = env:<your-main-env>
+build_flags =
+    ${env:<your-main-env>.build_flags}
+    -Ipath/to/pqueue/tools
+build_src_filter =
+    -<*>
+    +<path/to/pqueue/tools/esp32_pqueue_doctor/main.cpp>
+```
+
+Flash with `pio run -e pqueue-maintenance --target upload`.
+
+### Basic session
+
+Connect over serial, then send commands. Queue paths are supplied at runtime:
+
+```
+PQUEUE_DOCTOR_START
+READY
+TARGET api_outbox /pqueue_api_spool
+READY
+VALIDATE
+READY
+DONE
+```
+
+`DONE` reboots back into the maintenance firmware (the app image is not
+restored automatically -- reflash manually when finished).
+
+### Dumping files off-device
+
+`DUMP_ALL` transfers all manifest and segment files in hex over serial.
+`tools/pqueue_doctor_recv.py` receives the dump and writes files to disk:
+
+```bash
+python3 tools/pqueue_doctor_recv.py \
+    --port /dev/ttyACM0 \
+    --target api_outbox:/pqueue_api_spool \
+    --out-dir /tmp/pqdump
+```
+
+Multiple targets:
+
+```bash
+python3 tools/pqueue_doctor_recv.py \
+    --port /dev/ttyACM0 \
+    --targets pqueue_doctor.targets \
+    --out-dir /tmp/pqdump
+```
+
+Targets file format (`pqueue_doctor.targets`):
+
+```
+# name  path
+api_outbox  /pqueue_api_spool
+```
+
+Each target is dumped into `out-dir/name/`. After dumping, run
+`pqueue_appendlog_diag` (build with `make appendlog-diag`) on the dumped
+directory to inspect the manifest and segment layout offline.
+
+### Command reference
+
+```
+TARGET <name> <path>      -- select queue (required before any other command)
+INFO                      -- filesystem stats and file list
+LIST                      -- segment files with sizes and status
+VALIDATE                  -- run Queue::validate(), print issues and repair hints
+DIAG                      -- manifest contents and segment summary
+DUMP_FILE <name>          -- transfer one file off-device
+DUMP_ALL                  -- transfer all manifest and segment files
+COMPACT <steps>           -- run compactIdle(steps)
+COMPACT_ALL <max_steps>   -- run compactIdle to completion, up to max_steps
+DROP_FRONT_IF_CORRUPT     -- drop front record only if corruption is proven
+RECOVER_STALE_LOCK        -- remove a stale lock left by a dead process
+FORMAT CONFIRM            -- destructively reinitialize the queue
+DONE                      -- exit (reboots into maintenance firmware)
+```
+
+`FORMAT` requires the literal argument `CONFIRM` to prevent accidental execution.
+
+
+---
+
 ## Further reading
 
 - `docs/pqueue-append-log-impl.md` -- implementation internals: manifest format,
