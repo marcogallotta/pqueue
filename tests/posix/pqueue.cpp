@@ -3,6 +3,7 @@
 #include "doctest/doctest.h"
 
 #ifndef ARDUINO
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -371,6 +372,120 @@ TEST_CASE("pqueue releases lock after each operation") {
     pqueue::Queue second(config);
     REQUIRE(second.enqueue("second").ok());
     CHECK_EQ(second.stats().count, 2U);
+#endif
+}
+
+TEST_CASE("Queue::enqueue(Span) and peek(MutableSpan) round-trip") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    const char kPayload[] = {0x01, 0x00, 0x02, 0x03}; // contains NUL
+    const pqueue::Span span(reinterpret_cast<const uint8_t*>(kPayload), sizeof(kPayload));
+    REQUIRE(queue.enqueue(span).ok());
+
+    uint8_t buf[16];
+    std::size_t written = 0;
+    REQUIRE(queue.peek(pqueue::MutableSpan(buf, sizeof(buf)), written).ok());
+    REQUIRE_EQ(written, sizeof(kPayload));
+    CHECK_EQ(std::memcmp(buf, kPayload, sizeof(kPayload)), 0);
+#endif
+}
+
+TEST_CASE("Queue::peekSize returns payload size without reading") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    REQUIRE(queue.enqueue("hello").ok());
+
+    std::size_t sz = 0;
+    REQUIRE(queue.peekSize(sz).ok());
+    CHECK_EQ(sz, 5U);
+#endif
+}
+
+TEST_CASE("Queue::peekSize returns QueueEmpty on empty queue") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    std::size_t sz = 0;
+    const auto st = queue.peekSize(sz);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::QueueEmpty);
+#endif
+}
+
+TEST_CASE("Queue::peek(MutableSpan) returns RecordTooLarge when buffer too small") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    REQUIRE(queue.enqueue("hello world").ok());
+
+    uint8_t buf[4];
+    std::size_t written = 0;
+    const auto st = queue.peek(pqueue::MutableSpan(buf, sizeof(buf)), written);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::RecordTooLarge);
+#endif
+}
+
+TEST_CASE("Queue::peek(MutableSpan) returns InvalidArgument for null data with non-zero length") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    REQUIRE(queue.enqueue("hello").ok());
+
+    std::size_t written = 0;
+    const auto st = queue.peek(pqueue::MutableSpan(nullptr, 16), written);
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::InvalidArgument);
+#endif
+}
+
+TEST_CASE("Queue::enqueue(Span) rejects null data with non-zero length") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    const auto st = queue.enqueue(pqueue::Span(nullptr, 4));
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::InvalidArgument);
+    CHECK_EQ(queue.stats().count, 0U);
+#endif
+}
+
+TEST_CASE("Queue::enqueue(Span) rejects oversized records") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Config config = makeConfig();
+    config.recordSizeBytes = 4;
+    pqueue::Queue queue(config);
+
+    const char big[] = "12345";
+    const auto st = queue.enqueue(pqueue::Span(reinterpret_cast<const uint8_t*>(big), 5));
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::RecordTooLarge);
+#endif
+}
+
+TEST_CASE("Queue::enqueue(Span) and enqueue(string) are interchangeable") {
+#ifndef ARDUINO
+    cleanSpool();
+    pqueue::Queue queue(makeConfig());
+
+    REQUIRE(queue.enqueue(pqueue::Span(reinterpret_cast<const uint8_t*>("abc"), 3)).ok());
+    REQUIRE(queue.enqueue(std::string("def")).ok());
+
+    std::string out;
+    REQUIRE(queue.peek(out).ok());
+    CHECK_EQ(out, "abc");
+    REQUIRE(queue.pop().ok());
+    REQUIRE(queue.peek(out).ok());
+    CHECK_EQ(out, "def");
 #endif
 }
 

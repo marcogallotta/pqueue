@@ -28,7 +28,10 @@ public:
     Queue(const Queue&) = delete;
     Queue& operator=(const Queue&) = delete;
 
+    Status enqueue(Span record);
     Status enqueue(const std::string& record);
+    Status peekSize(std::size_t& out);
+    Status peek(MutableSpan out, std::size_t& written);
     Status peek(std::string& out);
     Status pop();
     Status format();

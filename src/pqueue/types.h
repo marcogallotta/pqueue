@@ -9,6 +9,24 @@
 
 namespace pqueue {
 
+struct Span {
+    const uint8_t* data = nullptr;
+    size_t         len  = 0;
+
+    Span() = default;
+    Span(const uint8_t* d, size_t l) : data(d), len(l) {}
+    Span(const char* s, size_t l)    : data(reinterpret_cast<const uint8_t*>(s)), len(l) {}
+    Span(std::nullptr_t, size_t l)   : data(nullptr), len(l) {}
+};
+
+struct MutableSpan {
+    uint8_t* data = nullptr;
+    size_t   len  = 0;
+
+    MutableSpan() = default;
+    MutableSpan(uint8_t* d, size_t l) : data(d), len(l) {}
+};
+
 using Record = std::string;
 
 enum class FullQueuePolicy {

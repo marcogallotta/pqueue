@@ -574,7 +574,7 @@ TEST_CASE("pqueue outbox reports send error when sender is not configured") {
     pqueue::OutboxConfig config = testOutboxConfig();
     config.events = {capturePqueueEvent, &events};
 
-    pqueue::Outbox outbox(queueConfig, config, nullptr, nullptr, fakeClockNow, &clock);
+    pqueue::Outbox outbox(queueConfig, config, static_cast<pqueue::SendCallback>(nullptr), nullptr, fakeClockNow, &clock);
 
     const auto submitted = outbox.submit("fresh");
     CHECK(submitted.status == pqueue::SubmitStatus::SendError);
@@ -860,5 +860,102 @@ TEST_CASE("pqueue outbox handles unknown send decisions as send errors") {
     CHECK(drained.sendError);
     CHECK(drained.detail.code == pqueue::StatusCode::SendFailed);
     CHECK_EQ(drainOutbox.stats().count, 1U);
+#endif
+}
+
+#ifndef ARDUINO
+struct FakeRawSender {
+    std::vector<pqueue::SendDecision> decisions;
+    std::vector<std::string> payloads;
+    std::vector<pqueue::RetryState> retries;
+};
+
+pqueue::SendResult fakeRawSend(void* context, pqueue::Span payload, const pqueue::RetryState& retry) {
+    auto* sender = static_cast<FakeRawSender*>(context);
+    sender->payloads.emplace_back(reinterpret_cast<const char*>(payload.data), payload.len);
+    sender->retries.push_back(retry);
+
+    if (sender->decisions.empty()) {
+        return {pqueue::SendDecision::Sent};
+    }
+
+    const pqueue::SendDecision decision = sender->decisions.front();
+    sender->decisions.erase(sender->decisions.begin());
+    return {decision};
+}
+
+pqueue::Outbox makeRawOutbox(
+    FakeRawSender& sender,
+    FakeClock& clock,
+    pqueue::OutboxConfig outboxConfig = testOutboxConfig()
+) {
+    return pqueue::Outbox(makeOutboxQueueConfig(), outboxConfig, fakeRawSend, &sender, fakeClockNow, &clock);
+}
+#endif
+
+TEST_CASE("Outbox submit(Span) rejects null data with non-zero length") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    FakeSender sender;
+    FakeClock clock;
+    auto outbox = makeOutbox(sender, clock);
+
+    const auto result = outbox.submit(pqueue::Span(nullptr, 4));
+    CHECK(result.status == pqueue::SubmitStatus::SendError);
+    CHECK_EQ(result.detail.code, pqueue::StatusCode::InvalidArgument);
+    CHECK_EQ(sender.payloads.size(), 0U);
+#endif
+}
+
+TEST_CASE("Outbox RawSendCallback: submit routes live send through raw callback") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    FakeRawSender sender;
+    FakeClock clock;
+    auto outbox = makeRawOutbox(sender, clock);
+
+    const auto result = outbox.submit("hello");
+    CHECK(result.status == pqueue::SubmitStatus::Sent);
+    REQUIRE_EQ(sender.payloads.size(), 1U);
+    CHECK_EQ(sender.payloads[0], "hello");
+#endif
+}
+
+TEST_CASE("Outbox RawSendCallback: submit(Span) delivers binary payload unchanged") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    FakeRawSender sender;
+    FakeClock clock;
+    auto outbox = makeRawOutbox(sender, clock);
+
+    const uint8_t data[] = {0x01, 0x00, 0x02, 0xFF};
+    const auto result = outbox.submit(pqueue::Span(data, sizeof(data)));
+    CHECK(result.status == pqueue::SubmitStatus::Sent);
+    REQUIRE_EQ(sender.payloads.size(), 1U);
+    const auto& got = sender.payloads[0];
+    REQUIRE_EQ(got.size(), 4U);
+    CHECK_EQ(static_cast<uint8_t>(got[0]), 0x01U);
+    CHECK_EQ(static_cast<uint8_t>(got[1]), 0x00U);
+    CHECK_EQ(static_cast<uint8_t>(got[2]), 0x02U);
+    CHECK_EQ(static_cast<uint8_t>(got[3]), 0xFFU);
+#endif
+}
+
+TEST_CASE("Outbox RawSendCallback: drain delivers queued record through raw callback") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    FakeRawSender sender;
+    FakeClock clock;
+
+    sender.decisions.push_back(pqueue::SendDecision::RetryLater);
+    auto outbox = makeRawOutbox(sender, clock);
+
+    REQUIRE(outbox.submit("queued").status == pqueue::SubmitStatus::Queued);
+
+    clock.nowMs += 1000;
+    const auto drained = outbox.drain();
+    CHECK(drained.sent == 1);
+    REQUIRE_EQ(sender.payloads.size(), 2U);
+    CHECK_EQ(sender.payloads[1], "queued");
 #endif
 }

@@ -5,6 +5,15 @@
 
 #include "envelope.h"
 
+namespace {
+
+std::string spanToString(pqueue::Span s) {
+    if (s.len == 0) return std::string();
+    return std::string(reinterpret_cast<const char*>(s.data), s.len);
+}
+
+} // namespace
+
 namespace pqueue {
 namespace {
 
@@ -84,6 +93,20 @@ Outbox::Outbox(
     clock_(clock),
     clockContext_(clockContext) {}
 
+Outbox::Outbox(
+    Config queueConfig,
+    OutboxConfig config,
+    RawSendCallback send,
+    void* sendContext,
+    ClockCallback clock,
+    void* clockContext
+) : queue_(queueConfig),
+    config_(config),
+    rawSend_(send),
+    rawSendContext_(sendContext),
+    clock_(clock),
+    clockContext_(clockContext) {}
+
 void Outbox::emit(Event event) const {
     config_.events.emit(event);
 }
@@ -119,8 +142,25 @@ void Outbox::emitRequestEvent(
     emit(event);
 }
 
-SubmitResult Outbox::submit(const std::string& payload) {
-    if (send_ == nullptr || clock_ == nullptr) {
+SendResult Outbox::dispatchSend(const std::string& payload, const RetryState& retry) {
+    if (rawSend_ != nullptr) {
+        return rawSend_(rawSendContext_, Span(payload.data(), payload.size()), retry);
+    }
+    return send_(sendContext_, payload, retry);
+}
+
+SubmitResult Outbox::submit(Span payload) {
+    if (payload.len > 0 && payload.data == nullptr) {
+        const Status st = Status::failure(StatusCode::InvalidArgument, "Span has non-zero length but null data");
+        emitDiagnostic(Severity::Error, st, "submit");
+        return submitResult(SubmitStatus::SendError, st);
+    }
+    if (send_ == nullptr && rawSend_ == nullptr) {
+        const Status st = Status::failure(StatusCode::SendFailed, "outbox is not configured for sending");
+        emitDiagnostic(Severity::Error, st, "submit");
+        return submitResult(SubmitStatus::SendError, st);
+    }
+    if (clock_ == nullptr) {
         const Status st = Status::failure(StatusCode::SendFailed, "outbox is not configured for sending");
         emitDiagnostic(Severity::Error, st, "submit");
         return submitResult(SubmitStatus::SendError, st);
@@ -128,13 +168,14 @@ SubmitResult Outbox::submit(const std::string& payload) {
 
     const StatsResult queueStats = queue_.statsResult();
     if (queueStats.status.ok() && queueStats.stats.count > 0) {
-        return enqueueRecord(payload, 0);
+        return enqueueRecord(spanToString(payload), 0);
     }
     if (!queueStats.status.ok()) {
         emitDiagnostic(Severity::Warning, queueStats.status, "submit_queue_stats_failed_live_send_fallback");
     }
 
-    const SendResult result = send_(sendContext_, payload, RetryState{});
+    const std::string payloadStr = spanToString(payload);
+    const SendResult result = dispatchSend(payloadStr, RetryState{});
     switch (result.decision) {
         case SendDecision::Sent:
             emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "submit", 0, 0, 0);
@@ -145,7 +186,7 @@ SubmitResult Outbox::submit(const std::string& payload) {
             return submitResult(SubmitStatus::Dropped, st);
         }
         case SendDecision::RetryLater: {
-            const auto queued = enqueueRecord(payload, 1);
+            const auto queued = enqueueRecord(payloadStr, 1);
             if (queued.status == SubmitStatus::Queued) {
                 setFrontCooldown(clock_(clockContext_) + config_.retryDelayMs);
                 emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, config_.retryDelayMs, 1);
@@ -157,6 +198,10 @@ SubmitResult Outbox::submit(const std::string& payload) {
     const Status st = Status::failure(StatusCode::SendFailed, "unknown send decision");
     emitDiagnostic(Severity::Error, st, "submit");
     return submitResult(SubmitStatus::SendError, st);
+}
+
+SubmitResult Outbox::submit(const std::string& payload) {
+    return submit(Span(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
 }
 
 DrainResult Outbox::drain() {
@@ -196,7 +241,7 @@ DrainResult Outbox::drainUpTo(std::uint16_t maxDrainAttempts) {
 
 DrainResult Outbox::drainOne(bool enforceRateLimit) {
     DrainResult result;
-    if (send_ == nullptr || clock_ == nullptr) {
+    if ((send_ == nullptr && rawSend_ == nullptr) || clock_ == nullptr) {
         result.sendError = true;
         result.detail = Status::failure(StatusCode::SendFailed, "outbox is not configured for sending");
         emitDiagnostic(Severity::Error, result.detail, "drain");
@@ -260,7 +305,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
         "drain_send_start",
         decoded.attempts,
         0);
-    const SendResult sendResult = send_(sendContext_, decoded.payload, RetryState{decoded.attempts});
+    const SendResult sendResult = dispatchSend(decoded.payload, RetryState{decoded.attempts});
     switch (sendResult.decision) {
         case SendDecision::Sent:
             st = queue_.pop();

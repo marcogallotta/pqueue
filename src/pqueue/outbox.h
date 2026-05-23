@@ -27,6 +27,7 @@ struct SendResult {
 
 // The payload string is treated as opaque bytes, not text. It may contain NULs.
 using SendCallback = SendResult (*)(void* context, const std::string& payload, const RetryState& retry);
+using RawSendCallback = SendResult (*)(void* context, Span payload, const RetryState& retry);
 
 // Must return monotonic milliseconds. Do not use wall/NTP time here.
 // ESP32 callers should use esp_timer_get_time() / 1000.
@@ -89,7 +90,16 @@ public:
         ClockCallback clock,
         void* clockContext
     );
+    Outbox(
+        Config queueConfig,
+        OutboxConfig config,
+        RawSendCallback send,
+        void* sendContext,
+        ClockCallback clock,
+        void* clockContext
+    );
 
+    SubmitResult submit(Span payload);
     SubmitResult submit(const std::string& payload);
     DrainResult drain();
     DrainResult drainUpTo(std::uint16_t maxDrainAttempts);
@@ -129,10 +139,14 @@ private:
     DrainResult dropCorruptFrontRecord(Status corruptStatus, std::uint32_t recordBytes = 0);
     std::uint16_t maxDrainAttemptsPerSecond() const;
 
+    SendResult dispatchSend(const std::string& payload, const RetryState& retry);
+
     Queue queue_;
     OutboxConfig config_;
     SendCallback send_ = nullptr;
     void* sendContext_ = nullptr;
+    RawSendCallback rawSend_ = nullptr;
+    void* rawSendContext_ = nullptr;
     ClockCallback clock_ = nullptr;
     void* clockContext_ = nullptr;
     std::uint64_t drainWindowStartMs_ = 0;

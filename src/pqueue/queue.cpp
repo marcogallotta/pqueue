@@ -3,6 +3,7 @@
 #include "internal/lock_owner.h"
 
 #include <cstdint>
+#include <cstring>
 #include <sstream>
 #include <utility>
 
@@ -113,6 +114,11 @@ bool isCorruptRecordStatus(StatusCode code) {
 } // namespace
 
 namespace {
+
+std::string spanToString(Span s) {
+    if (s.len == 0) return std::string();
+    return std::string(reinterpret_cast<const char*>(s.data), s.len);
+}
 
 std::unique_ptr<Store> makeStore(const Config& config) {
     AppendLogConfig ac;
@@ -230,7 +236,10 @@ Status Queue::loadLatestIndex() {
     return Status::success();
 }
 
-Status Queue::enqueue(const std::string& record) {
+Status Queue::enqueue(Span record) {
+    if (record.len > 0 && record.data == nullptr) {
+        return Status::failure(StatusCode::InvalidArgument, "Span has non-zero length but null data");
+    }
     ScopedLock lock(*this);
     if (!lock.status().ok()) {
         return lock.status();
@@ -239,10 +248,10 @@ Status Queue::enqueue(const std::string& record) {
     if (!st.ok()) {
         return st;
     }
-    if (record.size() > config_.recordSizeBytes) {
+    if (record.len > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "enqueue");
     }
-    if (!store_->canEnqueue(record.size())) {
+    if (!store_->canEnqueue(record.len)) {
         if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest) {
             const Status evictStatus = evictFront();
             if (!evictStatus.ok()) {
@@ -255,13 +264,14 @@ Status Queue::enqueue(const std::string& record) {
     }
 
     const std::uint32_t sequence = index_.tail;
-    st = store_->commitEnqueue(sequence, record);
+    const std::string recordStr = spanToString(record);
+    st = store_->commitEnqueue(sequence, recordStr);
     if (!st.ok() && st.code == StatusCode::QueueFull &&
         config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
         const Status evictStatus = evictFront();
         if (!evictStatus.ok()) return evictStatus;
         diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
-        st = store_->commitEnqueue(sequence, record);
+        st = store_->commitEnqueue(sequence, recordStr);
     }
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "enqueue");
@@ -269,6 +279,60 @@ Status Queue::enqueue(const std::string& record) {
 
     index_.tail += 1;
     index_.count += 1;
+    return Status::success();
+}
+
+Status Queue::enqueue(const std::string& record) {
+    return enqueue(Span(reinterpret_cast<const uint8_t*>(record.data()), record.size()));
+}
+
+Status Queue::peekSize(std::size_t& out) {
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return lock.status();
+    }
+    Status st = loadLatestIndex();
+    if (!st.ok()) {
+        return st;
+    }
+    if (index_.count == 0) {
+        return Status::failure(StatusCode::QueueEmpty, "queue is empty");
+    }
+    return store_->readRecordSize(index_.head, out);
+}
+
+Status Queue::peek(MutableSpan out, std::size_t& written) {
+    if (out.len > 0 && out.data == nullptr) {
+        return Status::failure(StatusCode::InvalidArgument, "MutableSpan has non-zero length but null data");
+    }
+    ScopedLock lock(*this);
+    if (!lock.status().ok()) {
+        return lock.status();
+    }
+    Status st = loadLatestIndex();
+    if (!st.ok()) {
+        return st;
+    }
+    if (index_.count == 0) {
+        return Status::failure(StatusCode::QueueEmpty, "queue is empty");
+    }
+    std::size_t n = 0;
+    st = store_->readRecordSize(index_.head, n);
+    if (!st.ok()) {
+        return st;
+    }
+    if (n > out.len) {
+        return Status::failure(StatusCode::RecordTooLarge, "record payload exceeds buffer length");
+    }
+    std::string tmp;
+    st = store_->readRecord(index_.head, tmp);
+    if (!st.ok()) {
+        return st;
+    }
+    if (out.data != nullptr && n > 0) {
+        std::memcpy(out.data, tmp.data(), n);
+    }
+    written = n;
     return Status::success();
 }
 
