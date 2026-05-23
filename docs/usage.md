@@ -399,4 +399,4 @@ active write tail. The store merges contiguous ranges automatically after each
 compaction step.
 
 For the full strategy rationale, deadlock analysis, and on-device validation
-results, see `docs/pqueue-compaction-strategy.md`.
+results, see `docs/compaction-strategy.md`.

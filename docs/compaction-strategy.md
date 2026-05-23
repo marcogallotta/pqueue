@@ -41,7 +41,7 @@ splice. A dead subrange (no live records in `[startGen, endGen]`) is removed
 without writing output; remainders stay intact.
 
 Range-count gate, fallback expansion, rotate-before-compact, tail dependency
-guard, and the no-op gate are described in `docs/pqueue-append-log-impl.md`.
+guard, and the no-op gate are described in `docs/append-log-impl.md`.
 
 ### Bounded output window
 

@@ -238,8 +238,8 @@ DONE                      -- exit (reboots into maintenance firmware)
 ## Further reading
 
 - `docs/usage.md` -- operating contract, configuration reference, simulator, crash safety
-- `docs/pqueue-append-log-impl.md` -- implementation internals: manifest format, segment layout, compaction mechanics
-- `docs/pqueue-compaction-strategy.md` -- compaction strategy selection, simulator design, on-device validation
+- `docs/append-log-impl.md` -- implementation internals: manifest format, segment layout, compaction mechanics
+- `docs/compaction-strategy.md` -- compaction strategy selection, simulator design, on-device validation
 - `examples/basic_queue.cpp` -- runnable POSIX example: enqueue / drain / compact lifecycle
 - `examples/outbox.cpp` -- runnable POSIX example: store-and-forward with retry
 - `examples/esp32_http_outbox/main.cpp` -- ESP32 firmware reference sketch
