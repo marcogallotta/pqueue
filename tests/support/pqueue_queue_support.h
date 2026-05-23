@@ -53,7 +53,6 @@ public:
     pqueue::Status resizeFile(const std::string& n, std::uint64_t s) override { return inner_->resizeFile(n, s); }
     pqueue::Status fileSize(const std::string& n, std::uint64_t& o) override { return inner_->fileSize(n, o); }
     pqueue::Status removeFile(const std::string& n) override { return inner_->removeFile(n); }
-    pqueue::Status renameFile(const std::string& f, const std::string& t) override { return inner_->renameFile(f, t); }
     pqueue::Status listFiles(std::vector<std::string>& o) override { return inner_->listFiles(o); }
     pqueue::Status tryAcquireLockFile(const std::string& n, const std::string& c) override { return inner_->tryAcquireLockFile(n, c); }
     pqueue::Status releaseLockFile(const std::string& n, const std::string& c) override { return inner_->releaseLockFile(n, c); }

@@ -1,6 +1,6 @@
 #include "pqueue/file_system.h"
 #include "pqueue/status.h"
-#include "pqueue_doctor_dump.h"
+#include "pqueue/doctor/dump.h"
 
 #include <CLI/CLI.hpp>
 
