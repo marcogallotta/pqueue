@@ -124,20 +124,6 @@ TEST_CASE("pqueue survives reopening from disk") {
 #endif
 }
 
-TEST_CASE("pqueue rewriteFront updates the front record without popping it") {
-#ifndef ARDUINO
-    cleanSpool();
-    pqueue::Queue queue(makeConfig());
-
-    REQUIRE(queue.enqueue("retry=0").ok());
-    REQUIRE(queue.rewriteFront("retry=1").ok());
-
-    std::string out;
-    REQUIRE(queue.peek(out).ok());
-    CHECK_EQ(out, "retry=1");
-#endif
-}
-
 TEST_CASE("pqueue accepts records exactly at the configured max size") {
 #ifndef ARDUINO
     cleanSpool();
@@ -246,7 +232,7 @@ TEST_CASE("pqueue matches std::deque over deterministic random operations") {
     assertMatchesModel();
 
     for (int step = 0; step < kOperationCount; ++step) {
-        const int op = static_cast<int>(rng() % 5);
+        const int op = static_cast<int>(rng() % 4);
         switch (op) {
         case 0: { // enqueue
             const std::string record = recordFor(step);
@@ -265,19 +251,7 @@ TEST_CASE("pqueue matches std::deque over deterministic random operations") {
             }
             break;
         }
-        case 2: { // rewriteFront
-            const std::string record = std::string("w") + std::to_string(step);
-            const pqueue::Status status = queue->rewriteFront(record);
-            if (model.empty()) {
-                CHECK_FALSE(status.ok());
-                CHECK(status.code == pqueue::StatusCode::QueueEmpty);
-            } else {
-                REQUIRE(status.ok());
-                model.front() = record;
-            }
-            break;
-        }
-        case 3: { // explicit peek
+        case 2: { // explicit peek
             std::string out;
             const pqueue::Status status = queue->peek(out);
             if (model.empty()) {
@@ -289,7 +263,7 @@ TEST_CASE("pqueue matches std::deque over deterministic random operations") {
             }
             break;
         }
-        case 4: // remount/recreate queue
+        case 3: // remount/recreate queue
             queue.reset();
             queue = std::make_unique<pqueue::Queue>(config);
             break;

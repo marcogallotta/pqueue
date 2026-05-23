@@ -31,7 +31,6 @@ public:
     Status enqueue(const std::string& record);
     Status peek(std::string& out);
     Status pop();
-    Status rewriteFront(const std::string& record);
     Status format();
     CompactIdleResult compactIdle(std::size_t maxSteps);
     Status dropFrontIfCorrupt();
@@ -43,6 +42,8 @@ public:
 private:
     friend class Outbox;
     using RecordVisitor = bool (*)(void* context, const std::string& record, std::uint32_t sequence, std::uint32_t ordinal);
+
+    Status rewriteFront(const std::string& record);
 
     class ScopedLock;
 

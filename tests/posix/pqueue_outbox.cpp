@@ -300,6 +300,29 @@ TEST_CASE("pqueue outbox keeps retry cooldown in RAM only") {
 #endif
 }
 
+TEST_CASE("pqueue outbox persists retry attempt count across remount") {
+#ifndef ARDUINO
+    cleanOutboxSpool();
+    FakeSender sender;
+    sender.decisions.push_back(pqueue::SendDecision::RetryLater);
+    FakeClock clock;
+    pqueue::OutboxConfig config = testOutboxConfig();
+    config.retryDelayMs = 0;
+
+    {
+        auto outbox = makeOutbox(sender, clock, config);
+        CHECK_EQ(outbox.submit("fresh").status, pqueue::SubmitStatus::Queued);
+    }
+
+    // After remount, drain sends successfully; persisted attempt count should be 1.
+    auto restarted = makeOutbox(sender, clock, config);
+    auto drain = restarted.drain();
+    CHECK_EQ(drain.sent, 1U);
+    REQUIRE_GE(sender.retries.size(), 2U);
+    CHECK_EQ(sender.retries[1].attempts, 1U);
+#endif
+}
+
 TEST_CASE("pqueue outbox passes persisted attempts to sender") {
 #ifndef ARDUINO
     cleanOutboxSpool();
