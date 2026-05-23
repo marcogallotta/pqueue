@@ -340,16 +340,23 @@ def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
     log(f"Opening {port} at {baud} baud")
     s = serial.Serial(port, baud, timeout=1)
 
-    if not args.no_reset:
+    if args.trigger:
+        # Running app is already up; send trigger and wait for it to enter doctor mode.
+        time.sleep(0.2)
+        s.reset_input_buffer()
+        log(f"Sending trigger: {args.trigger!r}")
+        s.write((args.trigger + "\n").encode())
+    elif not args.no_reset:
         s.setDTR(False)
         time.sleep(0.1)
         s.setDTR(True)
         time.sleep(0.1)
-    s.reset_input_buffer()
+        s.reset_input_buffer()
 
+    ready_timeout = READY_TIMEOUT_S * 4 if args.trigger else READY_TIMEOUT_S
     log("Waiting for READY...")
-    if not _wait_for_ready(s):
-        log("ERROR: timed out waiting for READY after boot")
+    if not _wait_for_ready(s, timeout_s=ready_timeout):
+        log("ERROR: timed out waiting for READY")
         s.close()
         return False
 
@@ -483,6 +490,8 @@ def main() -> None:
                    help=f"Baud rate (default: {DEFAULT_BAUD})")
     p.add_argument("--no-reset", action="store_true",
                    help="Do not toggle DTR to reset the device on connect")
+    p.add_argument("--trigger", metavar="TEXT",
+                   help="Send TEXT to wake a running app into doctor mode (implies --no-reset)")
 
     # Targets
     p.add_argument("--target", dest="targets", metavar="NAME:PATH",
