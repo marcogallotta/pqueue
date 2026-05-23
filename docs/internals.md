@@ -1,7 +1,5 @@
 # Append-Log Implementation Notes
 
-**Editing rules:** ASCII only -- no Unicode symbols (no checkmarks, arrows, emoji). This file is compiled to PDF via LaTeX and non-ASCII characters cause build warnings or missing glyphs.
-
 This document is internal design reference for contributors. It is not user-facing documentation; see `docs/usage.md` for operating guidance.
 
 The append-log store is a dual-manifest, segment-file backend. The manifest is
@@ -548,8 +546,9 @@ scans and per-record fileSize calls on the hot path.
 dangling files). `commitEnqueue` is the enforcement point: before appending, it
 computes `totalOnDiskBytes() + appendGrowthBytes(recordSize)`. If this exceeds
 `maxTotalBytes`, it loops `compactOneSegment()` until the footprint fits or
-compaction returns noOp, then returns `QueueFull`. The hard FS floor
-(`minFreeBytes`) is checked after the compaction loop. `maxTotalBytes = 0`
+compaction returns noOp, then returns `QueueFull`. The hard FS floor (`minFreeBytes`) is checked after the compaction loop:
+`freeBytes() < minFreeBytes + appendGrowthBytes(recordSize)`, i.e. the write
+is rejected if it would push remaining free space below the floor. `maxTotalBytes = 0`
 disables the footprint cap; `minFreeBytes = 0` disables the FS floor. `Queue`
 maps `Config::reservedBytes` to `maxTotalBytes`.
 
