@@ -83,6 +83,7 @@ inline void cmdInfo(const CurrentTarget& t) {
             Serial.println(static_cast<unsigned long>(sz));
         }
     }
+    sprintln("RESULT command=INFO ok=1");
 }
 
 inline void cmdList(const CurrentTarget& t) {
@@ -101,6 +102,7 @@ inline void cmdList(const CurrentTarget& t) {
     Serial.print(" valid=");            Serial.println(diag.slotA.valid ? "yes" : "no");
     Serial.print("manifest_b exists="); Serial.print(diag.slotB.exists ? "yes" : "no");
     Serial.print(" valid=");            Serial.println(diag.slotB.valid ? "yes" : "no");
+    sprintln("RESULT command=LIST ok=1");
 }
 
 inline void cmdValidate(const CurrentTarget& t) {
@@ -121,6 +123,10 @@ inline void cmdValidate(const CurrentTarget& t) {
             default:                                                  sprintln("none"); break;
         }
     }
+    char result[64];
+    snprintf(result, sizeof(result), "RESULT command=VALIDATE ok=%d issues=%zu",
+             val.ok ? 1 : 0, val.errors.size());
+    sprintln(result);
 }
 
 inline void cmdDiag(const CurrentTarget& t) {
@@ -156,6 +162,8 @@ inline void cmdDiag(const CurrentTarget& t) {
     }
     snprintf(buf, sizeof(buf), "segments=%zu dangling=%zu", diag.segments.size(), diag.danglingSegments);
     sprintln(buf);
+    const bool diagOk = diag.mountStatus.ok() && diag.listStatus.ok();
+    sprintln(diagOk ? "RESULT command=DIAG ok=1" : "RESULT command=DIAG ok=0");
 }
 
 inline void cmdDumpFile(const CurrentTarget& t, const std::string& name) {
@@ -186,44 +194,82 @@ inline void cmdCompact(const CurrentTarget& t, int steps) {
              cr.status.ok() ? "ok" : pqueue::statusCodeName(cr.status.code),
              cr.stepsRun, cr.compactions, cr.noOps, cr.moreWorkLikely ? "yes" : "no");
     sprintln(buf);
+    snprintf(buf, sizeof(buf), "RESULT command=COMPACT ok=%d steps=%zu compactions=%zu more_work=%d",
+             cr.status.ok() ? 1 : 0, cr.stepsRun, cr.compactions, cr.moreWorkLikely ? 1 : 0);
+    sprintln(buf);
 }
 
 inline void cmdCompactAll(const CurrentTarget& t, int maxSteps) {
     pqueue::Queue q(makeQueueConfig(t));
     int totalSteps = 0, totalCompactions = 0;
+    bool ok = true;
     while (totalSteps < maxSteps) {
         const auto cr = q.compactIdle(static_cast<std::size_t>(maxSteps - totalSteps));
         totalSteps       += static_cast<int>(cr.stepsRun);
         totalCompactions += static_cast<int>(cr.compactions);
-        if (!cr.status.ok() || !cr.moreWorkLikely) break;
+        if (!cr.status.ok()) { ok = false; break; }
+        if (!cr.moreWorkLikely) break;
     }
     char buf[128];
     snprintf(buf, sizeof(buf), "compact_all: total_steps=%d compactions=%d", totalSteps, totalCompactions);
+    sprintln(buf);
+    snprintf(buf, sizeof(buf), "RESULT command=COMPACT_ALL ok=%d steps=%d compactions=%d",
+             ok ? 1 : 0, totalSteps, totalCompactions);
     sprintln(buf);
 }
 
 inline void cmdDropFrontIfCorrupt(const CurrentTarget& t) {
     pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.dropFrontIfCorrupt();
-    if (st.ok())                                       sprintln("drop_front: dropped");
-    else if (st.code == pqueue::StatusCode::QueueEmpty) sprintln("drop_front: queue_empty");
-    else if (st.code == pqueue::StatusCode::InvalidArgument) sprintln("drop_front: front_not_corrupt");
-    else { Serial.print("drop_front: error="); Serial.println(pqueue::statusCodeName(st.code)); }
+    char result[96];
+    if (st.ok()) {
+        sprintln("drop_front: dropped");
+        sprintln("RESULT command=DROP_FRONT_IF_CORRUPT ok=1 changed=1");
+    } else if (st.code == pqueue::StatusCode::QueueEmpty) {
+        sprintln("drop_front: queue_empty");
+        sprintln("RESULT command=DROP_FRONT_IF_CORRUPT ok=1 changed=0 code=queue_empty");
+    } else if (st.code == pqueue::StatusCode::InvalidArgument) {
+        sprintln("drop_front: front_not_corrupt");
+        sprintln("RESULT command=DROP_FRONT_IF_CORRUPT ok=1 changed=0 code=front_not_corrupt");
+    } else {
+        Serial.print("drop_front: error="); Serial.println(pqueue::statusCodeName(st.code));
+        snprintf(result, sizeof(result), "RESULT command=DROP_FRONT_IF_CORRUPT ok=0 code=%s",
+                 pqueue::statusCodeName(st.code));
+        sprintln(result);
+    }
 }
 
 inline void cmdRecoverStaleLock(const CurrentTarget& t) {
     pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.recoverStaleLock();
-    if (st.ok())                                          sprintln("recover_lock: ok");
-    else if (st.code == pqueue::StatusCode::LockTimeout)  sprintln("recover_lock: lock_not_stale");
-    else { Serial.print("recover_lock: error="); Serial.println(pqueue::statusCodeName(st.code)); }
+    char result[80];
+    if (st.ok()) {
+        sprintln("recover_lock: ok");
+        sprintln("RESULT command=RECOVER_STALE_LOCK ok=1 changed=1");
+    } else if (st.code == pqueue::StatusCode::LockTimeout) {
+        sprintln("recover_lock: lock_not_stale");
+        sprintln("RESULT command=RECOVER_STALE_LOCK ok=1 changed=0 code=lock_not_stale");
+    } else {
+        Serial.print("recover_lock: error="); Serial.println(pqueue::statusCodeName(st.code));
+        snprintf(result, sizeof(result), "RESULT command=RECOVER_STALE_LOCK ok=0 code=%s",
+                 pqueue::statusCodeName(st.code));
+        sprintln(result);
+    }
 }
 
 inline void cmdFormat(const CurrentTarget& t) {
     pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.format();
-    if (st.ok()) sprintln("format: ok");
-    else { Serial.print("format: error="); Serial.println(pqueue::statusCodeName(st.code)); }
+    if (st.ok()) {
+        sprintln("format: ok");
+        sprintln("RESULT command=FORMAT ok=1");
+    } else {
+        Serial.print("format: error="); Serial.println(pqueue::statusCodeName(st.code));
+        char result[64];
+        snprintf(result, sizeof(result), "RESULT command=FORMAT ok=0 code=%s",
+                 pqueue::statusCodeName(st.code));
+        sprintln(result);
+    }
 }
 
 inline std::vector<std::string> tokenize(const std::string& line) {

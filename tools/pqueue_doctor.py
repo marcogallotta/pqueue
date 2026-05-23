@@ -360,6 +360,7 @@ def _send_cmd(s, cmd: str, timeout_s: float = CMD_TIMEOUT_S) -> tuple:
     """Send a command, collect output lines until READY. Returns (lines, timed_out, cmd_ok)."""
     s.write((cmd + "\n").encode())
     lines = []
+    result_ok = None
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         raw = s.readline()
@@ -367,13 +368,18 @@ def _send_cmd(s, cmd: str, timeout_s: float = CMD_TIMEOUT_S) -> tuple:
             continue
         line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
         if line == "READY":
-            cmd_ok = not any(
-                l.lower().startswith("error") or "failed" in l.lower()
-                for l in lines
-            )
-            return lines, False, cmd_ok
+            if result_ok is None:
+                # Fallback for commands that don't emit a RESULT line.
+                result_ok = not any(
+                    l.lower().startswith("error") or "failed" in l.lower()
+                    for l in lines
+                )
+            return lines, False, result_ok
         if line:
             lines.append(line)
+            if line.startswith("RESULT "):
+                kv = parse_kv(line[len("RESULT "):])
+                result_ok = kv.get("ok") == "1"
     return lines, True, False
 
 
