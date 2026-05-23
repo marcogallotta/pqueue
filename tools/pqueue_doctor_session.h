@@ -9,7 +9,10 @@
 #include "pqueue/status.h"
 #include "pqueue_doctor_dump.h"
 
+#include <cctype>
+#include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,7 +22,23 @@ struct CurrentTarget {
     std::string name;
     std::string basePath;
     bool selected = false;
+    std::optional<std::uint32_t> reservedBytes;
+    std::optional<std::uint32_t> recordSizeBytes;
+    std::optional<std::uint32_t> maxSegmentBytes;
+    std::optional<std::uint32_t> minFreeBytes;
+    std::optional<std::uint8_t>  maxSegments;
 };
+
+inline pqueue::Config makeQueueConfig(const CurrentTarget& t) {
+    pqueue::Config qConfig;
+    qConfig.basePath = t.basePath;
+    if (t.reservedBytes)   qConfig.reservedBytes   = *t.reservedBytes;
+    if (t.recordSizeBytes) qConfig.recordSizeBytes = *t.recordSizeBytes;
+    if (t.maxSegmentBytes) qConfig.maxSegmentBytes = *t.maxSegmentBytes;
+    if (t.minFreeBytes)    qConfig.minFreeBytes    = *t.minFreeBytes;
+    if (t.maxSegments)     qConfig.maxSegments     = *t.maxSegments;
+    return qConfig;
+}
 
 struct SerialWriter {
     void write(const char* s) { Serial.print(s); }
@@ -85,9 +104,7 @@ inline void cmdList(const CurrentTarget& t) {
 }
 
 inline void cmdValidate(const CurrentTarget& t) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     const auto val = q.validate();
     Serial.println(val.ok ? "validate: OK" : "validate: FAILED");
     Serial.print("records_checked=");
@@ -162,9 +179,7 @@ inline void cmdDumpAll(const CurrentTarget& t) {
 }
 
 inline void cmdCompact(const CurrentTarget& t, int steps) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     const auto cr = q.compactIdle(static_cast<std::size_t>(steps));
     char buf[128];
     snprintf(buf, sizeof(buf), "compact: status=%s steps_run=%zu compactions=%zu noops=%zu more_work=%s",
@@ -174,9 +189,7 @@ inline void cmdCompact(const CurrentTarget& t, int steps) {
 }
 
 inline void cmdCompactAll(const CurrentTarget& t, int maxSteps) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     int totalSteps = 0, totalCompactions = 0;
     while (totalSteps < maxSteps) {
         const auto cr = q.compactIdle(static_cast<std::size_t>(maxSteps - totalSteps));
@@ -190,9 +203,7 @@ inline void cmdCompactAll(const CurrentTarget& t, int maxSteps) {
 }
 
 inline void cmdDropFrontIfCorrupt(const CurrentTarget& t) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.dropFrontIfCorrupt();
     if (st.ok())                                       sprintln("drop_front: dropped");
     else if (st.code == pqueue::StatusCode::QueueEmpty) sprintln("drop_front: queue_empty");
@@ -201,9 +212,7 @@ inline void cmdDropFrontIfCorrupt(const CurrentTarget& t) {
 }
 
 inline void cmdRecoverStaleLock(const CurrentTarget& t) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.recoverStaleLock();
     if (st.ok())                                          sprintln("recover_lock: ok");
     else if (st.code == pqueue::StatusCode::LockTimeout)  sprintln("recover_lock: lock_not_stale");
@@ -211,9 +220,7 @@ inline void cmdRecoverStaleLock(const CurrentTarget& t) {
 }
 
 inline void cmdFormat(const CurrentTarget& t) {
-    pqueue::Config qConfig;
-    qConfig.basePath = t.basePath;
-    pqueue::Queue q(qConfig);
+    pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.format();
     if (st.ok()) sprintln("format: ok");
     else { Serial.print("format: error="); Serial.println(pqueue::statusCodeName(st.code)); }
@@ -239,11 +246,70 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
 
     if (verb == "TARGET") {
         if (tokens.size() < 3) { sprintln("error: TARGET requires name and path"); return true; }
+
+        // Validate target name: [A-Za-z0-9_-]+
+        for (char c : tokens[1]) {
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') {
+                sprintln("error: TARGET name contains invalid characters (use [A-Za-z0-9_-])");
+                return true;
+            }
+        }
+        if (tokens[1].empty()) { sprintln("error: TARGET name must not be empty"); return true; }
+
+        // Validate all key=val tokens before touching target state.
+        for (std::size_t i = 3; i < tokens.size(); ++i) {
+            const auto eq = tokens[i].find('=');
+            if (eq == std::string::npos) {
+                Serial.print("error: TARGET config token missing '=': ");
+                Serial.println(tokens[i].c_str());
+                return true;
+            }
+            const std::string key = tokens[i].substr(0, eq);
+            const char* valStr = tokens[i].c_str() + eq + 1;
+            char* end = nullptr;
+            const long val = strtol(valStr, &end, 10);
+            if (end == valStr || *end != '\0') {
+                Serial.print("error: TARGET config value is not a valid integer: ");
+                Serial.println(valStr);
+                return true;
+            }
+            if (key == "reservedBytes" || key == "recordSizeBytes" || key == "maxSegmentBytes") {
+                if (val <= 0) {
+                    Serial.print("error: TARGET config "); Serial.print(key.c_str()); sprintln(" must be > 0");
+                    return true;
+                }
+            } else if (key == "minFreeBytes") {
+                if (val < 0) { sprintln("error: TARGET config minFreeBytes must be >= 0"); return true; }
+            } else if (key == "maxSegments") {
+                if (val < 1 || val > 255) { sprintln("error: TARGET config maxSegments must be 1-255"); return true; }
+            } else {
+                Serial.print("error: TARGET unknown config key: "); Serial.println(key.c_str());
+                return true;
+            }
+        }
+        // All tokens valid — reset and apply.
+        target = CurrentTarget{};
         target.name     = tokens[1];
         target.basePath = tokens[2];
+        for (std::size_t i = 3; i < tokens.size(); ++i) {
+            const auto eq = tokens[i].find('=');
+            const std::string key = tokens[i].substr(0, eq);
+            const long val = strtol(tokens[i].c_str() + eq + 1, nullptr, 10);
+            if      (key == "reservedBytes")   target.reservedBytes   = static_cast<std::uint32_t>(val);
+            else if (key == "recordSizeBytes") target.recordSizeBytes = static_cast<std::uint32_t>(val);
+            else if (key == "maxSegmentBytes") target.maxSegmentBytes = static_cast<std::uint32_t>(val);
+            else if (key == "minFreeBytes")    target.minFreeBytes    = static_cast<std::uint32_t>(val);
+            else if (key == "maxSegments")     target.maxSegments     = static_cast<std::uint8_t>(val);
+        }
         target.selected = true;
         Serial.print("target: "); Serial.print(target.name.c_str());
-        Serial.print(" path=");   Serial.println(target.basePath.c_str());
+        Serial.print(" path=");   Serial.print(target.basePath.c_str());
+        if (target.reservedBytes)   { Serial.print(" reservedBytes=");   Serial.print(*target.reservedBytes); }
+        if (target.recordSizeBytes) { Serial.print(" recordSizeBytes="); Serial.print(*target.recordSizeBytes); }
+        if (target.maxSegmentBytes) { Serial.print(" maxSegmentBytes="); Serial.print(*target.maxSegmentBytes); }
+        if (target.minFreeBytes)    { Serial.print(" minFreeBytes=");    Serial.print(*target.minFreeBytes); }
+        if (target.maxSegments)     { Serial.print(" maxSegments=");     Serial.print(static_cast<int>(*target.maxSegments)); }
+        Serial.println();
         return true;
     }
 

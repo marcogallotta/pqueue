@@ -20,7 +20,7 @@ Serial mode:
         --validate --dump-all --out-dir /tmp/pqdump
 
     Targets file format (one target per line, # comments allowed):
-        api_outbox /pqueue_api_spool
+        api_outbox /pqueue_api_spool reservedBytes=262144
 
 Stdin mode (pipe from pqueue-doctor-dump POSIX tool):
     ./build/pqueue-doctor-dump --base-path /path/to/spool | \\
@@ -56,6 +56,9 @@ MAX_FILE_SIZE = 1 * 1024 * 1024
 
 _VALID_NAME = re.compile(r'^(manifest-[ab]\.bin|seg-[0-9a-f]{8}\.bin)$')
 _VALID_TARGET_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
+_VALID_CONFIG_KEYS = frozenset({
+    'reservedBytes', 'recordSizeBytes', 'maxSegmentBytes', 'minFreeBytes', 'maxSegments',
+})
 
 
 def crc32(data: bytes) -> int:
@@ -91,6 +94,46 @@ def _validate_target_name(name: str) -> str:
     return name
 
 
+_CONFIG_RULES = {
+    # key: (min_inclusive, max_inclusive)  None means no bound on that side
+    'reservedBytes':   (1,   None),
+    'recordSizeBytes': (1,   None),
+    'maxSegmentBytes': (1,   None),
+    'minFreeBytes':    (0,   None),
+    'maxSegments':     (1,   255),
+}
+
+
+def _validate_config_kv(k: str, v: str, error_fn):
+    """Validate a config key/value pair. error_fn(msg) raises the appropriate error."""
+    if k not in _VALID_CONFIG_KEYS:
+        error_fn(f"unknown config key {k!r}; valid keys: "
+                 f"{', '.join(sorted(_VALID_CONFIG_KEYS))}")
+    try:
+        n = int(v)
+    except ValueError:
+        error_fn(f"config value for {k!r} must be an integer, got: {v!r}")
+        return  # unreachable, but keeps type checker happy
+    lo, hi = _CONFIG_RULES[k]
+    if lo is not None and n < lo:
+        error_fn(f"config {k!r} must be >= {lo}, got {n}")
+    if hi is not None and n > hi:
+        error_fn(f"config {k!r} must be <= {hi}, got {n}")
+
+
+def parse_queue_config(s: str) -> tuple:
+    if '=' not in s:
+        raise argparse.ArgumentTypeError(
+            f"--queue-config must be KEY=VAL, got: {s!r}")
+    k, _, v = s.partition('=')
+
+    def _err(msg):
+        raise argparse.ArgumentTypeError(msg)
+
+    _validate_config_kv(k, v, _err)
+    return (k, v)
+
+
 def parse_target_arg(s: str):
     if ':' not in s:
         raise argparse.ArgumentTypeError(
@@ -100,7 +143,7 @@ def parse_target_arg(s: str):
         raise argparse.ArgumentTypeError(
             f"target name and path must be non-empty, got: {s!r}")
     _validate_target_name(name)
-    return (name, path)
+    return (name, path, {})
 
 
 def load_targets_file(path: str):
@@ -110,16 +153,29 @@ def load_targets_file(path: str):
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            parts = line.split(None, 1)
-            if len(parts) != 2:
+            parts = line.split()
+            if len(parts) < 2:
                 raise ValueError(
-                    f"{path}:{lineno}: expected 'name path', got: {line!r}")
+                    f"{path}:{lineno}: expected 'name path [key=val ...]', "
+                    f"got: {line!r}")
             name = parts[0]
             if not _VALID_TARGET_NAME.match(name):
                 raise ValueError(
                     f"{path}:{lineno}: invalid target name {name!r} "
                     f"(must match [A-Za-z0-9_-]+)")
-            targets.append((name, parts[1]))
+            config = {}
+            for kv in parts[2:]:
+                if '=' not in kv:
+                    raise ValueError(
+                        f"{path}:{lineno}: expected key=val, got: {kv!r}")
+                k, _, v = kv.partition('=')
+
+                def _err(msg, _ln=lineno, _p=path):
+                    raise ValueError(f"{_p}:{_ln}: {msg}")
+
+                _validate_config_kv(k, v, _err)
+                config[k] = v
+            targets.append((name, parts[1], config))
     return targets
 
 
@@ -363,9 +419,11 @@ def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
     all_ok = True
     multi = len(targets) > 1
 
-    for name, path in targets:
+    for name, path, config in targets:
         log(f"\n=== Target: {name} ({path}) ===")
-        lines, timed_out, _ = _send_cmd(s, f"TARGET {name} {path}")
+        target_cmd = " ".join(
+            ["TARGET", name, path] + [f"{k}={v}" for k, v in config.items()])
+        lines, timed_out, _ = _send_cmd(s, target_cmd)
         for l in lines:
             log(f"  {l}")
         if timed_out:
@@ -498,7 +556,13 @@ def main() -> None:
                    type=parse_target_arg, action="append", default=[],
                    help="Target as name:path (repeatable)")
     p.add_argument("--targets", dest="targets_file", metavar="FILE",
-                   help="File listing targets, one 'name path' per line")
+                   help="File listing targets, one 'name path [key=val ...]' per line")
+    p.add_argument("--queue-config", metavar="KEY=VAL",
+                   type=parse_queue_config, action="append", default=[],
+                   help=(f"Queue config override applied to --target targets only "
+                         f"(not --targets file entries, which carry config inline). "
+                         f"Repeatable. Valid keys: "
+                         f"{', '.join(sorted(_VALID_CONFIG_KEYS))}"))
 
     # Read-only commands
     p.add_argument("--info",     action="store_true", help="Print filesystem stats and file list")
@@ -545,7 +609,9 @@ def main() -> None:
                     'dump_file', 'dump_all']
 
     if args.port:
-        targets = list(args.targets)
+        cli_config = dict(args.queue_config)
+        targets = [(name, path, {**config, **cli_config})
+                   for name, path, config in args.targets]
         if args.targets_file:
             targets.extend(load_targets_file(args.targets_file))
         if not targets:
