@@ -36,7 +36,6 @@ public:
     CompactIdleResult compactIdle(std::size_t maxSteps);
     Status dropFrontIfCorrupt();
     Status recoverStaleLock();
-    Status rebuildMetadata();
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     StatsResult statsResult();
     Stats stats();

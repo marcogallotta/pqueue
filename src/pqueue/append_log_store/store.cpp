@@ -778,13 +778,6 @@ Status AppendLogStore::format() {
     return Status::success();
 }
 
-Status AppendLogStore::rebuildMetadata() {
-    // For append-log, rebuilding means re-scanning all segments from scratch.
-    activeGenerations_.clear();
-    records_.clear();
-    mounted_ = false;
-    return mount();
-}
 
 ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& options) {
     ValidationResult result;

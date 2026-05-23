@@ -396,21 +396,6 @@ Status Queue::format() {
     return Status::success();
 }
 
-Status Queue::rebuildMetadata() {
-    // For AppendLog stores, rebuildMetadata() resets RAM state and calls mount().
-    // mount() returns DataCorrupt when segment files exist without a valid manifest,
-    // so rebuildMetadata() cannot recover a MetadataCorrupt store -- it will fail
-    // for the same reason validate() reported corruption. Use format() instead.
-    ScopedLock lock(*this);
-    if (!lock.status().ok()) {
-        return lock.status();
-    }
-    Status st = store_->rebuildMetadata();
-    if (!st.ok()) {
-        return diagnostic(Severity::Error, st, "rebuildMetadata");
-    }
-    return loadLatestIndex();
-}
 
 Status Queue::visitRecords(RecordVisitor visitor, void* context) {
     ScopedLock lock(*this);

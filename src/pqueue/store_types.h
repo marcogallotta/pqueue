@@ -122,7 +122,6 @@ public:
     virtual bool canEnqueue(std::size_t recordSize) const = 0;
 
     virtual Status format() = 0;
-    virtual Status rebuildMetadata() = 0;
     virtual ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) = 0;
     virtual CompactIdleResult compactIdle(std::size_t maxSteps) = 0;
 };

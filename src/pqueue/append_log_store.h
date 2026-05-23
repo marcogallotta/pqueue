@@ -92,7 +92,6 @@ public:
     bool canEnqueue(std::size_t recordSize) const override;
 
     Status format() override;
-    Status rebuildMetadata() override;
     ValidationResult validateUnlocked(const ValidationOptions& options = ValidationOptions{}) override;
 
 private:
