@@ -29,7 +29,7 @@ const char* issueCodeName(pqueue::ValidationIssueCode code) {
         case pqueue::ValidationIssueCode::MetadataCorrupt:             return "metadata_corrupt";
         case pqueue::ValidationIssueCode::JournalCorrupt:              return "journal_corrupt";
         case pqueue::ValidationIssueCode::ConfigMismatch:              return "config_mismatch";
-        case pqueue::ValidationIssueCode::SlotCrcMismatch:             return "slot_crc_mismatch";
+        case pqueue::ValidationIssueCode::RecordCrcMismatch:            return "record_crc_mismatch";
         case pqueue::ValidationIssueCode::QueueLoadFailed:             return "queue_load_failed";
         case pqueue::ValidationIssueCode::QueueIndexMismatch:          return "queue_index_mismatch";
         case pqueue::ValidationIssueCode::OutboxEnvelopeInvalid:       return "outbox_envelope_invalid";

@@ -128,6 +128,113 @@ while (outbox.compactIdle(1).compactions > 0) {}  // reclaim dead space
 
 ---
 
+## Maintenance: pqueue_doctor
+
+`tools/esp32_pqueue_doctor/main.cpp` is a maintenance firmware image. Flash it
+once for an incident; it runs a serial command loop that lets you inspect,
+validate, compact, and dump queue state without modifying the production
+firmware.
+
+### Adding the build env to your app
+
+The doctor must be built with the same board, partition table, and filesystem
+settings as your app. Add this env to your app's `platformio.ini`:
+
+```ini
+[env:pqueue-maintenance]
+extends = env:<your-main-env>
+build_flags =
+    ${env:<your-main-env>.build_flags}
+    -Ipath/to/pqueue/tools
+build_src_filter =
+    -<*>
+    +<path/to/pqueue/tools/esp32_pqueue_doctor/main.cpp>
+```
+
+Flash with `pio run -e pqueue-maintenance --target upload`.
+
+### Basic session
+
+Connect over serial, then send commands. Queue paths are supplied at runtime:
+
+```
+PQUEUE_DOCTOR_START
+READY
+TARGET api_outbox /pqueue_api_spool
+READY
+VALIDATE
+READY
+DONE
+```
+
+`DONE` reboots back into the maintenance firmware (the app image is not
+restored automatically -- reflash manually when finished).
+
+### Host script
+
+`tools/pqueue_doctor.py` drives the serial session. Commands run in a fixed
+order: read-only first (info/list/diag/validate), then mutations, then dump.
+
+```bash
+# Validate and dump all files
+python3 tools/pqueue_doctor.py \
+    --port /dev/ttyACM0 \
+    --target api_outbox:/pqueue_api_spool \
+    --validate --dump-all --out-dir /tmp/pqdump
+
+# Compact then dump
+python3 tools/pqueue_doctor.py \
+    --port /dev/ttyACM0 \
+    --target api_outbox:/pqueue_api_spool \
+    --compact-all 64 --dump-all --out-dir /tmp/pqdump
+
+# Multiple targets (each dumped into out-dir/name/)
+python3 tools/pqueue_doctor.py \
+    --port /dev/ttyACM0 \
+    --targets pqueue_doctor.targets \
+    --validate --dump-all --out-dir /tmp/pqdump
+```
+
+Targets file format (`pqueue_doctor.targets`):
+
+```
+# name  path
+api_outbox  /pqueue_api_spool
+```
+
+After dumping, run `pqueue_appendlog_diag` (build with `make appendlog-diag`)
+on the dumped directory to inspect the manifest and segment layout offline.
+
+Stdin mode (pipe from POSIX dump tool, no device needed):
+
+```bash
+./build/pqueue-doctor-dump --base-path /path/to/spool | \
+    python3 tools/pqueue_doctor.py --out-dir /tmp/pqdump
+```
+
+### Command reference
+
+```
+TARGET <name> <path>      -- select queue (required before any other command)
+INFO                      -- filesystem stats and file list
+LIST                      -- segment files with sizes and status
+VALIDATE                  -- run Queue::validate(), print issues and repair hints
+DIAG                      -- manifest contents and segment summary
+DUMP_FILE <name>          -- transfer one file off-device
+DUMP_ALL                  -- transfer all manifest and segment files
+COMPACT <steps>           -- run compactIdle(steps)
+COMPACT_ALL <max_steps>   -- run compactIdle to completion, up to max_steps
+DROP_FRONT_IF_CORRUPT     -- drop front record only if corruption is proven
+RECOVER_STALE_LOCK        -- remove a stale lock left by a dead process
+FORMAT CONFIRM            -- destructively reinitialize the queue
+DONE                      -- exit (reboots into maintenance firmware)
+```
+
+`FORMAT` requires the literal argument `CONFIRM` to prevent accidental execution.
+
+
+---
+
 ## Further reading
 
 - `docs/usage.md` -- operating contract, configuration reference, simulator, crash safety
