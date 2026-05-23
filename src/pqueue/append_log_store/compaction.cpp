@@ -647,8 +647,10 @@ CompactIdleResult AppendLogStore::compactIdle(std::size_t maxSteps) {
 }
 
 Status AppendLogStore::compactFull() {
-    const std::size_t initialCount = manifestRanges_.size();
-    const CompactIdleResult result = compactIdle(initialCount);
+    CompactIdleResult result;
+    do {
+        result = compactIdle(1);
+    } while (result.status.ok() && result.compactions > 0);
     return result.status;
 }
 

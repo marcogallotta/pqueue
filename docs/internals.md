@@ -400,12 +400,11 @@ predicted output segments. `narrowRange()` uses an O(n^2) sliding window over
 per-segment stats to find the contiguous subrange with the highest dead ratio
 that fits within the budget.
 
-`compactFull()` delegates to `compactIdle(initialRangeCount)` where
-`initialRangeCount = manifestRanges_.size()` at call time. This is a bounded
-maintenance helper, not a guarantee that the store is fully compacted afterward:
-if a range is large and `narrowRange()` narrows to a subrange, a single step
-leaves residual work. Callers that need a fully clean store must loop until
-`compactIdle` returns noOp.
+`compactFull()` runs `compactIdle(1)` in a loop until no compaction candidate
+remains. On success, it leaves no compactable dead-data ranges, but may run many
+steps and block for a proportionally long time. Use it only in offline tools and
+maintenance firmware. In firmware loops, drive compaction with `compactIdle(n)`
+instead.
 
 `compactIdle(maxSteps)` runs up to `maxSteps` calls to `compactOneSegment`.
 Each attempt counts as one step regardless of outcome. Stops early on noOp.
@@ -588,10 +587,6 @@ counts them as dead. `Status::noOp()` passes `.ok()` and also sets
 ---
 
 ## Limitations and future work
-
-**`compactFull` range revisiting.** `compactFull` may revisit a newly compacted
-range rather than advancing to the next original range. Harmless but
-inefficient.
 
 **Orphan tail after rotate-before-compact.** Rotate-before-compact leaves the
 orphan tail generation numerically below the compaction output range. When the

@@ -67,6 +67,8 @@ public:
     Status compactOneSegment(AllowFullRangeFallback allowFallback = AllowFullRangeFallback::no,
                              std::uint32_t* inputSegs = nullptr,
                              std::uint32_t* outputSegs = nullptr);
+    // Runs until no compaction candidate remains. May take many steps -- offline/maintenance use only.
+    // In firmware loops use compactIdle(n) instead.
     Status compactFull();
     CompactIdleResult compactIdle(std::size_t maxSteps) override;
     std::uint32_t sumDeadBytes() const;
