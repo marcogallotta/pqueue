@@ -81,7 +81,7 @@ pqueue::http::Outbox makeHttpOutbox(
 ) {
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
     httpConfig.baseUrl = "https://example.test/api";
     httpConfig.headers = headers;
@@ -239,7 +239,7 @@ TEST_CASE("pqueue http outbox notifies when a request is dropped by classificati
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.baseUrl = "https://example.test";
     httpConfig.dropContext = &observer;
     httpConfig.onDrop = onDrop;
@@ -267,7 +267,7 @@ TEST_CASE("pqueue http outbox retries 503 without max-attempt drop") {
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.baseUrl = "https://example.test";
     httpConfig.dropContext = &observer;
     httpConfig.onDrop = onDrop;
@@ -292,7 +292,7 @@ TEST_CASE("pqueue http outbox allows classifier override") {
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.baseUrl = "https://example.test";
     httpConfig.classify = customClassify;
     httpConfig.classifyContext = &classifier;
@@ -338,7 +338,7 @@ TEST_CASE("pqueue http outbox calls response callback with request and response"
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.baseUrl = "https://example.test";
     httpConfig.responseContext = &observer;
     httpConfig.onResponse = onResponse;
@@ -365,6 +365,9 @@ TEST_CASE("pqueue http default classifier handles representative outcomes") {
     CHECK(pqueue::http::defaultClassifyResponse({511, pqueue::http::TransportError::None}) == pqueue::SendDecision::RetryLater);
     CHECK(pqueue::http::defaultClassifyResponse({pqueue::http::kNoStatusCode, pqueue::http::TransportError::Timeout}) == pqueue::SendDecision::RetryLater);
     CHECK(pqueue::http::defaultClassifyResponse({404, pqueue::http::TransportError::None}) == pqueue::SendDecision::Drop);
+    CHECK(pqueue::http::defaultClassifyResponse({501, pqueue::http::TransportError::None}) == pqueue::SendDecision::Drop);
+    CHECK(pqueue::http::defaultClassifyResponse({505, pqueue::http::TransportError::None}) == pqueue::SendDecision::Drop);
+    CHECK(pqueue::http::defaultClassifyResponse({508, pqueue::http::TransportError::None}) == pqueue::SendDecision::Drop);
 }
 
 TEST_CASE("pqueue http outbox drains queued backlog after transport recovers") {
@@ -446,7 +449,8 @@ TEST_CASE("pqueue http outbox keeps retryable front request instead of dropping 
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 1000;
+    // initial=500 so delays are 500ms, 1000ms, 2000ms... fits within +1000ms clock steps.
+    httpConfig.outbox.initialRetryDelayMs = 500;
     httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
     httpConfig.baseUrl = "https://example.test/api";
 
@@ -456,11 +460,13 @@ TEST_CASE("pqueue http outbox keeps retryable front request instead of dropping 
     CHECK(outbox.submitPost("/third", "three").status == pqueue::SubmitStatus::Queued);
     CHECK_EQ(outbox.stats().count, 3U);
 
+    // Attempt 0 delay = 500ms; cooldown expires at clock=1500. Due at +1000ms.
     clock.nowMs += 1000;
     auto drain = outbox.drain();
     CHECK_EQ(drain.sent, 0U);
     CHECK_EQ(outbox.stats().count, 3U);
 
+    // Attempt 1 delay = 1000ms; cooldown expires at clock=3000. Due at +1000ms.
     clock.nowMs += 1000;
     drain = outbox.drain();
     CHECK_EQ(drain.sent, 1U);
@@ -488,7 +494,7 @@ TEST_CASE("pqueue http outbox drainUpTo sends multiple queued requests within ra
 
     pqueue::http::Config httpConfig;
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
-    httpConfig.outbox.retryDelayMs = 0;
+    httpConfig.outbox.initialRetryDelayMs = 0;
     httpConfig.outbox.maxDrainAttemptsPerSecond = 3;
     httpConfig.baseUrl = "https://example.test/api";
 
@@ -563,7 +569,7 @@ TEST_CASE("pqueue http outbox compactIdle removes dead sealed segments") {
     httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
     httpConfig.queue.maxSegmentBytes = 100;
     httpConfig.queue.minFreeBytes = 0;
-    httpConfig.outbox.retryDelayMs = 1000;
+    httpConfig.outbox.initialRetryDelayMs = 1000;
     httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
     httpConfig.baseUrl = "https://example.test";
 
@@ -610,6 +616,79 @@ TEST_CASE("pqueue http outbox compactIdle removes dead sealed segments") {
 #endif
 }
 
+TEST_CASE("pqueue http outbox permanently drops 501/505/508 server capability errors") {
+#ifndef ARDUINO
+    for (const int status : {501, 505, 508}) {
+        cleanHttpOutboxSpool();
+        FakeHttpTransport transport;
+        transport.responses.push_back({status, pqueue::http::TransportError::None});
+        FakeClock clock;
+
+        auto outbox = makeHttpOutbox(transport, clock);
+        const auto submit = outbox.submitPost("/test", "body");
+
+        CHECK(submit.status == pqueue::SubmitStatus::Dropped);
+        CHECK_EQ(outbox.stats().count, 0U);
+    }
+#endif
+}
+
+TEST_CASE("pqueue http outbox uses Retry-After hint from transport response") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    // 503 with a 3000ms Retry-After hint.
+    transport.responses.push_back({503, pqueue::http::TransportError::None, {}, 3000});
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;  // computed backoff would be 1000ms
+    httpConfig.outbox.maxRetryDelayMs = 60000;
+    httpConfig.outbox.maxDrainAttemptsPerSecond = 100;
+    httpConfig.baseUrl = "https://example.test";
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+    REQUIRE(outbox.submitPost("/test", "body").status == pqueue::SubmitStatus::Queued);
+    // Hint of 3000ms overrides computed 1000ms. Cooldown at clock=4000.
+
+    clock.nowMs += 2999;
+    CHECK(outbox.drain().notDue);   // would be due at 2000 with computed backoff
+
+    clock.nowMs += 1;               // clock=4000: due
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    CHECK_EQ(outbox.drain().sent, 1U);
+#endif
+}
+
+TEST_CASE("pqueue http outbox caps Retry-After hint at maxRetryDelayMs") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    // 429 with a very long Retry-After hint.
+    transport.responses.push_back({429, pqueue::http::TransportError::None, {}, 60000});
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.outbox.maxRetryDelayMs = 2000;
+    httpConfig.outbox.maxDrainAttemptsPerSecond = 100;
+    httpConfig.baseUrl = "https://example.test";
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+    REQUIRE(outbox.submitPost("/test", "body").status == pqueue::SubmitStatus::Queued);
+    // Hint of 60000ms capped at maxRetryDelayMs=2000. Cooldown at 3000.
+
+    clock.nowMs += 1999;
+    CHECK(outbox.drain().notDue);
+
+    clock.nowMs += 1;               // clock=3000: due; uncapped hint would set 61000
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    CHECK_EQ(outbox.drain().sent, 1U);
+#endif
+}
+
 TEST_CASE("pqueue http default classifier covers retryable and permanent statuses") {
 #ifndef ARDUINO
     const int retryableStatuses[] = {408, 429, 500, 502, 503, 504, 599};
@@ -617,7 +696,7 @@ TEST_CASE("pqueue http default classifier covers retryable and permanent statuse
         CHECK(pqueue::http::defaultClassifyResponse({status, pqueue::http::TransportError::None}) == pqueue::SendDecision::RetryLater);
     }
 
-    const int permanentStatuses[] = {300, 301, 400, 401, 404, 409, 413, 422, 499};
+    const int permanentStatuses[] = {300, 301, 400, 401, 404, 409, 413, 422, 499, 501, 505, 508};
     for (const int status : permanentStatuses) {
         CHECK(pqueue::http::defaultClassifyResponse({status, pqueue::http::TransportError::None}) == pqueue::SendDecision::Drop);
     }

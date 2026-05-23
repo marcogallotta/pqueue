@@ -62,7 +62,7 @@ pqueue::SendResult fakeSend(void* context, const std::string& payload, const pqu
 
 pqueue::OutboxConfig outboxConfig() {
     pqueue::OutboxConfig config;
-    config.retryDelayMs             = 0;
+    config.initialRetryDelayMs      = 0;
     config.maxDrainAttemptsPerSecond = 1000;
     return config;
 }

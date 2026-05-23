@@ -31,7 +31,7 @@ static pqueue::SendResult trySend(void* ctx, const std::string& payload, const p
     return {pqueue::SendDecision::Sent};
 }
 
-// Monotonic milliseconds. Advancing by retryDelayMs+1 per call ensures
+// Monotonic milliseconds. Advancing by initialRetryDelayMs+1 per call ensures
 // cooldowns always expire between drain cycles in this example.
 // On ESP32 use: esp_timer_get_time() / 1000.
 static std::uint64_t clockMs(void*) {
@@ -52,7 +52,7 @@ int main() {
     qcfg.maxSegmentBytes  = 256;  // small segments so the burst spans several sealed ones
 
     pqueue::OutboxConfig ocfg;
-    ocfg.retryDelayMs = 10000;
+    ocfg.initialRetryDelayMs = 10000;
 
     Backend backend;
     pqueue::Outbox outbox(qcfg, ocfg, trySend, &backend, clockMs, nullptr);

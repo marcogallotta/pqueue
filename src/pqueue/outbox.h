@@ -23,6 +23,7 @@ struct RetryState {
 
 struct SendResult {
     SendDecision decision = SendDecision::Drop;
+    std::uint32_t retryAfterMs = 0; // 0 = no server hint
 };
 
 // The payload string is treated as opaque bytes, not text. It may contain NULs.
@@ -32,6 +33,8 @@ using RawSendCallback = SendResult (*)(void* context, Span payload, const RetryS
 // Must return monotonic milliseconds. Do not use wall/NTP time here.
 // ESP32 callers should use esp_timer_get_time() / 1000.
 using ClockCallback = std::uint64_t (*)(void* context);
+// Returns a uniform random value in [0, range). Pass nullptr to Outbox to disable jitter.
+using RandCallback = std::uint32_t (*)(void* context, std::uint32_t range);
 using OutboxPayloadValidator = bool (*)(void* context, const std::string& payload, ValidationIssue& issue);
 
 // Persistent-only v1 outbox config.
@@ -39,13 +42,14 @@ using OutboxPayloadValidator = bool (*)(void* context, const std::string& payloa
 struct OutboxConfig {
     // Retryable sends are retried indefinitely. attempts is retained only as a saturated diagnostic counter.
     std::uint16_t maxDrainAttemptsPerSecond = 5;
-    std::uint32_t retryDelayMs = 10000;
+    std::uint32_t initialRetryDelayMs = 10000;
+    std::uint32_t maxRetryDelayMs     = 60000;
+    std::uint8_t  jitterPct           = 20;    // ±% applied after capping; requires a RandCallback
     // Proven-corrupt front records may be skipped so one bad slot does not brick the outbox.
     // 0 disables automatic corrupt-record dropping; the default stops after a small cluster.
     std::uint16_t maxCorruptDropsPerLifetime = 3;
     EventOptions events;
     // TODO: make CRC configurable once the envelope has a published compatibility policy.
-    // TODO: consider burst drain/backoff strategies after the strict FIFO v1 settles.
 };
 
 enum class SubmitStatus {
@@ -88,7 +92,9 @@ public:
         SendCallback send,
         void* sendContext,
         ClockCallback clock,
-        void* clockContext
+        void* clockContext,
+        RandCallback rand = nullptr,
+        void* randContext = nullptr
     );
     Outbox(
         Config queueConfig,
@@ -96,7 +102,9 @@ public:
         RawSendCallback send,
         void* sendContext,
         ClockCallback clock,
-        void* clockContext
+        void* clockContext,
+        RandCallback rand = nullptr,
+        void* randContext = nullptr
     );
 
     SubmitResult submit(Span payload);
@@ -139,6 +147,7 @@ private:
     DrainResult dropCorruptFrontRecord(Status corruptStatus, std::uint32_t recordBytes = 0);
     std::uint16_t maxDrainAttemptsPerSecond() const;
 
+    std::uint32_t computeRetryDelay(std::uint8_t exponent, std::uint32_t serverHintMs) const;
     SendResult dispatchSend(const std::string& payload, const RetryState& retry);
 
     Queue queue_;
@@ -149,6 +158,8 @@ private:
     void* rawSendContext_ = nullptr;
     ClockCallback clock_ = nullptr;
     void* clockContext_ = nullptr;
+    RandCallback rand_ = nullptr;
+    void* randContext_ = nullptr;
     std::uint64_t drainWindowStartMs_ = 0;
     std::uint16_t drainAttemptsInWindow_ = 0;
     bool hasDrainWindow_ = false;

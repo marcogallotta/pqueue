@@ -65,7 +65,7 @@ pqueue::Config appendLogQueueConfig(std::size_t recordSizeBytes = 32) {
 
 pqueue::OutboxConfig outboxConfig() {
     pqueue::OutboxConfig config;
-    config.retryDelayMs = 0;
+    config.initialRetryDelayMs = 0;
     config.maxDrainAttemptsPerSecond = 1000;
     return config;
 }

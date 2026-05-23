@@ -228,7 +228,7 @@ PreparedHttpOutbox prepareHttpOutboxBacklog(std::uint32_t records, std::uint32_t
     pqueue::http::Config cfg;
     cfg.queue = queueConfig(tempBase(baseName), prepared.fs, 2048, records + 8);
     cfg.outbox.maxDrainAttemptsPerSecond = 1000;
-    cfg.outbox.retryDelayMs = 1;
+    cfg.outbox.initialRetryDelayMs = 1;
     cfg.baseUrl = "https://example.test";
 
     prepared.outbox = std::make_unique<pqueue::http::Outbox>(cfg, *prepared.transport, fakeClock, prepared.clock.get());
@@ -253,7 +253,7 @@ ScenarioResult scenarioHttpOutboxOfflineSubmit(std::uint32_t records, std::uint3
     pqueue::http::Config cfg;
     cfg.queue = queueConfig(tempBase("http_outbox_offline_submit"), fs, 2048, records + 8);
     cfg.outbox.maxDrainAttemptsPerSecond = 1000;
-    cfg.outbox.retryDelayMs = 1;
+    cfg.outbox.initialRetryDelayMs = 1;
     cfg.baseUrl = "https://example.test";
 
     pqueue::http::Outbox outbox(cfg, *transport, fakeClock, clock.get());

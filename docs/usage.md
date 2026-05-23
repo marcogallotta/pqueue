@@ -172,6 +172,230 @@ path internally.
 
 ---
 
+## pqueue::Outbox
+
+`Outbox` is a store-and-forward layer over `Queue`. On `submit`, it tries a
+live send first; if the backend is unavailable the payload is durably queued.
+`drain` / `drainUpTo` retry queued records according to the retry policy. The
+queue, retry state, and attempt counters all survive a power cycle.
+
+### Setup
+
+```cpp
+pqueue::Config qcfg;
+qcfg.basePath    = "/spiffs/pqueue";
+qcfg.reservedBytes = 65536;
+
+pqueue::OutboxConfig ocfg;
+ocfg.initialRetryDelayMs      = 10000;
+ocfg.maxRetryDelayMs          = 60000;
+ocfg.maxDrainAttemptsPerSecond = 2;
+
+pqueue::Outbox outbox(qcfg, ocfg, mySend, ctx, myClock, clockCtx);
+// With jitter (optional): append fakeRandFixed, randCtx as the last two args.
+```
+
+### Callbacks
+
+**`ClockCallback`** — must return monotonic milliseconds. Never use wall/NTP
+time; the outbox uses it only for cooldown comparisons, so clock adjustments
+would cause spurious notDue results. On ESP32:
+`[](void*){ return esp_timer_get_time() / 1000; }`.
+
+**`SendCallback`** — called synchronously during `submit` and `drain`. Return
+one of:
+
+| Decision | Meaning |
+|---|---|
+| `SendDecision::Sent` | Backend accepted the record; remove it from the queue. |
+| `SendDecision::RetryLater` | Transient failure; re-queue and apply backoff. Optionally set `retryAfterMs` to a server-supplied hint (see Retry policy). |
+| `SendDecision::Drop` | Permanent failure; remove the record without retrying. |
+
+```cpp
+pqueue::SendResult mySend(void* ctx, const std::string& payload, const pqueue::RetryState& retry) {
+    if (backend.post(payload))   return {pqueue::SendDecision::Sent};
+    if (retry.attempts > 50)     return {pqueue::SendDecision::Drop};
+    return {pqueue::SendDecision::RetryLater};
+}
+```
+
+`RetryState::attempts` is the number of prior failed attempts, persisted in the
+envelope and available across reboots.
+
+**`RandCallback`** (optional) — supplies randomness for jitter. If `nullptr`,
+jitter is disabled regardless of `jitterPct`. On ESP32:
+```cpp
+[](void*, uint32_t range) -> uint32_t { return esp_random() % range; }
+```
+
+### submit / drain lifecycle
+
+`submit(payload)` attempts a live send when the queue is empty, or enqueues
+directly when a backlog exists. A `RetryLater` from the live send enqueues the
+record with `attempts = 1` and arms the first retry cooldown.
+
+`drain()` / `drainUpTo(n)` process at most one (or `n`) records per call,
+subject to the rate limit and retry cooldown. Drive them from a timer or
+WiFi-event callback:
+
+```cpp
+// On every tick:
+outbox.drain();          // one attempt per call, rate-limited
+// or:
+outbox.drainUpTo(5);    // up to 5 attempts if rate and cooldown allow
+```
+
+`DrainResult` fields:
+
+| Field | Meaning |
+|---|---|
+| `attempts` | Send attempts made this call. |
+| `sent` | Records successfully sent and removed. |
+| `dropped` | Records removed by a `Drop` decision. |
+| `corruptDropped` | Proven-corrupt front records discarded (see `maxCorruptDropsPerLifetime`). |
+| `removedQueuedBytes` | Raw queue bytes freed (sent + dropped). Useful for sizing compaction budget. |
+| `rateLimited` | True when the per-second drain cap prevented an attempt. |
+| `notDue` | True when the front record is still in its retry cooldown window. |
+| `queueError` / `sendError` | Storage or callback configuration failure. |
+
+### Retry policy
+
+On `RetryLater`, the outbox applies exponential backoff before the next drain
+attempt:
+
+```
+delay = min(maxRetryDelayMs, initialRetryDelayMs × 2^attempts)
+delay ±= rand(0, delay × jitterPct / 100)   // only if RandCallback supplied
+```
+
+If the send callback sets `SendResult::retryAfterMs > 0`, that hint is used
+instead of the computed backoff, capped at `maxRetryDelayMs`:
+
+```cpp
+// Use a server-supplied Retry-After header value (milliseconds):
+return {pqueue::SendDecision::RetryLater, retryAfterMs};
+```
+
+**FIFO limitation:** a cooling front record blocks all records behind it.
+`DrainResult::notDue` signals this state. Keep `maxRetryDelayMs` shorter than
+your drain latency budget. Long server-specified hints are clamped for the same
+reason.
+
+### OutboxConfig reference
+
+| Field | Default | Description |
+|---|---|---|
+| `initialRetryDelayMs` | 10000 | Base delay before the first retry (attempt 0 failed). Doubles each subsequent attempt up to `maxRetryDelayMs`. |
+| `maxRetryDelayMs` | 60000 | Ceiling for the exponential backoff. Keep modest: a cooling front record blocks all records behind it. |
+| `jitterPct` | 20 | ±% applied to the computed delay after capping. No effect unless a `RandCallback` is supplied. |
+| `maxDrainAttemptsPerSecond` | 5 | Rate cap for `drain` calls. 0 is treated as 1. Prevents tight retry loops from hammering the backend. |
+| `maxCorruptDropsPerLifetime` | 3 | Corrupt front records the outbox will silently discard per process lifetime before halting. 0 disables automatic dropping. |
+
+---
+
+## pqueue::http::Outbox
+
+`http::Outbox` wraps `pqueue::Outbox` with an HTTP POST transport. It handles
+request encoding, response classification, and optional Retry-After compliance.
+Use it when your backend speaks HTTP/HTTPS.
+
+### Setup
+
+```cpp
+#include "pqueue/http/outbox.h"
+
+pqueue::http::Header headers[] = {
+    {"X-API-Key",     "secret"},
+    {"Content-Type",  "application/json"},
+};
+
+pqueue::http::Config cfg;
+cfg.queue.basePath                  = "/spiffs/pqueue";
+cfg.queue.reservedBytes             = 65536;
+cfg.outbox.initialRetryDelayMs      = 15000;
+cfg.outbox.maxRetryDelayMs          = 60000;
+cfg.outbox.maxDrainAttemptsPerSecond = 2;
+cfg.baseUrl                         = "https://api.example.com";
+cfg.headers                         = headers;
+cfg.headerCount                     = 2;
+
+pqueue::http::Esp32ArduinoTransport transport(cfg.transport);
+pqueue::http::Outbox outbox(cfg, transport, myClock, clockCtx);
+```
+
+### submitPost / drain
+
+```cpp
+// Queue (or live-send) a POST to baseUrl + path:
+outbox.submitPost("/readings", jsonBody);
+
+// Drain from a timer or WiFi event:
+outbox.drain();
+```
+
+### Response classification
+
+`defaultClassifyResponse` maps HTTP status codes to send decisions:
+
+| Status range | Decision |
+|---|---|
+| 2xx | `Sent` |
+| 408, 429, 5xx | `RetryLater` (transient) |
+| 501, 505, 508 | `Drop` (permanent server capability error) |
+| All other 4xx, 3xx | `Drop` |
+| Transport error (timeout, TLS, network) | `RetryLater` |
+
+Supply `cfg.classify` to override the default for your endpoint:
+
+```cpp
+pqueue::SendDecision myClassify(void* ctx, const pqueue::http::Response& resp) {
+    if (resp.statusCode == 409) return pqueue::SendDecision::RetryLater;
+    return pqueue::http::defaultClassifyResponse(resp);
+}
+cfg.classify        = myClassify;
+cfg.classifyContext = nullptr;
+```
+
+### Retry-After compliance
+
+When a transport sets `Response::retryAfterMs`, the outbox honours it (capped
+at `maxRetryDelayMs`). The built-in transports do not yet parse the
+`Retry-After` header; populate `retryAfterMs` from your own transport or
+classify callback if needed.
+
+### Observability callbacks
+
+```cpp
+// Called for every response, success or failure:
+cfg.onResponse = [](void*, const pqueue::http::RequestEnvelope& req,
+                    const pqueue::http::Response& resp) {
+    log("POST %s → %d", req.path.c_str(), resp.statusCode);
+};
+
+// Called when a record is permanently dropped:
+cfg.onDrop = [](void*, const pqueue::http::RequestEnvelope* req,
+                pqueue::http::DropReason reason,
+                const pqueue::http::Response* resp) {
+    // reason: DecodeFailed (corrupt envelope) or ServerRejected (Drop decision)
+    // req/resp may be nullptr if the envelope could not be decoded
+};
+```
+
+### http::Config reference
+
+| Field | Default | Description |
+|---|---|---|
+| `queue` | — | Forwarded to the underlying `Queue`. See Queue config table. |
+| `outbox` | — | Forwarded to the inner `pqueue::Outbox`. See OutboxConfig table. |
+| `fullQueuePolicy` | `DropOldest` | What to do when the queue is full on `submitPost`. `DropOldest` evicts the front record; `ReturnError` returns `QueueFull`. |
+| `baseUrl` | `""` | Prepended to every `submitPost` path. Leading/trailing slashes are normalised. |
+| `headers` / `headerCount` | `nullptr` / `0` | Static headers sent with every request (e.g. auth tokens, content type). |
+| `classify` / `classifyContext` | `nullptr` | Override the default response classifier. Return `Sent`, `RetryLater`, or `Drop`. |
+| `onResponse` / `responseContext` | `nullptr` | Observer called for every HTTP response before the send decision is applied. |
+| `onDrop` / `dropContext` | `nullptr` | Observer called when a record is permanently dropped. |
+
+---
+
 ## Idle compaction with Outbox
 
 Both `pqueue::Outbox` and `pqueue::http::Outbox` expose `compactIdle(maxSteps)`
