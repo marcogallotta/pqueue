@@ -49,7 +49,6 @@ struct OutboxConfig {
     // 0 disables automatic corrupt-record dropping; the default stops after a small cluster.
     std::uint16_t maxCorruptDropsPerLifetime = 3;
     EventOptions events;
-    // TODO: make CRC configurable once the envelope has a published compatibility policy.
 };
 
 enum class SubmitStatus {
@@ -83,7 +82,6 @@ struct DrainResult {
 
 // Generic store-and-forward lifecycle over Queue.
 // This class is transport-agnostic: no HTTP, JSON, API keys, or app-specific logging.
-// TODO: add an advanced constructor for dependency-injected Queue/storage in tests or custom backends.
 class Outbox {
 public:
     Outbox(

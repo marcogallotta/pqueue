@@ -12,7 +12,6 @@ constexpr std::size_t kOutboxEnvelopeHeaderSize = sizeof(std::uint32_t) + sizeof
 constexpr std::size_t kChecksumSize = sizeof(std::uint32_t);
 
 const std::uint32_t* crc32Table() {
-    // TODO: use a precomputed PROGMEM table for very small Arduino targets.
     static std::uint32_t table[256];
     static bool initialized = false;
     if (!initialized) {

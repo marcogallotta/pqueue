@@ -58,7 +58,6 @@ class Transport {
 public:
     virtual ~Transport() = default;
 
-    // TODO: add a generic send() API if/when GET or other methods are supported.
     virtual Response post(
         const char* url,
         const Header* headers,
@@ -121,7 +120,6 @@ struct Config {
 
 class Outbox {
 public:
-    // TODO: add an advanced constructor for dependency-injected core Outbox/storage in tests or custom backends.
     Outbox(
         Config httpConfig,
         Transport& transport,
