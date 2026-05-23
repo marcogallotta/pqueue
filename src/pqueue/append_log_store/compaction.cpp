@@ -227,7 +227,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range,
             });
     const bool wouldRotate = subrangeReachesLastGen && tailCanMergeWithLastRange && tailDepsContained;
 
-    // Pre-rotate range-count gate — evaluated before preflight so that a fallback
+    // Pre-rotate range-count gate -- evaluated before preflight so that a fallback
     // expansion of inputRange is reflected in the hypo calculations below.
     // When wouldRotate, the parent extends rightward to activeGeneration_
     // (parent.startGen unchanged), hasRight becomes false, hasLeft is unchanged.
@@ -236,7 +236,7 @@ Status AppendLogStore::compactRange(const CompactionRange& range,
     // if there are no live records, rotate will not fire (guarded below by
     // !hypoPayloadBytes.empty()), so dead-subrange cleanup must not be blocked.
     // activeSegmentBytes_ > kSegmentHeaderBytes means the tail has events, but
-    // those could all be tombstones — use a cheap RAM scan instead.
+    // those could all be tombstones -- use a cheap RAM scan instead.
     const std::uint32_t hypoCheckEnd = wouldRotate ? activeGeneration_ : inputRange.endGen;
     const bool hypoHasLive = std::any_of(records_.begin(), records_.end(),
         [&](const SegmentRecord& sr) {

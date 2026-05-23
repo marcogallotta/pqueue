@@ -215,7 +215,7 @@ dev  -> READY
 host -> DONE
 ```
 
-Dump commands use a different protocol — no `RESULT` line. `DUMP_FILE` emits a
+Dump commands use a different protocol -- no `RESULT` line. `DUMP_FILE` emits a
 single file block; `DUMP_ALL` wraps multiple file blocks in `DUMP_BEGIN` /
 `DUMP_END`:
 

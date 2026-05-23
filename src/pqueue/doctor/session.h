@@ -333,7 +333,7 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
                 return true;
             }
         }
-        // All tokens valid — reset and apply.
+        // All tokens valid -- reset and apply.
         target = CurrentTarget{};
         target.name     = tokens[1];
         target.basePath = tokens[2];

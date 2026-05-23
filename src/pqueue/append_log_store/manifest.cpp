@@ -38,7 +38,7 @@ bool chooseWinningSlot(bool validA, const ManifestData& mdA,
     if (!validA && !validB) return false;
     if (validA && !validB)  { out = mdA; return true; }
     if (!validA)            { out = mdB; return true; }
-    // Both valid: higher epoch wins; equal epoch → slot A
+    // Both valid: higher epoch wins; equal epoch -> slot A
     out = (mdB.epoch > mdA.epoch) ? mdB : mdA;
     return true;
 }
