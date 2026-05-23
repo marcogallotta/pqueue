@@ -170,6 +170,13 @@ struct BenchmarkResult {
     double write_amp = 0.0, read_bpp = 0.0;
     // I/O op counts, per-run average across repeats
     std::uint64_t writeFile = 0, writeAt = 0, readAt = 0, remove = 0;
+    // idle compaction specific (zero for non-idle scenarios)
+    std::uint32_t idle_steps        = 0;
+    std::uint32_t idle_noops        = 0;
+    std::uint32_t hot_compactions   = 0;
+    std::uint32_t cap_exhausted     = 0;
+    double        max_step_sim_ms   = 0.0;
+    double        total_idle_sim_ms = 0.0;
     bool ok = true;
 };
 
@@ -201,6 +208,12 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
             v.push_back("read_bpp != payloadBytes: bytes read per record does not match payload size");
         if (r.remove != 0)
             v.push_back("remove != 0: unexpected segment removal on pop-only path");
+    }
+    if (r.scenario == "idle_compaction") {
+        if (r.hot_compactions > 0)
+            v.push_back("hot_compactions > 0: compaction fired on enqueue write path (clean-storage invariant violated)");
+        if (r.cap_exhausted > 0)
+            v.push_back("cap_exhausted > 0: enqueues rejected by capacity (store too small for workload)");
     }
     if (r.scenario == "mount") {
         if (r.writeAt != 0)
@@ -452,6 +465,99 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
     return res;
 }
 
+// Idle compaction workload parameters — match the profiling tool's validated runs.
+static constexpr std::uint32_t kIdleBurstSize = 500;
+static constexpr std::uint32_t kIdleCycles    = 3;
+static constexpr float         kIdlePopRatio  = 0.90f;
+
+BenchmarkResult scenarioIdleCompaction(std::uint32_t payloadBytes, std::uint32_t repeat) {
+    const auto lat  = littleFsSimLatency();
+    const auto data = makePayload(payloadBytes);
+
+    std::uint32_t totalIdleSteps      = 0;
+    std::uint32_t totalIdleNoOps      = 0;
+    std::uint32_t totalHotCompactions = 0;
+    std::uint32_t totalCapExhausted   = 0;
+    std::uint64_t maxStepSimUs        = 0;
+    std::uint64_t totalIdleSimUs      = 0;
+    bool anyFail = false;
+
+    for (std::uint32_t r = 0; r < repeat; ++r) {
+        auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+        fs->setLatency(lat);
+        pqueue::Queue q(queueConfig(tempBase("idle_compaction"), fs, payloadBytes));
+        (void)q.stats();  // trigger mount
+
+        std::uint32_t queueSize = 0;
+
+        for (std::uint32_t cycle = 0; cycle < kIdleCycles; ++cycle) {
+            // Phase 1: enqueue burst.
+            // Hot-path compaction detection: rotations write segment headers and
+            // manifests but never read; compactions read input segments before
+            // writing output. A readFile increment during commitEnqueue therefore
+            // indicates compaction fired on the write path. This is a heuristic —
+            // it would misfire if a future code path issues readFile for an
+            // unrelated reason — but it is the same signal the profiling tool uses
+            // and is reliable against the current implementation.
+            for (std::uint32_t i = 0; i < kIdleBurstSize; ++i) {
+                const std::uint64_t rfBefore = fs->counters().readFile;
+                const auto st = q.enqueue(data);
+                if (fs->counters().readFile > rfBefore) ++totalHotCompactions;
+                if (st.ok()) {
+                    ++queueSize;
+                } else {
+                    ++totalCapExhausted;
+                }
+            }
+
+            // Phase 2: drain popRatio fraction.
+            const std::uint32_t toPop =
+                static_cast<std::uint32_t>(static_cast<float>(queueSize) * kIdlePopRatio);
+            std::string out;
+            for (std::uint32_t i = 0; i < toPop; ++i) {
+                auto st = q.peek(out);
+                if (st.ok()) st = q.pop();
+                if (st.ok()) { --queueSize; }
+                else { anyFail = true; break; }
+            }
+            if (anyFail) break;
+
+            // Phase 3: compact idle to completion.
+            for (;;) {
+                const std::uint64_t simBefore = fs->counters().simLatencyUs;
+                const auto cr = q.compactIdle(1);
+                const std::uint64_t simDelta = fs->counters().simLatencyUs - simBefore;
+                ++totalIdleSteps;
+                if (!cr.status.ok()) { anyFail = true; break; }
+                if (cr.compactions > 0) {
+                    maxStepSimUs    = std::max(maxStepSimUs, simDelta);
+                    totalIdleSimUs += simDelta;
+                } else {
+                    ++totalIdleNoOps;
+                    break;
+                }
+            }
+            if (anyFail) break;
+        }
+        if (anyFail) break;
+    }
+
+    BenchmarkResult res;
+    res.scenario          = "idle_compaction";
+    res.payloadBytes      = payloadBytes;
+    res.records           = kIdleBurstSize;
+    res.repeat            = repeat;
+    res.idle_steps        = totalIdleSteps      / repeat;
+    res.idle_noops        = totalIdleNoOps      / repeat;
+    res.hot_compactions   = totalHotCompactions / repeat;
+    res.cap_exhausted     = totalCapExhausted   / repeat;
+    res.max_step_sim_ms   = static_cast<double>(maxStepSimUs) / 1000.0;
+    res.total_idle_sim_ms = static_cast<double>(totalIdleSimUs)
+                            / static_cast<double>(repeat) / 1000.0;
+    res.ok                = !anyFail;
+    return res;
+}
+
 BenchmarkResult scenarioOutboxOfflineSubmit(std::uint32_t payloadBytes,
                                              std::uint32_t records,
                                              std::uint32_t repeat) {
@@ -561,6 +667,13 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
         std::printf("      \"writeFile\": %llu, \"writeAt\": %llu, \"readAt\": %llu, \"remove\": %llu,\n",
                     (unsigned long long)r.writeFile, (unsigned long long)r.writeAt,
                     (unsigned long long)r.readAt, (unsigned long long)r.remove);
+        if (r.scenario == "idle_compaction") {
+            std::printf("      \"idle_steps\": %u, \"idle_noops\": %u, "
+                        "\"hot_compactions\": %u, \"cap_exhausted\": %u,\n",
+                        r.idle_steps, r.idle_noops, r.hot_compactions, r.cap_exhausted);
+            std::printf("      \"max_step_sim_ms\": %.3f, \"total_idle_sim_ms\": %.3f,\n",
+                        r.max_step_sim_ms, r.total_idle_sim_ms);
+        }
         std::printf("      \"ok\": %s\n", r.ok ? "true" : "false");
         std::printf("    }%s\n", comma);
     }
@@ -584,6 +697,7 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
                 " | writeFile | writeAt | readAt | remove | ok |\n");
     std::printf("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n");
     for (const auto& r : results) {
+        if (r.scenario == "idle_compaction") continue;
         std::printf("| %s | %uB | %u | %u"
                     " | %llu | %llu | %llu | %llu"
                     " | %.3f | %.3f"
@@ -600,6 +714,34 @@ void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkCo
     }
     std::printf("\n*sim_\\* columns: multiply by 100 for predicted on-device ms "
                 "(ESP32S3, QSPI flash, default calibration).*\n");
+
+    bool hasIdle = false;
+    for (const auto& r : results) {
+        if (r.scenario == "idle_compaction") { hasIdle = true; break; }
+    }
+    if (hasIdle) {
+        std::printf("\n## Idle compaction  "
+                    "(burst=%u cycles=%u pop=%.0f%%)\n\n",
+                    kIdleBurstSize, kIdleCycles,
+                    static_cast<double>(kIdlePopRatio) * 100.0);
+        std::printf("Counts (`idle_steps`, `idle_noops`, `hot_compactions`, `cap_exhausted`) "
+                    "are per-run averages across `--repeat` runs. "
+                    "`max_step_sim_ms` is the worst single step across all runs. "
+                    "`total_idle_sim_ms` is the per-run average.\n\n");
+        std::printf("| payload | repeat"
+                    " | idle_steps | idle_noops | hot_compactions | cap_exhausted"
+                    " | max_step_sim_ms | total_idle_sim_ms | ok |\n");
+        std::printf("|---|---|---|---|---|---|---|---|---|\n");
+        for (const auto& r : results) {
+            if (r.scenario != "idle_compaction") continue;
+            std::printf("| %uB | %u | %u | %u | %u | %u | %.3f | %.3f | %s |\n",
+                        r.payloadBytes, r.repeat,
+                        r.idle_steps, r.idle_noops, r.hot_compactions, r.cap_exhausted,
+                        r.max_step_sim_ms, r.total_idle_sim_ms,
+                        r.ok ? "yes" : "NO");
+        }
+        std::printf("\n*sim columns: multiply by 100 for predicted on-device ms.*\n");
+    }
 }
 
 } // namespace
@@ -634,6 +776,8 @@ int main(int argc, char** argv) {
         results.push_back(scenarioOutboxOfflineSubmit(payload, kBenchmarkN, repeat));
     for (std::uint32_t preloaded : {0u, 100u, 1000u})
         results.push_back(scenarioMount(preloaded, repeat));
+    for (std::uint32_t payload : {256u, 492u})
+        results.push_back(scenarioIdleCompaction(payload, repeat));
 
     if (doJson)     emitJson(results, cfg);
     if (doMarkdown) emitMarkdown(results, cfg);

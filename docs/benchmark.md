@@ -13,9 +13,7 @@ one-shot report suitable for README, docs, and CI regression.
 
 ## Status
 
-**Implemented:** binary skeleton, `--json` / `--markdown` / `--strict` / `--repeat K`, enqueue scenario (64B / 256B / 1KB / 2KB), peek+pop scenario (64B / 256B / 1KB / 2KB), outbox offline submit scenario (256B / 1KB), `write_amp`, `read_bpp`, per-op simulated latency sampling, strict-mode invariant checks.
-
-**Pending:** mount scenario; idle compaction scenario and its dedicated output columns.
+**Implemented:** binary skeleton, `--json` / `--markdown` / `--strict` / `--repeat K`, enqueue scenario (64B / 256B / 1KB / 2KB), peek+pop scenario (64B / 256B / 1KB / 2KB), outbox offline submit scenario (256B / 1KB), mount scenario (0 / 100 / 1000 pre-loaded records), idle compaction scenario with dedicated output columns, `write_amp`, `read_bpp`, per-op simulated latency sampling, strict-mode invariant checks.
 
 ---
 
