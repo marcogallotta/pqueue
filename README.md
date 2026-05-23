@@ -143,9 +143,6 @@ settings as your app. Add this env to your app's `platformio.ini`:
 ```ini
 [env:pqueue-maintenance]
 extends = env:<your-main-env>
-build_flags =
-    ${env:<your-main-env>.build_flags}
-    -Ipath/to/pqueue/tools
 build_src_filter =
     -<*>
     +<path/to/pqueue/tools/esp32_pqueue_doctor/main.cpp>
