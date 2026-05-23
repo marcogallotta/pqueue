@@ -235,15 +235,6 @@ public:
         return Status::success();
     }
 
-    Status renameFile(const std::string& fromName, const std::string& toName) override {
-        std::error_code ec;
-        std::filesystem::rename(path(fromName), path(toName), ec);
-        if (ec) {
-            return Status::failure(StatusCode::RenameFailed, "failed to rename file", ec.value());
-        }
-        return Status::success();
-    }
-
     Status listFiles(std::vector<std::string>& out) override {
         std::error_code ec;
         for (const auto& entry : std::filesystem::directory_iterator(basePath_, ec)) {

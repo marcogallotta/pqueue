@@ -314,13 +314,6 @@ public:
         return Status::success();
     }
 
-    Status renameFile(const std::string& fromName, const std::string& toName) override {
-        if (!LittleFS.rename(path(fromName).c_str(), path(toName).c_str())) {
-            return Status::failure(StatusCode::RenameFailed, "failed to rename LittleFS file");
-        }
-        return Status::success();
-    }
-
     Status listFiles(std::vector<std::string>& out) override {
         File dir = LittleFS.open(basePath_.c_str());
         if (!dir || !dir.isDirectory()) {

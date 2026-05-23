@@ -30,7 +30,6 @@ public:
     virtual Status resizeFile(const std::string& name, std::uint64_t size) = 0;
     virtual Status fileSize(const std::string& name, std::uint64_t& out) = 0;
     virtual Status removeFile(const std::string& name) = 0;
-    virtual Status renameFile(const std::string& fromName, const std::string& toName) = 0;
     virtual Status listFiles(std::vector<std::string>& out) = 0;
     virtual Status tryAcquireLockFile(const std::string& name, const std::string& contents) = 0;
     virtual Status releaseLockFile(const std::string& name, const std::string& expectedContents) = 0;
