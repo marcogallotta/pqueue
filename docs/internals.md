@@ -467,10 +467,13 @@ if any range exceeds `deadRatioTrigger` or range count reaches
 `rangePressureTrigger`. Segment count is the correct rising edge -- range count
 stays at 1 with a single contiguous range.
 
-### Latency profiler
+### Latency profiler (marked for deletion)
 
-`tools/pqueue_profiling.cpp`. Build: `make -j12 profiling`. All modes use an
-in-memory FS and complete in under a second.
+`tools/pqueue_profiling.cpp` is superseded by the benchmark binary
+(`tools/pqueue_benchmark.cpp`, see `docs/benchmark.md`) and the I/O count
+regression test. It will be deleted once both are complete. Until then it
+remains buildable. Build: `make -j12 profiling`. All modes use an in-memory FS
+and complete in under a second.
 
 ```
 ./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles> [flags]
