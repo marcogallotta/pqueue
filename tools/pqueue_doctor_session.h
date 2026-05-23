@@ -341,7 +341,17 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
     if (verb == "DROP_FRONT_IF_CORRUPT") { cmdDropFrontIfCorrupt(target); return true; }
     if (verb == "RECOVER_STALE_LOCK")    { cmdRecoverStaleLock(target);   return true; }
     if (verb == "FORMAT") {
-        if (tokens.size() < 2 || tokens[1] != "CONFIRM") { sprintln("error: FORMAT requires CONFIRM argument"); return true; }
+        if (tokens.size() < 3 || tokens[1] != "CONFIRM") {
+            sprintln("error: FORMAT requires CONFIRM and target name: FORMAT CONFIRM <name>");
+            return true;
+        }
+        if (tokens[2] != target.name) {
+            Serial.print("error: FORMAT CONFIRM name mismatch: expected '");
+            Serial.print(target.name.c_str());
+            sprintln("'");
+            return true;
+        }
+        sprintln("warning: dump first recommended (DUMP_ALL before FORMAT)");
         cmdFormat(target);
         return true;
     }

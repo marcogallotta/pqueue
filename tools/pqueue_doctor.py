@@ -497,7 +497,7 @@ def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
 
         if args.format:
             log("--- Format ---")
-            lines, timed_out, cmd_ok = _send_cmd(s, "FORMAT CONFIRM", timeout_s=60)
+            lines, timed_out, cmd_ok = _send_cmd(s, f"FORMAT CONFIRM {name}", timeout_s=60)
             for l in lines:
                 log(f"  {l}")
             if timed_out:
