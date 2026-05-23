@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "description": "Persistent queue and outbox for embedded store-and-forward workloads",
   "license": "MIT",
+  "authors": [
+    {
+      "name": "Marco Gallotta",
+      "email": "marco@gallotta.co.za"
+    }
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/marcogallotta/pqueue"
+  },
   "build": {
     "includeDir": "src"
   }
