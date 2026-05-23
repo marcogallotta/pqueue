@@ -1,7 +1,7 @@
 #ifdef ARDUINO
 
 #include <Arduino.h>
-#include "pqueue_doctor_session.h"
+#include "pqueue/doctor/session.h"
 
 void setup() {
     Serial.begin(115200);
