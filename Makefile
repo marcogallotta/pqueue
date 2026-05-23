@@ -11,6 +11,8 @@ OBJ_DIR := $(BUILD_DIR)/obj
 TEST_TARGET := $(BUILD_DIR)/pqueue-tests
 COV_DIR := $(BUILD_DIR)/coverage
 COV_TARGET := $(COV_DIR)/pqueue-tests-cov
+EXAMPLE_BASIC_QUEUE := $(BUILD_DIR)/examples/basic-queue
+EXAMPLE_OUTBOX := $(BUILD_DIR)/examples/outbox
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 APPENDLOG_DIAG_TARGET := $(BUILD_DIR)/pqueue-appendlog-diag
 DOCTOR_DUMP_TARGET := $(BUILD_DIR)/pqueue-doctor-dump
@@ -58,7 +60,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests repair-tool appendlog-diag doctor-dump profiling sim docs coverage clean .FORCE
+.PHONY: all test tests run-tests examples run-examples repair-tool appendlog-diag doctor-dump profiling sim docs coverage clean .FORCE
 
 all: test
 
@@ -73,6 +75,20 @@ tests: run-tests
 
 run-tests: $(TEST_TARGET)
 	./$(TEST_TARGET)
+
+examples: $(EXAMPLE_BASIC_QUEUE) $(EXAMPLE_OUTBOX)
+
+run-examples: examples
+	./$(EXAMPLE_BASIC_QUEUE)
+	./$(EXAMPLE_OUTBOX)
+
+$(EXAMPLE_BASIC_QUEUE): examples/basic_queue.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
+$(EXAMPLE_OUTBOX): examples/outbox.cpp $(PQUEUE_SRC)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
 
 repair-tool: $(REPAIR_TOOL_TARGET)
 
