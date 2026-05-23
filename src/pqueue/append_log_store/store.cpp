@@ -730,6 +730,23 @@ Status AppendLogStore::readRecord(std::uint32_t sequence, std::string& out) {
     return Status::success();
 }
 
+Status AppendLogStore::readRecordSize(std::uint32_t sequence, std::size_t& out) {
+    Status st = ensureMounted();
+    if (!st.ok()) return st;
+
+    if (records_.empty()) {
+        return Status::failure(StatusCode::QueueEmpty, "queue is empty");
+    }
+
+    const std::uint32_t head = records_.front().sequence;
+    if (sequence < head || static_cast<std::size_t>(sequence - head) >= records_.size()) {
+        return Status::failure(StatusCode::InvalidRecord, "sequence not in live record range");
+    }
+
+    out = records_[sequence - head].payloadBytes;
+    return Status::success();
+}
+
 Status AppendLogStore::tryAcquireLockFile(const std::string& name, const std::string& contents) {
     Status st = ensureMounted();
     if (!st.ok()) return st;

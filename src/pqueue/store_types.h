@@ -113,6 +113,7 @@ public:
     virtual Status commitPop(std::uint32_t expectedSequence) = 0;
     virtual Status rewriteRecord(std::uint32_t sequence, const std::string& record) = 0;
     virtual Status readRecord(std::uint32_t sequence, std::string& out) = 0;
+    virtual Status readRecordSize(std::uint32_t sequence, std::size_t& out) = 0;
 
     virtual Status tryAcquireLockFile(const std::string& name, const std::string& contents) = 0;
     virtual Status releaseLockFile(const std::string& name, const std::string& expectedContents) = 0;

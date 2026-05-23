@@ -110,6 +110,68 @@ configured capacity.
 
 ---
 
+## Raw-buffer API (no caller-side heap allocation)
+
+`Queue` and `Outbox` accept and return records via caller-owned buffers using
+`pqueue::Span` (read-only) and `pqueue::MutableSpan` (writable):
+
+```cpp
+struct Span        { const uint8_t* data; size_t len; };
+struct MutableSpan { uint8_t*       data; size_t len; };
+```
+
+### `Queue` raw-buffer methods
+
+```cpp
+// Enqueue from a caller-owned buffer -- no std::string at the call site.
+uint8_t payload[492];
+size_t n = buildPayload(payload);
+queue.enqueue(pqueue::Span(payload, n));
+
+// Query size without reading the payload (no I/O; size is in RAM).
+size_t sz = 0;
+auto st = queue.peekSize(sz);  // QueueEmpty if no front record
+
+// Peek into a caller-owned buffer.
+uint8_t buf[492];
+size_t written = 0;
+auto st = queue.peek(pqueue::MutableSpan(buf, sizeof(buf)), written);
+// st.code == RecordTooLarge if buf is too small; written is valid on ok().
+if (st.ok()) {
+    send(buf, written);
+    queue.pop();
+}
+```
+
+The `std::string` overloads remain first-class and are not deprecated.
+Internal record storage stays as `std::string`; only caller-side allocations
+are eliminated.
+
+**Error codes:**
+- `InvalidArgument` — `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
+- `RecordTooLarge` — `peek(MutableSpan)` when stored record exceeds `out.len`
+- `QueueEmpty` — `peekSize` or `peek` on an empty queue
+
+### `Outbox` raw callback
+
+`Outbox` can be constructed with a `RawSendCallback` instead of `SendCallback`:
+
+```cpp
+using RawSendCallback = SendResult (*)(void* context, pqueue::Span payload, const RetryState& retry);
+
+pqueue::Outbox outbox(queueConfig, outboxConfig, myRawSend, ctx, clock, clockCtx);
+```
+
+The callback receives a `Span` pointing into an internal buffer that is valid
+only during the callback. Do not retain the pointer after it returns. `submit(Span)` is also
+available alongside `submit(const std::string&)`.
+
+Only one callback variant is configured per instance (`SendCallback` or
+`RawSendCallback`). `http::Outbox` is unaffected and always uses the string
+path internally.
+
+---
+
 ## Idle compaction with Outbox
 
 Both `pqueue::Outbox` and `pqueue::http::Outbox` expose `compactIdle(maxSteps)`

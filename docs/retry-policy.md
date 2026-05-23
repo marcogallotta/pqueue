@@ -22,11 +22,28 @@ not a silent behaviour change.
 
 ---
 
+## Jitter random source
+
+Jitter is supplied via a caller-provided callback, injected alongside the clock:
+
+```cpp
+// Returns a value in [0, range). Must be thread-safe if drain() is called
+// from multiple contexts. On ESP32 use esp_random(); on POSIX use std::rand().
+using RandCallback = std::uint32_t (*)(void* context, std::uint32_t range);
+```
+
+`Outbox` stores `rand_` / `randContext_` and calls it once per `RetryLater`
+to sample the jitter offset. Callers that pass `nullptr` get no jitter
+(delay = capped base delay).
+
+---
+
 ## Backoff formula
 
 ```
-delay = min(maxRetryDelayMs, initialRetryDelayMs * 2^attempts)
-delay += uniform(-jitterPct%, +jitterPct%) * delay
+base  = min(maxRetryDelayMs, initialRetryDelayMs * 2^attempts)
+jitter = rand(0, base * jitterPct / 100)   // symmetric: subtract or add
+delay = base ± jitter                       // sign chosen by low bit of rand sample
 ```
 
 `attempts` is already stored per-envelope in the queue. The clock source
@@ -36,6 +53,29 @@ is the existing `setFrontCooldown` path using what is already there.
 Keep `maxRetryDelayMs` modest in production. A record cooling at the front
 blocks all records behind it (see FIFO limitation below). The default of 60s is
 configurable; tighten it if your workload is latency-sensitive.
+
+---
+
+## SendResult shape
+
+```cpp
+struct SendResult {
+    SendDecision decision;
+    std::uint32_t retryAfterMs = 0; // 0 = no server hint
+};
+```
+
+`Outbox` interprets `retryAfterMs` only on `RetryLater`:
+
+| `retryAfterMs` | effective delay |
+|---|---|
+| `> 0` | `min(retryAfterMs, maxRetryDelayMs)` — server hint, hard-capped |
+| `0` | computed backoff (see formula above) |
+
+The field gives HTTP callers a place to surface `Retry-After` headers now,
+before drain-around-front exists. Long server-specified windows are silently
+clamped to `maxRetryDelayMs` so a single cooling record cannot freeze the
+outbox indefinitely.
 
 ---
 
@@ -52,22 +92,6 @@ configurable; tighten it if your workload is latency-sensitive.
 ### Retryable (unchanged)
 
 `429`, `503`, other `5xx`, transport errors.
-
----
-
-## Retry-After compliance (capped)
-
-`429` and `503` responses commonly include a `Retry-After` header. Apply it,
-but hard-cap at `maxRetryDelayMs`:
-
-```
-effectiveDelay = min(parsedRetryAfter, maxRetryDelayMs)
-```
-
-Without drain-around-front, a server-specified window longer than
-`maxRetryDelayMs` would freeze the entire outbox for that duration. The cap
-makes compliance safe while still honouring short server hints. Document that
-long `Retry-After` values are silently clamped.
 
 ---
 

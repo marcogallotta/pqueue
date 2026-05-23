@@ -41,6 +41,7 @@ public:
     Status commitPop(std::uint32_t expectedSequence) override;
     Status rewriteRecord(std::uint32_t sequence, const std::string& record) override;
     Status readRecord(std::uint32_t sequence, std::string& out) override;
+    Status readRecordSize(std::uint32_t sequence, std::size_t& out) override;
 
     Status publishManifest(const append_log_detail::ManifestData& manifest);
     bool readManifest(append_log_detail::ManifestData& out);
