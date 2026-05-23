@@ -105,7 +105,7 @@ Two invariants make this safe:
 
 **`append_log_common.h/.cpp`** defines the binary format layer (`pqueue::append_log_detail` namespace): `ManifestRange { startGen, endGen }`, `ManifestData { epoch, nextGeneration, tailGeneration, ranges }`, `serialiseManifest` / `parseManifest`, and the segment/event serialisers and parsers.
 
-There are two format version fields: `kFormatVersion = 0` is used in segment
+There are two format version fields: `kFormatVersion = 1` is used in segment
 headers and all event types; `kManifestVersion = 1` is the manifest-specific
 format version. These are versioned independently.
 
@@ -113,7 +113,7 @@ format version. These are versioned independently.
 
 ```
 magic       4 bytes   0x47535150 ("PQSG")
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   20
 generation  4 bytes   u32, matches the segment generation encoded in the filename; live sealed segments are referenced by manifest ranges, and the active tail is referenced by tailGeneration
 startSeq    4 bytes   u32, informational: first enqueue sequence expected
@@ -124,7 +124,7 @@ headerCrc   4 bytes   CRC32 over preceding 16 bytes
 
 ```
 magic       4 bytes   0x51455150 ("PQEQ") for ENQUEUE, 0x45525150 ("PQRE") for REWRITE
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   16  (kEnqueueHeaderBytes)
 sequence    4 bytes   u32
 payloadBytes 4 bytes  u32
@@ -137,7 +137,7 @@ footer      4 bytes   0x214B4F50 ("POK!")
 
 ```
 magic       4 bytes   0x45505150 ("PQPE")
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   20
 sequence    4 bytes   u32
 eventCrc    4 bytes   CRC32 over magic + version + headerBytes + sequence
@@ -471,9 +471,27 @@ stays at 1 with a single contiguous range.
 
 ## On-device validation
 
-Test: `tests/arduino/test_pqueue_compaction/test_main.cpp`.
-Environment: `esp32s3-compaction`.
-Build and upload: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-testing`.
+**esp32s3-littlefs** (`tests/arduino/test_pqueue_littlefs/test_main.cpp`): LittleFS
+correctness suite. Covers basic FIFO, remount persistence, pop/rewrite/compact
+persistence across reboots, capacity behaviour, validate, record size boundaries,
+independent lock paths, outbox backlog persistence, retryable-failure semantics,
+compactIdle survival across remount, and DropOldest eviction.
+Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs`.
+
+**esp32s3-littlefs-slow** (`tests/arduino/test_pqueue_littlefs_slow/test_main.cpp`):
+Multi-reboot sequence tests. Each test triggers a deliberate reboot mid-operation
+and verifies state after remount. Covers: fifo-many, pop-remaining, rewrite-front,
+outbox-drain, compaction-reboot, and a churn pass without reboot.
+Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs-slow`.
+
+**esp32s3-littlefs-soak** (`tests/arduino/test_pqueue_littlefs_soak/test_pqueue_littlefs_soak_test_main.cpp`):
+30-cycle enqueue/pop churn with segment rollover on real LittleFS. Verifies
+remount correctness under sustained load. Does not call compactIdle (compaction
+soak is covered by focused POSIX tests).
+Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs-soak`.
+
+**esp32s3-compaction** (`tests/arduino/test_pqueue_compaction/test_main.cpp`):
+Compaction benchmarker. Build and upload only: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-testing`.
 
 **Results** (ESP32S3, QSPI flash):
 
