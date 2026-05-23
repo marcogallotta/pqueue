@@ -99,6 +99,18 @@ pqueue::Config queueConfig(const std::string& basePath,
     return cfg;
 }
 
+pqueue::Config mountQueueConfig(const std::string& basePath,
+                                 std::shared_ptr<CountingFileSystem> fs) {
+    pqueue::Config cfg;
+    cfg.basePath        = basePath;
+    cfg.recordSizeBytes = kMountPayloadBytes;
+    cfg.reservedBytes   = kMountMaxTotalBytes;
+    cfg.maxSegments     = 200;
+    cfg.storageBackend  = pqueue::StorageBackend::Posix;
+    cfg.fileSystem      = fs;
+    return cfg;
+}
+
 struct FakeClock { std::uint64_t now = 0; };
 std::uint64_t fakeClock(void* ctx) { return static_cast<FakeClock*>(ctx)->now; }
 
@@ -390,14 +402,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
         // Setup phase: populate dir with preloadedRecords, then close.
         {
             auto setupFs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
-            pqueue::Config setupCfg;
-            setupCfg.basePath        = dir;
-            setupCfg.recordSizeBytes = kMountPayloadBytes;
-            setupCfg.reservedBytes   = kMountMaxTotalBytes;
-            setupCfg.maxSegments     = 200;
-            setupCfg.storageBackend  = pqueue::StorageBackend::Posix;
-            setupCfg.fileSystem      = setupFs;
-            pqueue::Queue setupQ(setupCfg);
+            pqueue::Queue setupQ(mountQueueConfig(dir, setupFs));
             for (std::uint32_t i = 0; i < preloadedRecords; ++i) {
                 if (!setupQ.enqueue(data).ok()) { anyFail = true; break; }
             }
@@ -407,14 +412,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
         // Mount phase: fresh fs, same dir. Only the mount (first stats() call) is timed.
         auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
         fs->setLatency(lat);
-        pqueue::Config mountCfg;
-        mountCfg.basePath        = dir;
-        mountCfg.recordSizeBytes = kMountPayloadBytes;
-        mountCfg.reservedBytes   = kMountMaxTotalBytes;
-        mountCfg.maxSegments     = 200;
-        mountCfg.storageBackend  = pqueue::StorageBackend::Posix;
-        mountCfg.fileSystem      = fs;
-        pqueue::Queue q(mountCfg);
+        pqueue::Queue q(mountQueueConfig(dir, fs));
 
         const std::uint64_t simBefore = fs->counters().simLatencyUs;
         const auto before = fs->counters();
