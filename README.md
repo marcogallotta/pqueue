@@ -94,7 +94,7 @@ qcfg.basePath       = "/outbox";
 qcfg.reservedBytes  = 65536;
 
 pqueue::OutboxConfig ocfg;
-ocfg.retryDelayMs   = 10000;
+ocfg.initialRetryDelayMs = 10000;
 
 pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
 

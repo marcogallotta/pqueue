@@ -586,7 +586,7 @@ def main() -> None:
     p.add_argument("--recover-stale-lock", action="store_true",
                    help="Remove a stale lock left by a dead process")
     p.add_argument("--format", action="store_true",
-                   help="Destructively reinitialize the queue (sends FORMAT CONFIRM)")
+                   help="Destructively reinitialize the queue (sends FORMAT CONFIRM <name>)")
 
     # Dump commands
     p.add_argument("--dump-file", metavar="NAME",

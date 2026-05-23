@@ -10,14 +10,6 @@
 
 namespace pqueue {
 
-// Queue v1 stores opaque records as std::string. This is acceptable for
-// ESP32-class Arduino targets and desktop tests, but the public Queue API
-// should eventually grow raw-buffer/header-peek operations for broader
-// Arduino support.
-//
-// rewriteFront() is intentionally exposed for Outbox v1 so retry attempts can
-// be persisted without changing FIFO order. Future backends may replace this
-// with a cheaper metadata/sidecar strategy.
 class Outbox;
 
 class Queue {
