@@ -37,7 +37,30 @@ jobs:
             libcurl4-openssl-dev
 
       - name: Build tools and examples
-        run: make -j"$(nproc)" examples repair-tool appendlog-diag doctor-dump profiling sim
+        run: make -j"$(nproc)" examples repair-tool appendlog-diag doctor-dump sim
+
+  benchmark:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            doctest-dev \
+            libcurl4-openssl-dev
+
+      - name: Build benchmark
+        run: make -j"$(nproc)" benchmark
+
+      - name: Run benchmark
+        run: ./build/pqueue-benchmark --json --strict --repeat 5 > /tmp/benchmark-current.json
+
+      - name: Regression check
+        run: python3 tools/benchmark_regression.py docs/benchmark-results.json /tmp/benchmark-current.json
 
   docs:
     runs-on: ubuntu-24.04

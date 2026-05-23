@@ -465,7 +465,7 @@ BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repe
     return res;
 }
 
-// Idle compaction workload parameters — match the profiling tool's validated runs.
+// Idle compaction workload parameters — match on-device validated runs.
 static constexpr std::uint32_t kIdleBurstSize = 500;
 static constexpr std::uint32_t kIdleCycles    = 3;
 static constexpr float         kIdlePopRatio  = 0.90f;
@@ -497,8 +497,7 @@ BenchmarkResult scenarioIdleCompaction(std::uint32_t payloadBytes, std::uint32_t
             // writing output. A readFile increment during commitEnqueue therefore
             // indicates compaction fired on the write path. This is a heuristic —
             // it would misfire if a future code path issues readFile for an
-            // unrelated reason — but it is the same signal the profiling tool uses
-            // and is reliable against the current implementation.
+            // unrelated reason — but it is reliable against the current implementation.
             for (std::uint32_t i = 0; i < kIdleBurstSize; ++i) {
                 const std::uint64_t rfBefore = fs->counters().readFile;
                 const auto st = q.enqueue(data);

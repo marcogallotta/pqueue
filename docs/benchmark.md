@@ -5,15 +5,9 @@ table of latency percentiles, write amplification, and I/O op counts for the
 scenarios that matter at launch: enqueue, peek+pop, mount, outbox submit, and
 idle compaction.
 
-Separate from `tools/pqueue_profiling.cpp`, which is an interactive developer
-tool for investigating specific workloads. The benchmark binary is a stable
-one-shot report suitable for README, docs, and CI regression.
+The benchmark binary is a stable one-shot report suitable for README, docs, and CI regression.
 
 ---
-
-## Status
-
-**Implemented:** binary skeleton, `--json` / `--markdown` / `--strict` / `--repeat K`, enqueue scenario (64B / 256B / 1KB / 2KB), peek+pop scenario (64B / 256B / 1KB / 2KB), outbox offline submit scenario (256B / 1KB), mount scenario (0 / 100 / 1000 pre-loaded records), idle compaction scenario with dedicated output columns, `write_amp`, `read_bpp`, per-op simulated latency sampling, strict-mode invariant checks.
 
 ---
 
@@ -79,7 +73,6 @@ pressure or capacity rejection during setup from contaminating the mount timing.
 | `idle_noops` | Steps that found nothing to compact |
 | `hot_compactions` | Compactions triggered on the enqueue write path (should be 0) |
 | `cap_exhausted` | Enqueues rejected because live data filled the store |
-| `fs_floor_hit` | Enqueues rejected by `minFreeBytes` FS floor |
 | `max_step_sim_ms` | Worst single `compactIdle(1)` step in simulated time |
 | `total_idle_sim_ms` | Sum of all idle compaction steps in simulated time |
 
@@ -99,18 +92,11 @@ becoming O(n²)).
 the primary basis for launch claims and on-device predictions. These are the
 numbers worth publishing in README or docs.
 
-The simulation uses `CountingFileSystem` with the calibrated latency model from
-`tools/pqueue_profiling.cpp` (`littleFsSimLatency()`). Extending the model to
-enqueue, peek+pop, mount, and outbox scenarios requires threading
-`CountingFileSystem::setLatency()` through those workload setup paths — the
-same pattern used for compaction scenarios in the profiling tool.
-
-**Per-operation latency sampling.** `sim_p99_ms` and `sim_max_ms` require
-per-operation simulated cost, not just an aggregate total. The implementation
-must snapshot `CountingFileSystem::counters().simLatencyUs` before and after
-each individual API call (each `enqueue`, `pop`, `mount`, etc.) to get a
-per-call simulated cost sample. Aggregating across the whole cell and dividing
-is not sufficient — it loses the distribution.
+The simulation uses `CountingFileSystem` with the calibrated latency model
+(`littleFsSimLatency()` in `tools/pqueue_benchmark.cpp`). Per-operation
+simulated cost is sampled by snapshotting `CountingFileSystem::counters().simLatencyUs`
+before and after each individual API call, giving a per-call cost distribution
+for p99 and max.
 
 ---
 
@@ -132,8 +118,7 @@ Unmount / destructor time is not measured.
 
 ## Output formats
 
-**`--json`** is the primary output format. Implement it from the start; it is
-the basis for CI regression diffs. Schema:
+**`--json`** is the primary output format and the basis for CI regression diffs. Schema:
 
 ```json
 {
@@ -173,135 +158,36 @@ Exits 1 on correctness anomalies only:
 - `hot_compactions > 0` in the idle compaction scenario
 - any workload row where `ok` is false
 
-No write-amplification or latency thresholds are hardcoded. Numeric regression
-limits belong in CI configuration once baseline data exists.
+No write-amplification or latency thresholds are hardcoded in the binary.
+Numeric regression detection is handled by `tools/benchmark_regression.py`.
 
 ---
 
-## Regression thresholds
+## Regression test
 
-Per-metric regression limits (e.g. "sim_p99 must not increase by more than 5%")
-live in CI configuration, not in the binary. CI stores a baseline `--json`
-snapshot and diffs against each run.
+CI builds the benchmark, runs it with `--json --strict`, and diffs the output
+against the committed baseline using `tools/benchmark_regression.py`. Only
+deterministic fields are compared (I/O counts, simulated latency, write
+amplification); wall-clock times are excluded.
 
----
+To update the baseline after an intentional change:
 
-## Related: I/O count regression test
+```bash
+./build/pqueue-benchmark --json --strict --repeat 5 > docs/benchmark-results.json
+```
 
-A separate piece of work, distinct from this benchmark binary: promote the
-red-flag checks in `tools/pqueue_profiling.cpp` to hard failures and add a CI
-step that runs `./build/pqueue-profiling all` with `--strict`. The I/O counts
-it checks (`writeAt`, `readAt`, metadata ops) are fully deterministic against
-the in-memory FS — exact regression targets, no baseline snapshot needed.
-
----
-
-## Profiling tool removal
-
-`tools/pqueue_profiling.cpp` is marked for deletion once both this benchmark
-binary and the I/O count regression test are complete. Its scenarios are
-superseded by the benchmark workload matrix; its red-flag logic is superseded
-by the regression test. The `compaction`/`compaction-sim` burst modes (external
-trigger, custom dead-ratio logic) are not replicated in the benchmark and should
-be evaluated for value before the file is removed.
-
-`tools/pqueue_compaction_sim.cpp` is **not** deleted. It is a correctness sweep
-tool that catches deadlocks and strategy failures across a parameter matrix. The
-benchmark does not replace it.
+`tools/pqueue_compaction_sim.cpp` is **not** replaced by the benchmark. It is a
+correctness sweep tool that catches deadlocks and strategy failures across a
+parameter matrix.
 
 ---
 
 ## Release results
 
-Actual benchmark output lives in `docs/benchmark-results.md`. That file is
-generated by running:
+`docs/benchmark-results.json` is the committed numeric baseline. CI diffs
+against it on every push.
 
-```bash
-./build/pqueue-benchmark --markdown
-```
+`docs/benchmark-results.md` is a narrative interpretation document. It
+references `benchmark-results.json` as the source of truth and summarizes the
+key launch findings.
 
-and committing the output. It records the numbers that back any launch claims
-in README or docs, and serves as the human-readable baseline. The JSON
-equivalent (`--json`) is the machine-readable baseline used by CI.
-
-`docs/benchmark-results.md` also contains an interpretation guide: what each
-metric means in practice, what values are acceptable, and what to investigate
-if a number looks wrong.
-
----
-
-## On-device benchmark
-
-Runs the same workload matrix as the POSIX binary on real LittleFS. Produces
-plain text output matching the `--markdown` format, printed over Serial.
-Intended as a release validation gate run by hand, not a CI step.
-
-**Source:** `tools/pqueue_benchmark_main.cpp` (`#ifdef ARDUINO` entry point).
-
-**PlatformIO environment:** `esp32s3-benchmark`.
-
-**N and repeat** are compile-time constants in the env, defaulting to 100
-records and 3 repeats. Reduced from the POSIX defaults (1000/5) to keep
-total runtime under a few minutes on device.
-
----
-
-## Calibration sampler
-
-Measures each LittleFS op type in isolation on the target device and outputs
-per-op latency constants as JSON over Serial. The output is saved to a file
-and passed to the POSIX benchmark via `--calibration-file` to replace the
-default constants with device-accurate values.
-
-**Source:** `tools/pqueue_calibration_main.cpp`.
-
-**PlatformIO environment:** `esp32s3-calibration`.
-
-Both `esp32s3-benchmark` and `esp32s3-calibration` share the same firmware
-layer: LittleFS init/format helpers, `DeviceTimings` (p50/p90/p99/max), and
-the raw op measurement loops currently in `tools/pqueue_profiling_main.cpp`.
-
-### Measured constants
-
-```
-readAt_us             open + read + close for a small file
-writeFile_fixed_us    fixed metadata/GC cost per writeFile call
-writeFile_per_kb_us   per-KB cost added to writeFile
-writeAt_us            open + write + flush + close
-removeFile_us         cost of a single removeFile call
-listFiles_base_us     base cost of a directory listing
-listFiles_per_file_us per-file cost added to listFiles
-```
-
-Each constant is measured with enough iterations to produce a stable median.
-
-### Output format
-
-JSON over Serial:
-
-```json
-{
-  "device": "esp32s3",
-  "flash": "qspi",
-  "readAt_us": 345,
-  "writeFile_fixed_us": 1380,
-  "writeFile_per_kb_us": 518,
-  "writeAt_us": 138,
-  "removeFile_us": 166,
-  "listFiles_base_us": 690,
-  "listFiles_per_file_us": 86
-}
-```
-
-### Integration with POSIX benchmark
-
-Pass the saved JSON to the benchmark:
-
-```bash
-./build/pqueue-benchmark --calibration-file device-calibration.json --markdown
-```
-
-This overrides all default sim constants with the device-measured values.
-`--calibration-file` and `--multiplier` together are an error.
-`--multiplier` remains supported as a convenient uniform scale when
-per-op measurement is not available.

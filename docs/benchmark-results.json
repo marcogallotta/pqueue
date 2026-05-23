@@ -1,0 +1,181 @@
+{
+  "config": {
+    "gitHash": "f91369f",
+    "maxSegmentBytes": 4096,
+    "maxSegments": 200,
+    "maxTotalBytes": 2108736,
+    "maxOutputSegments": 8,
+    "platform": "posix"
+  },
+  "results": [
+    {
+      "scenario": "enqueue",
+      "payloadBytes": 64,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 15, "p90_us": 18, "p99_us": 53, "max_us": 693,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.395, "read_bpp": 0.0,
+      "writeFile": 44, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "enqueue",
+      "payloadBytes": 256,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 16, "p90_us": 42, "p99_us": 106, "max_us": 779,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.110, "read_bpp": 0.0,
+      "writeFile": 144, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "enqueue",
+      "payloadBytes": 1024,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 20, "p90_us": 55, "p99_us": 155, "max_us": 672,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.042, "read_bpp": 0.0,
+      "writeFile": 668, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "enqueue",
+      "payloadBytes": 2048,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 69, "p90_us": 104, "p99_us": 398, "max_us": 848,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.040, "read_bpp": 0.0,
+      "writeFile": 2000, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "peek_pop",
+      "payloadBytes": 64,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 28, "p90_us": 31, "p99_us": 111, "max_us": 788,
+      "sim_p99_ms": 0.483, "sim_max_ms": 4.279,
+      "write_amp": 0.317, "read_bpp": 64.0,
+      "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "peek_pop",
+      "payloadBytes": 256,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 29, "p90_us": 32, "p99_us": 100, "max_us": 707,
+      "sim_p99_ms": 0.483, "sim_max_ms": 4.279,
+      "write_amp": 0.079, "read_bpp": 256.0,
+      "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "peek_pop",
+      "payloadBytes": 1024,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 34, "p90_us": 38, "p99_us": 136, "max_us": 876,
+      "sim_p99_ms": 0.483, "sim_max_ms": 4.279,
+      "write_amp": 0.020, "read_bpp": 1024.0,
+      "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "peek_pop",
+      "payloadBytes": 2048,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 33, "p90_us": 39, "p99_us": 124, "max_us": 660,
+      "sim_p99_ms": 0.483, "sim_max_ms": 4.279,
+      "write_amp": 0.010, "read_bpp": 2048.0,
+      "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "outbox_offline_submit",
+      "payloadBytes": 256,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 30, "p90_us": 47, "p99_us": 180, "max_us": 1208,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.249, "read_bpp": 0.0,
+      "writeFile": 168, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "outbox_offline_submit",
+      "payloadBytes": 1024,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 43, "p90_us": 84, "p99_us": 159, "max_us": 899,
+      "sim_p99_ms": 3.934, "sim_max_ms": 3.934,
+      "write_amp": 1.077, "read_bpp": 0.0,
+      "writeFile": 668, "writeAt": 1000, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "mount",
+      "payloadBytes": 256,
+      "records": 0,
+      "repeat": 5,
+      "p50_us": 26, "p90_us": 29, "p99_us": 29, "max_us": 51,
+      "sim_p99_ms": 2.070, "sim_max_ms": 2.070,
+      "write_amp": 0.000, "read_bpp": 0.0,
+      "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "mount",
+      "payloadBytes": 256,
+      "records": 100,
+      "repeat": 5,
+      "p50_us": 584, "p90_us": 587, "p99_us": 587, "max_us": 631,
+      "sim_p99_ms": 75.550, "sim_max_ms": 75.550,
+      "write_amp": 0.000, "read_bpp": 282.4,
+      "writeFile": 0, "writeAt": 0, "readAt": 208, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "mount",
+      "payloadBytes": 256,
+      "records": 1000,
+      "repeat": 5,
+      "p50_us": 6127, "p90_us": 6384, "p99_us": 6384, "max_us": 6636,
+      "sim_p99_ms": 729.638, "sim_max_ms": 729.638,
+      "write_amp": 0.000, "read_bpp": 281.5,
+      "writeFile": 0, "writeAt": 0, "readAt": 2072, "remove": 0,
+      "ok": true
+    },
+    {
+      "scenario": "idle_compaction",
+      "payloadBytes": 256,
+      "records": 500,
+      "repeat": 5,
+      "p50_us": 0, "p90_us": 0, "p99_us": 0, "max_us": 0,
+      "sim_p99_ms": 0.000, "sim_max_ms": 0.000,
+      "write_amp": 0.000, "read_bpp": 0.0,
+      "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0,
+      "idle_steps": 10, "idle_noops": 3, "hot_compactions": 0, "cap_exhausted": 0,
+      "max_step_sim_ms": 27.535, "total_idle_sim_ms": 90.994,
+      "ok": true
+    },
+    {
+      "scenario": "idle_compaction",
+      "payloadBytes": 492,
+      "records": 500,
+      "repeat": 5,
+      "p50_us": 0, "p90_us": 0, "p99_us": 0, "max_us": 0,
+      "sim_p99_ms": 0.000, "sim_max_ms": 0.000,
+      "write_amp": 0.000, "read_bpp": 0.0,
+      "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0,
+      "idle_steps": 10, "idle_noops": 3, "hot_compactions": 0, "cap_exhausted": 0,
+      "max_step_sim_ms": 48.533, "total_idle_sim_ms": 154.446,
+      "ok": true
+    }
+  ]
+}

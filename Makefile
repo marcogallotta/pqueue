@@ -16,7 +16,6 @@ EXAMPLE_OUTBOX := $(BUILD_DIR)/examples/outbox
 REPAIR_TOOL_TARGET := $(BUILD_DIR)/pqueue-repair-tool
 APPENDLOG_DIAG_TARGET := $(BUILD_DIR)/pqueue-appendlog-diag
 DOCTOR_DUMP_TARGET := $(BUILD_DIR)/pqueue-doctor-dump
-PROFILING_TARGET  := $(BUILD_DIR)/pqueue-profiling
 SIM_TARGET        := $(BUILD_DIR)/pqueue-compaction-sim
 BENCHMARK_TARGET  := $(BUILD_DIR)/pqueue-benchmark
 
@@ -61,7 +60,7 @@ DOCS_DIR := docs
 DOCS_MD := $(wildcard $(DOCS_DIR)/*.md)
 DOCS_PDF := $(DOCS_MD:.md=.pdf)
 
-.PHONY: all test tests run-tests examples run-examples repair-tool appendlog-diag doctor-dump profiling sim benchmark docs coverage clean .FORCE
+.PHONY: all test tests run-tests examples run-examples repair-tool appendlog-diag doctor-dump sim benchmark docs coverage clean .FORCE
 
 all: test
 
@@ -96,12 +95,6 @@ repair-tool: $(REPAIR_TOOL_TARGET)
 appendlog-diag: $(APPENDLOG_DIAG_TARGET)
 
 doctor-dump: $(DOCTOR_DUMP_TARGET)
-
-profiling: $(PROFILING_TARGET)
-
-$(PROFILING_TARGET): tools/pqueue_profiling.cpp $(PQUEUE_SRC)
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -Itools $^ -o $@ $(LDFLAGS)
 
 benchmark: $(BENCHMARK_TARGET)
 

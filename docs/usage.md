@@ -493,143 +493,20 @@ config.
 
 ---
 
-## Predicting latency with the simulator
+## Predicting latency
 
-The profiling tool runs the real store implementation against an in-memory
-filesystem with simulated LittleFS latency. No device needed. Completes in
-under a second.
-
-Build and run:
+Use the benchmark binary with simulated latency. No device needed. The `sim_*`
+columns in the output are deterministic predictions based on calibrated per-op
+LittleFS costs (×100 = predicted on-device ms for ESP32S3 with QSPI flash).
 
 ```bash
-make -j12 profiling
-./build/pqueue-profiling idle-sim <burst> <payloadBytes> <cycles> [flags]
+make -j12 benchmark
+./build/pqueue-benchmark --markdown --repeat 5
 ```
 
-Pass your config values as flags so the simulation matches your deployment:
-
-```bash
-./build/pqueue-profiling idle-sim 500 492 3 \
-    --max-segment-bytes 4096 \
-    --max-total-bytes 393216 \
-    --max-output-segments 8 \
-    --pop 90
-```
-
-`--max-total-bytes` maps to `reservedBytes` in your config. Size it to cover the
-burst plus any records carried over from a previous cycle. For 500 records at
-492-byte payload, 384 KB (393216) fits cleanly; 64 KB would hit `capExhausted`.
-
-`Queue` users: leave `--max-output-segments` at 8 (the fixed default). Only
-change it if you construct `AppendLogStore` directly.
-
-**FS floor simulation:** pass `--min-free-bytes` and `--fs-total-bytes` to model
-the real LittleFS safety floor. Without these flags the sim runs with unlimited
-free space and `minFreeBytes = 0`. Results report `fsFloorHit` (enqueues
-rejected by FS floor) separately from `capExhausted` (rejected by queue
-footprint cap) so the two failure modes are distinguishable.
-
-### Reading the output
-
-```text
-idle_compaction  burst=500 payload=492B cycles=3 pop=90% maxOutSegs=8
-  idleSteps=10   idleNoOps=3  hotCompactions=0
-  maxStepLatency=48.5ms  totalIdleLatency=154.4ms
-  (multiply ms by 100 for predicted on-device ms at calibrated flash speed)
-  deadlocks=0    capExhausted=0
-```
-
-**The primary metric is `hotCompactions`:**
-
-| Value | Meaning |
-|---|---|
-| `hotCompactions = 0` | Good. Idle cleanup is keeping enqueue clean. The clean-storage invariant holds. |
-| `hotCompactions > 0` | Bad. Enqueue is paying cleanup cost. Compaction is not running often enough between cycles, or the burst outpaces idle budget. |
-
-**Secondary: latency**
-
-`maxStepLatency` is the worst single `compactIdle(1)` call, in simulated time.
-To convert to predicted device milliseconds:
-
-```
-predicted_device_ms = sim_ms * 100 * multiplier
-```
-
-At the default `--multiplier 1.0` (calibrated for ESP32S3 with QSPI flash),
-multiply sim_ms by 100. A faster device uses a smaller multiplier; a slower
-device uses a larger one. The predicted max step must fit your watchdog timeout
-or UI loop budget.
-
-`totalIdleLatency` is the total cleanup cost across the run. Divide by the
-number of cycles to estimate your idle-time budget requirement per cycle.
-
-**Other fields:**
-
-| Field | Meaning |
-|---|---|
-| `idleSteps` | Total compaction steps across all cycles. More steps = more fragmented data = more `compactIdle` calls needed per cycle. |
-| `capExhausted` | Enqueue failed because live data filled the queue. No compaction strategy can help -- increase `reservedBytes` or drain more aggressively. |
-| `deadlocks` | Enqueue failed even though dead data existed. Indicates a compaction strategy failure. Should always be 0. |
-
-### Named examples
-
-**Light** -- infrequent small bursts, nearly full drain:
-
-```bash
-./build/pqueue-profiling idle-sim 100 150 5 --pop 90
-```
-
-```text
-idleSteps=18  maxStepLatency=10.0ms  totalIdle=65.6ms  hotCompactions=0
-```
-
-Predicted max step on device: ~1000ms. Predicted total idle for run: ~6560ms
-(~1310ms average per cycle across 5 cycles).
-
-**Realistic** -- moderate burst, large payload, high drain:
-
-```bash
-./build/pqueue-profiling idle-sim 500 492 3 --pop 90
-```
-
-```text
-idleSteps=10  maxStepLatency=48.5ms  totalIdle=154.4ms  hotCompactions=0
-```
-
-Predicted max step on device: ~4850ms. Predicted total idle for run: ~15400ms
-(~5130ms average per cycle across 3 cycles).
-
-**Brutal** -- large burst, low drain (50%):
-
-```bash
-./build/pqueue-profiling idle-sim 500 492 3 --pop 50
-```
-
-```text
-idleSteps=60  idleNoOps=3  hotCompactions=0  capExhausted=486
-```
-
-`capExhausted` dominates: 50% drain leaves too much live data across 3 cycles.
-Solution: increase `reservedBytes`, reduce burst size, or drain more
-aggressively.
-
-### Adjusting for your flash speed
-
-The default latency constants are calibrated for ESP32S3 with QSPI flash
-(~35ms per file open). If your device is faster or slower, scale with
-`--multiplier`:
-
-```bash
-# Device is 2x faster than the calibrated reference:
-./build/pqueue-profiling idle-sim 500 492 3 --multiplier 0.5
-
-# Device is 2x slower:
-./build/pqueue-profiling idle-sim 500 492 3 --multiplier 2.0
-```
-
-To recalibrate from scratch: run an on-device test that exercises each op
-type in isolation (readFile, writeFile, removeFile), measure actual ms, then
-compare to the sim output at `--multiplier 1.0` and scale accordingly.
+See `docs/benchmark-results.md` for the launch baseline and interpretation of
+each scenario. The key metric for idle compaction is `hot_compactions = 0`,
+which confirms the clean-storage invariant holds for your workload parameters.
 
 
 ---

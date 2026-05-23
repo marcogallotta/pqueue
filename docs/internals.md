@@ -467,83 +467,6 @@ if any range exceeds `deadRatioTrigger` or range count reaches
 `rangePressureTrigger`. Segment count is the correct rising edge -- range count
 stays at 1 with a single contiguous range.
 
-### Latency profiler (marked for deletion)
-
-`tools/pqueue_profiling.cpp` is superseded by the benchmark binary
-(`tools/pqueue_benchmark.cpp`, see `docs/benchmark.md`) and the I/O count
-regression test. The benchmark is partially implemented (outbox offline submit
-scenario; enqueue, peek+pop, mount, and idle compaction are pending). Until all
-scenarios are ported, the profiling tool remains buildable. Build:
-`make -j12 profiling`. All modes use an in-memory FS and complete in under a
-second.
-
-```
-./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling compaction-sim <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling idle <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling idle-sim <burst> <payloadBytes> <cycles> [flags]
-```
-
-`compaction`: I/O op counts and wall-clock latency. Use for correctness and
-op-count regression.
-
-`compaction-sim`: simulated latency using per-op LittleFS cost estimates (no
-sleeping). Use to predict on-device MaxLatency before flashing.
-
-`idle` / `idle-sim`: models the burst->drain->compactIdle pattern. Phase 1
-enqueues a burst, detecting hot-path compactions via readFile delta (rotations
-produce no readFile; compactions do). Phase 2 drains popRatio fraction. Phase 3
-calls `compactIdle(1)` in a loop until noOp, measuring per-step latency.
-Reports idleSteps, idleNoOps, maxStepLatency, totalIdleLatency, and
-hotCompactions. `hotCompactions = 0` confirms the clean-storage invariant: idle
-compaction between cycles prevents hot-path compaction during the next burst.
-
-**Flags** (apply to all modes):
-
-```
---pop <pct>                drain percentage per cycle (default 90)
---multiplier <f>           scale sim latency constants (default 1.0)
---max-segment-bytes <n>    cfg.maxSegmentBytes (default 4096)
---max-total-bytes <n>      cfg.maxTotalBytes (default 1048576)
---max-segments <n>         cfg.maxSegments (default 200)
---max-output-segments <n>  cfg.maxOutputSegments (default 8)
---min-free-bytes <n>       cfg.minFreeBytes: FS floor; enqueue fails if freeBytes drops below n (default 0 = disabled)
---fs-total-bytes <n>       simulated FS total size in bytes (default 0 = effectively unlimited)
-```
-
-`--fs-total-bytes` and `--min-free-bytes` model the real safety floor: on
-device, LittleFS free space is shared with other files, metadata, and logs, so
-the queue may be rejected by the FS floor before its own footprint cap
-(`maxTotalBytes`) is hit. Without these flags the sim cannot detect this failure
-mode. Results report `fsFloorHit` (enqueues rejected by FS floor) separately
-from `capExhausted` (rejected by queue footprint cap) so the two failure modes
-are distinguishable.
-
-**Simulated latency model** (`littleFsSimLatency()`, scaled 100x from observed
-device timings):
-
-```
-readFile/readAt: 345us   (~35ms on device, open+read+close)
-writeFile:       1380us fixed + 518us/KB  (~138ms + ~52ms/KB on device)
-writeAt:         138us   (~14ms on device)
-removeFile:      166us   (~17ms on device)
-listFiles:       690us base + 86us/file  (~69ms + ~8.6ms/file on device)
-```
-
-Calibrated for ESP32S3 with QSPI flash: simMaxLatency x 100 = predicted device
-ms at `--multiplier 1.0`. Calibrated from on-device Run 4 (burst=500/pop=90%/
-rec=492B/cycles=3): simMaxLatency=48.6ms x 100 = 4860ms, actual 4861ms.
-
-**Idle compaction sim results** (burst->drain->compactIdle pattern):
-
-```
-burst=500 payload=492B cycles=3 pop=90%:  idleSteps=10  maxStep=48.5ms  total=154.4ms  hotCompactions=0
-burst=100 payload=150B cycles=5 pop=90%:  idleSteps=18  maxStep=10.0ms  total=65.6ms   hotCompactions=0
-```
-
-Predicted max step on device (x100): 4850ms (heavy), 1000ms (light). Total
-idle budget: ~15400ms (heavy, 3 cycles), ~6560ms (light, 5 cycles).
-
 ---
 
 ## On-device validation
@@ -660,7 +583,7 @@ know compaction is productive without coupling the timing to the write path.
 
 ## LittleFS timing reference (ESP32-S3)
 
-Measured with the on-device profiler (`pqueue_profiling_main.cpp`). These are
+Measured from prior on-device LittleFS timing runs. These are
 the authoritative numbers for design decisions on the ESP32-S3. Other devices
 will scale proportionally -- the ratios and the 4 KB block-size cliff hold
 across LittleFS targets.
