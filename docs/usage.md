@@ -504,7 +504,7 @@ make -j12 benchmark
 ./build/pqueue-benchmark --markdown --repeat 5
 ```
 
-See `docs/benchmark-results.md` for the launch baseline and interpretation of
+See `data/benchmark-results-esp32s3.md` for the launch baseline and interpretation of
 each scenario. The key metric for idle compaction is `hot_compactions = 0`,
 which confirms the clean-storage invariant holds for your workload parameters.
 
