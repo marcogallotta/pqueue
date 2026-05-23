@@ -33,6 +33,15 @@ static constexpr std::uint32_t kMaxRecordSizeBytes   = 2048;
 static constexpr std::uint32_t kBenchmarkMaxTotalBytes =
     (kBenchmarkN + 8u) * (20u + 24u + kMaxRecordSizeBytes);
 
+// Mount scenario uses a fixed 256B payload. The setup store is sized for
+// kMountMaxCapacity records so no enqueue fails regardless of which pre-load
+// count is under test.
+//   (1000+8) * (20 + 24 + 256) = 1008 * 300 = 302,400
+static constexpr std::uint32_t kMountPayloadBytes  = 256;
+static constexpr std::uint32_t kMountMaxCapacity   = 1000;
+static constexpr std::uint32_t kMountMaxTotalBytes =
+    (kMountMaxCapacity + 8u) * (20u + 24u + kMountPayloadBytes);
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
@@ -193,6 +202,14 @@ std::vector<std::string> strictViolations(const BenchmarkResult& r) {
         if (r.remove != 0)
             v.push_back("remove != 0: unexpected segment removal on pop-only path");
     }
+    if (r.scenario == "mount") {
+        if (r.writeAt != 0)
+            v.push_back("writeAt != 0: clean mount should not append");
+        if (r.writeFile != 0)
+            v.push_back("writeFile != 0: clean mount should not publish/write files");
+        if (r.remove != 0)
+            v.push_back("remove != 0: clean mount should not remove files");
+    }
     if (r.scenario == "outbox_offline_submit") {
         if (r.writeAt != r.records)
             v.push_back("writeAt != records: expected exactly one writeAt per enqueue");
@@ -336,6 +353,96 @@ BenchmarkResult scenarioPeekPop(std::uint32_t payloadBytes,
                      : 0.0;
     res.read_bpp     = totalOps > 0
                      ? static_cast<double>(totalBytesRead) / static_cast<double>(totalOps)
+                     : 0.0;
+    res.writeFile    = totalWriteFile / repeat;
+    res.writeAt      = totalWriteAt   / repeat;
+    res.readAt       = totalReadAt    / repeat;
+    res.remove       = totalRemove    / repeat;
+    res.ok           = !anyFail;
+    return res;
+}
+
+BenchmarkResult scenarioMount(std::uint32_t preloadedRecords, std::uint32_t repeat) {
+    const auto lat  = littleFsSimLatency();
+    const auto data = makePayload(kMountPayloadBytes);
+    SampleSet samples;
+
+    std::uint64_t totalDataBytesWritten = 0, totalBytesRead = 0;
+    std::uint64_t totalWriteFile = 0, totalWriteAt = 0, totalReadAt = 0, totalRemove = 0;
+    bool anyFail = false;
+
+    for (std::uint32_t r = 0; r < repeat; ++r) {
+        const auto dir = tempBase("mount");
+
+        // Setup phase: populate dir with preloadedRecords, then close.
+        {
+            auto setupFs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+            pqueue::Config setupCfg;
+            setupCfg.basePath        = dir;
+            setupCfg.recordSizeBytes = kMountPayloadBytes;
+            setupCfg.reservedBytes   = kMountMaxTotalBytes;
+            setupCfg.maxSegments     = 200;
+            setupCfg.storageBackend  = pqueue::StorageBackend::Posix;
+            setupCfg.fileSystem      = setupFs;
+            pqueue::Queue setupQ(setupCfg);
+            for (std::uint32_t i = 0; i < preloadedRecords; ++i) {
+                if (!setupQ.enqueue(data).ok()) { anyFail = true; break; }
+            }
+            if (anyFail) break;
+        }
+
+        // Mount phase: fresh fs, same dir. Only the mount (first stats() call) is timed.
+        auto fs = std::make_shared<CountingFileSystem>(pqueue::makePosixFileSystem());
+        fs->setLatency(lat);
+        pqueue::Config mountCfg;
+        mountCfg.basePath        = dir;
+        mountCfg.recordSizeBytes = kMountPayloadBytes;
+        mountCfg.reservedBytes   = kMountMaxTotalBytes;
+        mountCfg.maxSegments     = 200;
+        mountCfg.storageBackend  = pqueue::StorageBackend::Posix;
+        mountCfg.fileSystem      = fs;
+        pqueue::Queue q(mountCfg);
+
+        const std::uint64_t simBefore = fs->counters().simLatencyUs;
+        const auto before = fs->counters();
+        const auto t0 = Clock::now();
+        (void)q.stats();
+        const auto t1 = Clock::now();
+
+        samples.add(std::chrono::duration<double, std::micro>(t1 - t0).count(),
+                    static_cast<double>(fs->counters().simLatencyUs - simBefore));
+
+        const auto after = fs->counters();
+        totalDataBytesWritten += (after.bytesWritten - after.lockBytesWritten)
+                               - (before.bytesWritten - before.lockBytesWritten);
+        totalBytesRead    += after.bytesRead    - before.bytesRead;
+        totalWriteFile    += after.writeFile    - before.writeFile;
+        totalWriteAt      += after.writeAt      - before.writeAt;
+        totalReadAt       += after.readAt       - before.readAt;
+        totalRemove       += after.removeFile   - before.removeFile;
+    }
+
+    BenchmarkResult res;
+    res.scenario     = "mount";
+    res.payloadBytes = kMountPayloadBytes;
+    res.records      = preloadedRecords;
+    res.repeat       = repeat;
+    res.p50_us       = samples.wallP50();
+    res.p90_us       = samples.wallP90();
+    res.p99_us       = samples.wallP99();
+    res.max_us       = samples.wallMax();
+    res.sim_p99_ms   = samples.simP99Ms();
+    res.sim_max_ms   = samples.simMaxMs();
+    // write_amp: bytes written during mount per preloaded record × payload byte.
+    // Clean mounts write nothing, so this is 0 unless torn-tail truncation fires.
+    res.write_amp    = (repeat > 0 && preloadedRecords > 0)
+                     ? static_cast<double>(totalDataBytesWritten)
+                       / static_cast<double>(static_cast<std::uint64_t>(repeat) * preloadedRecords * kMountPayloadBytes)
+                     : 0.0;
+    // read_bpp: bytes read during mount per preloaded record.
+    res.read_bpp     = (repeat > 0 && preloadedRecords > 0)
+                     ? static_cast<double>(totalBytesRead)
+                       / static_cast<double>(static_cast<std::uint64_t>(repeat) * preloadedRecords)
                      : 0.0;
     res.writeFile    = totalWriteFile / repeat;
     res.writeAt      = totalWriteAt   / repeat;
@@ -525,6 +632,8 @@ int main(int argc, char** argv) {
         results.push_back(scenarioPeekPop(payload, kBenchmarkN, repeat));
     for (std::uint32_t payload : {256u, 1024u})
         results.push_back(scenarioOutboxOfflineSubmit(payload, kBenchmarkN, repeat));
+    for (std::uint32_t preloaded : {0u, 100u, 1000u})
+        results.push_back(scenarioMount(preloaded, repeat));
 
     if (doJson)     emitJson(results, cfg);
     if (doMarkdown) emitMarkdown(results, cfg);
