@@ -230,8 +230,78 @@ if a number looks wrong.
 
 ---
 
+## On-device benchmark
+
+Runs the same workload matrix as the POSIX binary on real LittleFS. Produces
+plain text output matching the `--markdown` format, printed over Serial.
+Intended as a release validation gate run by hand, not a CI step.
+
+**Source:** `tools/pqueue_benchmark_main.cpp` (`#ifdef ARDUINO` entry point).
+
+**PlatformIO environment:** `esp32s3-benchmark`.
+
+**N and repeat** are compile-time constants in the env, defaulting to 100
+records and 3 repeats. Reduced from the POSIX defaults (1000/5) to keep
+total runtime under a few minutes on device.
+
+---
+
 ## Calibration sampler
 
-Out of scope for this task. A separate on-device tool would measure actual
-LittleFS op latencies and output a `--multiplier` value for the simulator.
-Deferred post-launch.
+Measures each LittleFS op type in isolation on the target device and outputs
+per-op latency constants as JSON over Serial. The output is saved to a file
+and passed to the POSIX benchmark via `--calibration-file` to replace the
+default constants with device-accurate values.
+
+**Source:** `tools/pqueue_calibration_main.cpp`.
+
+**PlatformIO environment:** `esp32s3-calibration`.
+
+Both `esp32s3-benchmark` and `esp32s3-calibration` share the same firmware
+layer: LittleFS init/format helpers, `DeviceTimings` (p50/p90/p99/max), and
+the raw op measurement loops currently in `tools/pqueue_profiling_main.cpp`.
+
+### Measured constants
+
+```
+readAt_us             open + read + close for a small file
+writeFile_fixed_us    fixed metadata/GC cost per writeFile call
+writeFile_per_kb_us   per-KB cost added to writeFile
+writeAt_us            open + write + flush + close
+removeFile_us         cost of a single removeFile call
+listFiles_base_us     base cost of a directory listing
+listFiles_per_file_us per-file cost added to listFiles
+```
+
+Each constant is measured with enough iterations to produce a stable median.
+
+### Output format
+
+JSON over Serial:
+
+```json
+{
+  "device": "esp32s3",
+  "flash": "qspi",
+  "readAt_us": 345,
+  "writeFile_fixed_us": 1380,
+  "writeFile_per_kb_us": 518,
+  "writeAt_us": 138,
+  "removeFile_us": 166,
+  "listFiles_base_us": 690,
+  "listFiles_per_file_us": 86
+}
+```
+
+### Integration with POSIX benchmark
+
+Pass the saved JSON to the benchmark:
+
+```bash
+./build/pqueue-benchmark --calibration-file device-calibration.json --markdown
+```
+
+This overrides all default sim constants with the device-measured values.
+`--calibration-file` and `--multiplier` together are an error.
+`--multiplier` remains supported as a convenient uniform scale when
+per-op measurement is not available.
