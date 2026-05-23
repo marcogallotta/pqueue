@@ -35,7 +35,6 @@ struct FsCounters {
     std::uint64_t resizeFile = 0;
     std::uint64_t fileSize = 0;
     std::uint64_t removeFile = 0;
-    std::uint64_t renameFile = 0;
     std::uint64_t listFiles = 0;
     std::uint64_t lockAcquire = 0;
     std::uint64_t lockRelease = 0;
@@ -56,7 +55,7 @@ struct FsCounters {
     void reset() { *this = FsCounters{}; }
 
     std::uint64_t metadataOps() const {
-        return writeFile + renameFile + removeFile;
+        return writeFile + removeFile;
     }
 };
 
@@ -164,11 +163,6 @@ public:
 #endif
         accumulate(latency_.removeFileUs);
         return st;
-    }
-
-    pqueue::Status renameFile(const std::string& fromName, const std::string& toName) override {
-        ++counters_.renameFile;
-        return inner_->renameFile(fromName, toName);
     }
 
     pqueue::Status listFiles(std::vector<std::string>& out) override {

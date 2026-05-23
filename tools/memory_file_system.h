@@ -79,15 +79,6 @@ public:
         return pqueue::Status::success();
     }
 
-    pqueue::Status renameFile(const std::string& fromName, const std::string& toName) override {
-        auto it = files_.find(fromName);
-        if (it == files_.end())
-            return pqueue::Status::failure(pqueue::StatusCode::RenameFailed, "file not found for rename");
-        files_[toName] = std::move(it->second);
-        files_.erase(it);
-        return pqueue::Status::success();
-    }
-
     pqueue::Status listFiles(std::vector<std::string>& out) override {
         out.clear();
         for (const auto& kv : files_)

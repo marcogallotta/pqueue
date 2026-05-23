@@ -608,8 +608,8 @@ void printResult(const ScenarioResult& r) {
     Serial.printf("%-22s %4uB  avg=%6llu us  min=%6llu us  max=%6llu us\n",
         r.name, r.recordSizeBytes, r.timings.avg(),
         r.timings.count > 0 ? r.timings.minUs : 0ULL, r.timings.maxUs);
-    Serial.printf("  readAt=%-4llu writeAt=%-4llu writeFile=%-4llu rename=%-4llu remove=%-4llu lock=%-4llu mount=%-4llu\n",
-        r.fs.readAt, r.fs.writeAt, r.fs.writeFile, r.fs.renameFile, r.fs.removeFile, r.fs.lockAcquire, r.fs.mount);
+    Serial.printf("  readAt=%-4llu writeAt=%-4llu writeFile=%-4llu remove=%-4llu lock=%-4llu mount=%-4llu\n",
+        r.fs.readAt, r.fs.writeAt, r.fs.writeFile, r.fs.removeFile, r.fs.lockAcquire, r.fs.mount);
     Serial.printf("  bytesW=%-10llu bytesR=%-10llu\n",
         r.fs.bytesWritten, r.fs.bytesRead);
     if (r.failed) {

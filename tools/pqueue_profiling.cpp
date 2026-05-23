@@ -733,7 +733,6 @@ void printHeader() {
               << std::setw(8) << "readAt"
               << std::setw(8) << "writeAt"
               << std::setw(10) << "writeFile"
-              << std::setw(8) << "rename"
               << std::setw(8) << "remove"
               << std::setw(12) << "bytesW"
               << std::setw(12) << "bytesR"
@@ -753,7 +752,6 @@ void printResult(const ScenarioResult& r) {
               << std::setw(8) << r.fs.readAt
               << std::setw(8) << r.fs.writeAt
               << std::setw(10) << r.fs.writeFile
-              << std::setw(8) << r.fs.renameFile
               << std::setw(8) << r.fs.removeFile
               << std::setw(12) << r.fs.bytesWritten
               << std::setw(12) << r.fs.bytesRead
