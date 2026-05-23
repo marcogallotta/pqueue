@@ -6,9 +6,7 @@
 
 ## Decision
 
-Do not port `esp32_spool_transfer` into an append-log directory upload/restore tool.
-
-The fixed-slot transfer tool was coherent because the entire queue state lived in one file (`pqueue.spool`). AppendLog state spans multiple files whose authority is the manifest. Copying a directory snapshot to POSIX, mutating it, and uploading it back requires a multi-file transaction protocol with temp names, per-file CRCs, upload verification, deletion ordering, manifest-last publication, and interrupted-upload recovery. That is complex and fragile. Many repairs are either handled automatically by mount or are format-class anyway.
+AppendLog state spans multiple files whose authority is the manifest. Copying a directory snapshot to POSIX, mutating it, and uploading it back requires a multi-file transaction protocol with temp names, per-file CRCs, upload verification, deletion ordering, manifest-last publication, and interrupted-upload recovery. That is complex and fragile. Many repairs are either handled automatically by mount or are format-class anyway.
 
 The right model: **mutations run on-device through `pqueue::Queue`; off-device access is read-only dump for forensics.**
 
@@ -104,9 +102,4 @@ Upload/restore of append-log directories is deferred. If a genuine field case ar
 ## Staging
 
 1. No append-log upload/restore path is built.
-2. Build `pqueue_doctor` as the replacement read-only dump and on-device maintenance tool.
-3. Delete `esp32_spool_transfer` once `pqueue_doctor` covers dump and diagnosis.
-   Note: `tools/esp32_spool_transfer/` includes `pqueue/file_store.h`, which was deleted
-   in commit b457a6c. The tool does not build as of that commit. It is kept as a reference
-   for the protocol but is not functional.
-4. Move the command set into production firmware once the interface is proven.
+2. Move the command set into production firmware once the interface is proven.
