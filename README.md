@@ -239,6 +239,7 @@ DONE                      -- exit (reboots into maintenance firmware)
 
 - `docs/usage.md` -- operating contract, configuration reference, simulator, crash safety
 - `docs/internals.md` -- implementation internals: manifest format, segment layout, compaction mechanics, simulator, on-device validation
+- `docs/doctor.md` -- pqueue_doctor reference: commands, targets, config overrides, common workflows
 - `examples/basic_queue.cpp` -- runnable POSIX example: enqueue / drain / compact lifecycle
 - `examples/outbox.cpp` -- runnable POSIX example: store-and-forward with retry
 - `examples/esp32_http_outbox/main.cpp` -- ESP32 firmware reference sketch

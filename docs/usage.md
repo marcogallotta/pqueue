@@ -65,7 +65,7 @@ at the worst possible moment.
 
 | Field | Meaning |
 |---|---|
-| `status` | `ok()` on success, error otherwise. `isNoOp()` means no compaction candidates were found. |
+| `status` | `ok()` on success, error otherwise. Always `ok()` when steps returned noOp -- check `noOps` or `compactions` for that. |
 | `stepsRun` | Steps attempted (including noOps). |
 | `compactions` | Steps that did real work. |
 | `noOps` | Steps that found no compaction candidates. |
@@ -235,12 +235,11 @@ Pass your config values as flags so the simulation matches your deployment:
 `Queue` users: leave `--max-output-segments` at 8 (the fixed default). Only
 change it if you construct `AppendLogStore` directly.
 
-**Simulator limitation:** the profiler uses an in-memory filesystem with
-unlimited free space and sets `minFreeBytes = 0`. It models compaction behavior
-and footprint cap exhaustion (`maxTotalBytes`) but cannot simulate the
-`minFreeBytes` filesystem safety floor. If your deployment relies on
-`minFreeBytes` to prevent full-flash scenarios, validate that separately on
-device.
+**FS floor simulation:** pass `--min-free-bytes` and `--fs-total-bytes` to model
+the real LittleFS safety floor. Without these flags the sim runs with unlimited
+free space and `minFreeBytes = 0`. Results report `fsFloorHit` (enqueues
+rejected by FS floor) separately from `capExhausted` (rejected by queue
+footprint cap) so the two failure modes are distinguishable.
 
 ### Reading the output
 
