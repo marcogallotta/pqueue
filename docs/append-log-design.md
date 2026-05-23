@@ -262,7 +262,7 @@ Items are ordered by priority. The first three are required before a stable rele
 
 ### 1. Compaction strategy simulator *(required before stable release)*
 
-Before redesigning the compaction strategy, data is needed. The space of possible algorithms is large, the right tradeoffs depend on workload, and the queue is intended for general use — not one known use case. A Posix-backed simulator drives the queue through configurable enqueue/pop patterns (rate, burst size, record size distribution) and evaluates candidate algorithms against a sweep of workload parameters. See `docs/compaction-strategy.md` for the full simulator design, metrics, and candidate algorithm list. The best simulator candidates are then validated on-device to confirm real LittleFS costs match the simulator model.
+Before redesigning the compaction strategy, data is needed. The space of possible algorithms is large, the right tradeoffs depend on workload, and the queue is intended for general use — not one known use case. A Posix-backed simulator drives the queue through configurable enqueue/pop patterns (rate, burst size, record size distribution) and evaluates candidate algorithms against a sweep of workload parameters. See `docs/internals.md` for the full simulator design, metrics, and candidate algorithm list. The best simulator candidates are then validated on-device to confirm real LittleFS costs match the simulator model.
 
 ### 2. Multi-segment compaction output *(required before stable release)*
 
