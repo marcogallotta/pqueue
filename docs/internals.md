@@ -22,6 +22,15 @@ segment, both slots corrupt, overlapping ranges, nextGeneration below max ref, w
 generation, corrupt CRC in sealed segment, torn tail in tail (ok), torn tail in sealed
 (JournalCorrupt), dangling segment ignored. Tests call AppendLogStore::validateUnlocked
 directly to bypass the queue lock (which requires a successful mount).
+
+`Queue::validate()` / `AppendLogStore::validateUnlocked()` is already a full-depth scan.
+It reads every event in every referenced segment (sealed and tail), CRC-checks every
+ENQUEUE/REWRITE payload, checks every footer magic, validates manifest structure and
+range consistency, and verifies every referenced segment file exists and is large enough.
+There is no shallower or deeper variant to add at the queue layer. The only validation
+not covered is application-layer envelope decoding (e.g. whether a payload is a valid
+`RequestEnvelope`), which is the responsibility of the Outbox layer via
+`Outbox::validatePayloads()`.
 Run with `make -j12 test`.
 
 ---
