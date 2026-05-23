@@ -242,7 +242,6 @@ public:
     }
 
     Status writeAt(const std::string& name, std::uint64_t offset, const std::string& data) override {
-        closePersistent(name);
         File file = LittleFS.open(path(name).c_str(), "r+");
         if (!file) {
             return Status::failure(StatusCode::WriteFailed, "failed to open LittleFS file for positioned write");
@@ -261,7 +260,6 @@ public:
     }
 
     Status resizeFile(const std::string& name, std::uint64_t size) override {
-        closePersistent(name);
         const std::string fullPath = path(name);
         File file = fileExistsQuiet(name)
             ? LittleFS.open(fullPath.c_str(), "r+")
@@ -310,7 +308,6 @@ public:
     }
 
     Status removeFile(const std::string& name) override {
-        closePersistent(name);
         if (!LittleFS.remove(path(name).c_str())) {
             return Status::failure(StatusCode::RemoveFailed, "failed to remove LittleFS file");
         }
@@ -318,7 +315,6 @@ public:
     }
 
     Status renameFile(const std::string& fromName, const std::string& toName) override {
-        closePersistent(fromName);
         if (!LittleFS.rename(path(fromName).c_str(), path(toName).c_str())) {
             return Status::failure(StatusCode::RenameFailed, "failed to rename LittleFS file");
         }
@@ -402,26 +398,8 @@ private:
         return false;
     }
 
-    File& ensureOpen(const std::string& name) {
-        if (persistentName_ != name || !persistentFile_) {
-            if (persistentFile_) persistentFile_.close();
-            persistentFile_ = LittleFS.open(path(name).c_str(), "r+");
-            persistentName_ = name;
-        }
-        return persistentFile_;
-    }
-
-    void closePersistent(const std::string& name) {
-        if (persistentName_ == name && persistentFile_) {
-            persistentFile_.close();
-            persistentName_.clear();
-        }
-    }
-
     std::string basePath_ = "/pqueue_spool";
     std::unique_ptr<Lock> lock_;
-    File persistentFile_;
-    std::string persistentName_;
 };
 
 } // namespace
