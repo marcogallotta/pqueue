@@ -578,25 +578,29 @@ DONE
 `DONE` reboots back into the maintenance firmware (the app image is not
 restored automatically -- reflash manually when finished).
 
-### Dumping files off-device
+### Host script
 
-`DUMP_ALL` transfers all manifest and segment files in hex over serial.
-`tools/pqueue_doctor_recv.py` receives the dump and writes files to disk:
+`tools/pqueue_doctor.py` drives the serial session. Commands run in a fixed
+order: read-only first (info/list/diag/validate), then mutations, then dump.
 
 ```bash
-python3 tools/pqueue_doctor_recv.py \
+# Validate and dump all files
+python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --target api_outbox:/pqueue_api_spool \
-    --out-dir /tmp/pqdump
-```
+    --validate --dump-all --out-dir /tmp/pqdump
 
-Multiple targets:
+# Compact then dump
+python3 tools/pqueue_doctor.py \
+    --port /dev/ttyACM0 \
+    --target api_outbox:/pqueue_api_spool \
+    --compact-all 64 --dump-all --out-dir /tmp/pqdump
 
-```bash
-python3 tools/pqueue_doctor_recv.py \
+# Multiple targets (each dumped into out-dir/name/)
+python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --targets pqueue_doctor.targets \
-    --out-dir /tmp/pqdump
+    --validate --dump-all --out-dir /tmp/pqdump
 ```
 
 Targets file format (`pqueue_doctor.targets`):
@@ -606,9 +610,15 @@ Targets file format (`pqueue_doctor.targets`):
 api_outbox  /pqueue_api_spool
 ```
 
-Each target is dumped into `out-dir/name/`. After dumping, run
-`pqueue_appendlog_diag` (build with `make appendlog-diag`) on the dumped
-directory to inspect the manifest and segment layout offline.
+After dumping, run `pqueue_appendlog_diag` (build with `make appendlog-diag`)
+on the dumped directory to inspect the manifest and segment layout offline.
+
+Stdin mode (pipe from POSIX dump tool, no device needed):
+
+```bash
+./build/pqueue-doctor-dump --base-path /path/to/spool | \
+    python3 tools/pqueue_doctor.py --out-dir /tmp/pqdump
+```
 
 ### Command reference
 
