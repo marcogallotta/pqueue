@@ -12,6 +12,8 @@
 #include <LittleFS.h>
 #include <esp_task_wdt.h>
 
+#include <optional>
+
 #include "pqueue/http/outbox.h"
 #include "pqueue/http/esp32_arduino_transport.h"
 
@@ -44,21 +46,23 @@ static std::uint64_t monotonicMs(void*) {
 // --- TLS transport ---
 // Pass a CA cert file so TLS validation works without disabling certificate checks.
 
-static pqueue::http::Esp32ArduinoTransportConfig transportConfig() {
+static pqueue::http::Esp32ArduinoTransportConfig makeTransportConfig() {
     pqueue::http::Esp32ArduinoTransportConfig cfg;
     cfg.caCertPath       = "/certs/server.pem";
     cfg.caCertFileSystem = &LittleFS;
     return cfg;
 }
 
-static pqueue::http::Esp32ArduinoTransport transport(transportConfig());
-static pqueue::http::Outbox outbox(makeConfig(), transport, monotonicMs, nullptr);
+// Constructed in setup() after LittleFS.begin() -- do not construct globally
+// before the filesystem is mounted.
+static std::optional<pqueue::http::Esp32ArduinoTransport> transport;
+static std::optional<pqueue::http::Outbox> outbox;
 
 // Track whether the previous drain left more compaction work pending.
 static bool moreCompactionWork = false;
 
 // Interval between sensor submissions. submitPost() is not called every loop()
-// tick — that would flood the queue with thousands of readings per second.
+// tick -- that would flood the queue with thousands of readings per second.
 static const unsigned long kSubmitIntervalMs = 30000;  // 30 s
 static unsigned long lastSubmitMs = 0;
 
@@ -66,6 +70,8 @@ static unsigned long lastSubmitMs = 0;
 
 void setup() {
     LittleFS.begin(true);
+    transport.emplace(makeTransportConfig());
+    outbox.emplace(makeConfig(), *transport, monotonicMs, nullptr);
 }
 
 void loop() {
@@ -73,12 +79,12 @@ void loop() {
     const unsigned long now = millis();
     if (now - lastSubmitMs >= kSubmitIntervalMs) {
         lastSubmitMs = now;
-        outbox.submitPost("/readings", R"({"sensor":"temp","v":22.1})");
+        outbox->submitPost("/readings", R"({"sensor":"temp","v":22.1})");
     }
 
     // Drain: attempt up to 5 deliveries per loop tick. The rate limiter
     // (maxDrainAttemptsPerSecond) prevents flooding the backend.
-    const auto dr = outbox.drainUpTo(5);
+    const auto dr = outbox->drainUpTo(5);
 
     // Compact after a drain that freed records, or continue a previous pass.
     // Each compactIdle(1) call is one bounded step; yield the watchdog between
@@ -86,7 +92,7 @@ void loop() {
     if (dr.removedQueuedBytes > 0 || moreCompactionWork) {
         pqueue::CompactIdleResult cr;
         do {
-            cr = outbox.compactIdle(1);
+            cr = outbox->compactIdle(1);
             esp_task_wdt_reset();
             vTaskDelay(1);
         } while (cr.compactions > 0);
