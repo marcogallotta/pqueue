@@ -95,6 +95,6 @@ void loop() {
     if (dr.removedQueuedBytes > 0 || moreCompactionWork) {
         const auto cr = outbox->compactIdle(1);
         esp_task_wdt_reset();
-        moreCompactionWork = cr.status.ok() && cr.moreWorkLikely;
+        moreCompactionWork = cr.moreWorkLikely || !cr.status.ok();
     }
 }
