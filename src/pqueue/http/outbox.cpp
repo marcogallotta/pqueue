@@ -92,6 +92,36 @@ pqueue::SubmitResult Outbox::submitPost(const std::string& path, const std::stri
     return outbox_.submit(encoded);
 }
 
+pqueue::SubmitResult Outbox::submitCompactPost(const std::string& path, pqueue::Span record) {
+    if (record.len > 0 && record.data == nullptr) {
+        const Status status = Status::failure(
+            StatusCode::InvalidArgument,
+            "compact record span has non-zero length but null data");
+        emitDiagnostic(Severity::Error, status, "submitCompactPost", nullptr);
+        return {pqueue::SubmitStatus::SendError, status};
+    }
+
+    RequestEnvelope request;
+    request.method = Method::Post;
+    request.encoding = BodyEncoding::Compact;
+    request.path = path;
+    if (record.len > 0) {
+        request.body.assign(reinterpret_cast<const char*>(record.data), record.len);
+    }
+
+    std::string encoded;
+    if (!encodeRequestEnvelope(request, encoded)) {
+        const Status status = Status::failure(
+            StatusCode::EncodeFailed,
+            "failed to encode HTTP request envelope");
+        emitDiagnostic(Severity::Error, status, "submitCompactPost", &request);
+        return {pqueue::SubmitStatus::SendError, status};
+    }
+
+    emitDiagnostic(Severity::Debug, Status::success(), "submitCompactPost", &request);
+    return outbox_.submit(encoded);
+}
+
 pqueue::DrainResult Outbox::drain() {
     return outbox_.drain();
 }
@@ -130,6 +160,39 @@ SendResult Outbox::sendStoredRequest(const std::string& encodedRequest, const Re
         return {SendDecision::Drop};
     }
 
+    std::string httpBody;
+    if (request.encoding == BodyEncoding::Compact) {
+        if (httpConfig_.expandBody == nullptr) {
+            emitDiagnostic(
+                Severity::Error,
+                Status::failure(StatusCode::DecodeFailed, "compact record requires expandBody callback"),
+                "sendStoredRequest",
+                &request,
+                nullptr,
+                retry.attempts);
+            notifyDrop(&request, DropReason::ExpandFailed, nullptr);
+            return {SendDecision::Drop};
+        }
+        if (!httpConfig_.expandBody(
+                request.path.c_str(),
+                reinterpret_cast<const std::uint8_t*>(request.body.data()),
+                request.body.size(),
+                httpConfig_.expandBodyContext,
+                httpBody)) {
+            emitDiagnostic(
+                Severity::Error,
+                Status::failure(StatusCode::DecodeFailed, "failed to expand compact record"),
+                "sendStoredRequest",
+                &request,
+                nullptr,
+                retry.attempts);
+            notifyDrop(&request, DropReason::ExpandFailed, nullptr);
+            return {SendDecision::Drop};
+        }
+    } else {
+        httpBody = request.body;
+    }
+
     const std::string url = buildUrl(request.path);
     emitDiagnostic(
         Severity::Debug,
@@ -142,8 +205,8 @@ SendResult Outbox::sendStoredRequest(const std::string& encodedRequest, const Re
         url.c_str(),
         httpConfig_.headers,
         httpConfig_.headerCount,
-        reinterpret_cast<const std::uint8_t*>(request.body.data()),
-        request.body.size()
+        reinterpret_cast<const std::uint8_t*>(httpBody.data()),
+        httpBody.size()
     );
     notifyResponse(request, response);
     emitDiagnostic(

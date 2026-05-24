@@ -1,5 +1,7 @@
 #include "pqueue/http/outbox.h"
+#include "pqueue/http/request_envelope.h"
 #include "pqueue/envelope.h"
+#include "pqueue/queue.h"
 
 #include "doctest/doctest.h"
 
@@ -148,6 +150,46 @@ pqueue::SendDecision customClassify(void* context, const pqueue::http::Response&
     auto* classifier = static_cast<CustomClassifier*>(context);
     classifier->statuses.push_back(response.statusCode);
     return classifier->decision;
+}
+
+// Builds a version-1 request envelope byte string (no encoding byte).
+std::string makeV1Envelope(const std::string& path, const std::string& body) {
+    std::string v1;
+    // magic 0x50514852 little-endian
+    v1.push_back('\x52'); v1.push_back('\x48'); v1.push_back('\x51'); v1.push_back('\x50');
+    v1.push_back('\x01'); // version 1
+    v1.push_back('\x01'); // method POST
+    const auto pathLen = static_cast<std::uint16_t>(path.size());
+    v1.push_back(static_cast<char>(pathLen & 0xff));
+    v1.push_back(static_cast<char>((pathLen >> 8) & 0xff));
+    const auto bodyLen = static_cast<std::uint32_t>(body.size());
+    for (int i = 0; i < 4; ++i) {
+        v1.push_back(static_cast<char>((bodyLen >> (8 * i)) & 0xff));
+    }
+    v1.append(path);
+    v1.append(body);
+    return v1;
+}
+
+bool alwaysExpandOk(
+    const char* /*path*/,
+    const std::uint8_t* /*data*/,
+    std::size_t /*size*/,
+    void* /*context*/,
+    std::string& out
+) {
+    out = "{\"expanded\":true}";
+    return true;
+}
+
+bool alwaysExpandFail(
+    const char* /*path*/,
+    const std::uint8_t* /*data*/,
+    std::size_t /*size*/,
+    void* /*context*/,
+    std::string& /*out*/
+) {
+    return false;
 }
 #endif
 
@@ -705,5 +747,216 @@ TEST_CASE("pqueue http default classifier covers retryable and permanent statuse
     CHECK(pqueue::http::defaultClassifyResponse({204, pqueue::http::TransportError::None}) == pqueue::SendDecision::Sent);
     CHECK(pqueue::http::defaultClassifyResponse({pqueue::http::kNoStatusCode, pqueue::http::TransportError::Network}) == pqueue::SendDecision::RetryLater);
     CHECK(pqueue::http::defaultClassifyResponse({pqueue::http::kNoStatusCode, pqueue::http::TransportError::Tls}) == pqueue::SendDecision::RetryLater);
+#endif
+}
+
+TEST_CASE("pqueue http outbox drops compact record when expandBody callback is missing") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    FakeClock clock;
+    DropObserver observer;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.baseUrl = "https://example.test";
+    httpConfig.dropContext = &observer;
+    httpConfig.onDrop = onDrop;
+    // expandBody intentionally left null
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+
+    const std::uint8_t compactBytes[] = {0x01, 0x01, 0xAA};
+    const auto result = outbox.submitCompactPost(
+        "/switchbot/reading",
+        pqueue::Span{compactBytes, sizeof(compactBytes)}
+    );
+
+    CHECK(result.status == pqueue::SubmitStatus::Dropped);
+    CHECK(transport.posts.empty());
+    CHECK_EQ(outbox.stats().count, 0U);
+    REQUIRE_EQ(observer.seen.size(), 1U);
+    CHECK(observer.seen[0].reason == pqueue::http::DropReason::ExpandFailed);
+    CHECK(observer.seen[0].hasRequest);
+    CHECK_EQ(observer.seen[0].path, "/switchbot/reading");
+#endif
+}
+
+TEST_CASE("pqueue http outbox drops compact record when expand callback returns false") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    FakeClock clock;
+    DropObserver observer;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.baseUrl = "https://example.test";
+    httpConfig.dropContext = &observer;
+    httpConfig.onDrop = onDrop;
+    httpConfig.expandBody = alwaysExpandFail;
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+
+    const std::uint8_t compactBytes[] = {0xff}; // corrupt
+    const auto result = outbox.submitCompactPost(
+        "/switchbot/reading",
+        pqueue::Span{compactBytes, sizeof(compactBytes)}
+    );
+
+    CHECK(result.status == pqueue::SubmitStatus::Dropped);
+    CHECK(transport.posts.empty());
+    CHECK_EQ(outbox.stats().count, 0U);
+    REQUIRE_EQ(observer.seen.size(), 1U);
+    CHECK(observer.seen[0].reason == pqueue::http::DropReason::ExpandFailed);
+#endif
+}
+
+TEST_CASE("pqueue http outbox submitCompactPost sends expanded body on success") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.baseUrl = "https://example.test/api";
+    httpConfig.expandBody = alwaysExpandOk;
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+
+    const std::uint8_t compactBytes[] = {0x01, 0x01, 0xAA};
+    const auto result = outbox.submitCompactPost(
+        "/switchbot/reading",
+        pqueue::Span{compactBytes, sizeof(compactBytes)}
+    );
+
+    CHECK(result.status == pqueue::SubmitStatus::Sent);
+    CHECK_EQ(outbox.stats().count, 0U);
+    REQUIRE_EQ(transport.posts.size(), 1U);
+    CHECK_EQ(transport.posts[0].url, "https://example.test/api/switchbot/reading");
+    CHECK_EQ(transport.posts[0].body, "{\"expanded\":true}");
+#endif
+}
+
+TEST_CASE("pqueue http outbox drains v1 Raw records after upgrade to v2 encoder") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+
+    // Inject a v1 envelope directly into the queue (simulating records written by old firmware).
+    const std::string v1Path = "/switchbot/reading";
+    const std::string v1Body = "{\"temperature_c\":23.4}";
+    {
+        pqueue::Config queueConfig;
+        queueConfig.basePath = kHttpOutboxSpoolDir.string();
+        pqueue::Queue queue(queueConfig);
+        std::string outerEnvelope;
+        REQUIRE(pqueue::envelope::encodeEnvelope(0, makeV1Envelope(v1Path, v1Body), outerEnvelope));
+        REQUIRE(queue.enqueue(outerEnvelope).ok());
+    }
+
+    FakeHttpTransport transport;
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
+    httpConfig.baseUrl = "https://example.test/api";
+    httpConfig.expandBody = alwaysExpandOk; // registered but should not be called for Raw records
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+    CHECK_EQ(outbox.stats().count, 1U);
+
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    const auto drain = outbox.drain();
+
+    CHECK_EQ(drain.sent, 1U);
+    CHECK_EQ(outbox.stats().count, 0U);
+    REQUIRE_EQ(transport.posts.size(), 1U);
+    CHECK_EQ(transport.posts[0].url, "https://example.test/api/switchbot/reading");
+    CHECK_EQ(transport.posts[0].body, v1Body);
+#endif
+}
+
+TEST_CASE("pqueue http outbox compact record survives queue storage and expands on drain") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    // First attempt fails; compact envelope is stored in the queue.
+    transport.responses.push_back({503, pqueue::http::TransportError::None});
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.outbox.maxDrainAttemptsPerSecond = 1;
+    httpConfig.baseUrl = "https://example.test/api";
+    httpConfig.expandBody = alwaysExpandOk;
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+
+    const std::uint8_t compactBytes[] = {0x01, 0x01, 0xAA};
+    const auto submit = outbox.submitCompactPost(
+        "/switchbot/reading",
+        pqueue::Span{compactBytes, sizeof(compactBytes)}
+    );
+    CHECK(submit.status == pqueue::SubmitStatus::Queued);
+    CHECK_EQ(outbox.stats().count, 1U);
+
+    clock.nowMs += 1000;
+    transport.responses.push_back({200, pqueue::http::TransportError::None});
+    const auto drain = outbox.drain();
+
+    CHECK_EQ(drain.sent, 1U);
+    CHECK_EQ(outbox.stats().count, 0U);
+    REQUIRE_EQ(transport.posts.size(), 2U);
+    CHECK_EQ(transport.posts[1].url, "https://example.test/api/switchbot/reading");
+    CHECK_EQ(transport.posts[1].body, "{\"expanded\":true}");
+#endif
+}
+
+TEST_CASE("pqueue http outbox submitCompactPost rejects null span with nonzero length") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    FakeClock clock;
+    auto outbox = makeHttpOutbox(transport, clock);
+
+    const auto result = outbox.submitCompactPost(
+        "/switchbot/reading",
+        pqueue::Span{nullptr, 3}
+    );
+
+    CHECK(result.status == pqueue::SubmitStatus::SendError);
+    CHECK(result.detail.code == pqueue::StatusCode::InvalidArgument);
+    CHECK(transport.posts.empty());
+    CHECK_EQ(outbox.stats().count, 0U);
+#endif
+}
+
+TEST_CASE("pqueue http outbox submitCompactPost accepts empty span") {
+#ifndef ARDUINO
+    cleanHttpOutboxSpool();
+    FakeHttpTransport transport;
+    FakeClock clock;
+
+    pqueue::http::Config httpConfig;
+    httpConfig.queue.basePath = kHttpOutboxSpoolDir.string();
+    httpConfig.outbox.initialRetryDelayMs = 1000;
+    httpConfig.baseUrl = "https://example.test/api";
+    httpConfig.expandBody = alwaysExpandOk;
+
+    pqueue::http::Outbox outbox(httpConfig, transport, fakeClockNow, &clock);
+
+    const auto result = outbox.submitCompactPost("/switchbot/reading", pqueue::Span{});
+
+    CHECK(result.status == pqueue::SubmitStatus::Sent);
+    REQUIRE_EQ(transport.posts.size(), 1U);
+    CHECK_EQ(transport.posts[0].body, "{\"expanded\":true}");
 #endif
 }

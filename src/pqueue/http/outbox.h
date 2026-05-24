@@ -90,6 +90,7 @@ using ResponseCallback = void (*)(void* context, const RequestEnvelope& request,
 enum class DropReason {
     DecodeFailed,
     ServerRejected,
+    ExpandFailed,
 };
 
 using DropCallback = void (*)(
@@ -97,6 +98,14 @@ using DropCallback = void (*)(
     const RequestEnvelope* request,
     DropReason reason,
     const Response* response
+);
+
+using ExpandBodyCallback = bool (*)(
+    const char* path,
+    const std::uint8_t* compactBody,
+    std::size_t compactSize,
+    void* context,
+    std::string& out
 );
 
 struct Config {
@@ -116,6 +125,9 @@ struct Config {
 
     void* dropContext = nullptr;
     DropCallback onDrop = nullptr;
+
+    ExpandBodyCallback expandBody = nullptr;
+    void* expandBodyContext = nullptr;
 };
 
 class Outbox {
@@ -128,6 +140,7 @@ public:
     );
 
     pqueue::SubmitResult submitPost(const std::string& path, const std::string& body);
+    pqueue::SubmitResult submitCompactPost(const std::string& path, pqueue::Span record);
     pqueue::DrainResult drain();
     pqueue::DrainResult drainUpTo(std::uint16_t maxDrainAttempts);
     pqueue::CompactIdleResult compactIdle(std::size_t maxSteps);
