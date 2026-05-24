@@ -57,28 +57,30 @@ Mount preload of 1000 records takes ~30 s to set up; progress is printed every 1
 **Operations** — full run, N=100:
 
 ```
-  scenario     payload    n     p50      p90      p99      max
-  ----------  --------  ---  ------   ------   ------   ------
-  enqueue       256B   100      81ms     139ms     339ms     354ms
-  enqueue      1024B   100     168ms     533ms    1139ms    1322ms
-  peek_pop      256B   100      84ms     102ms     332ms     332ms
-  peek_pop     1024B   100      88ms     104ms     797ms     800ms
-  raw_enqueue   256B   100      80ms     136ms     334ms     351ms
-  raw_peek_pop  256B   100      83ms     102ms     330ms     330ms
+  scenario       payload    n     p50      p90      p99      max
+  ------------  --------  ---  ------   ------   ------   ------
+  enqueue         256B   100      80ms     141ms     336ms     354ms
+  enqueue        1024B   100     165ms     539ms    1138ms    1316ms
+  peek_pop        256B   100      83ms     101ms     330ms     333ms
+  peek_pop       1024B   100      88ms     103ms     797ms     799ms
+  raw_enqueue     256B   100      80ms     139ms     337ms     354ms
+  raw_peek_pop    256B   100      81ms     102ms     328ms     329ms
 
   scenario           payload  burst  steps  noops    p50      p90      p99      max
-  compact_idle        256B    100      4      2     787ms     947ms     947ms     947ms
-  compact_idle_heavy  492B    300      4      2    5052ms    6753ms    6753ms    6753ms
+  compact_idle         256B    100      4      2     783ms     942ms     942ms     942ms
+  compact_idle_heavy   492B    300      4      2    5058ms    6745ms    6745ms    6745ms
 ```
 
-**Mount** — fast run, 256 B payload:
+**Mount** — full run, 256 B payload:
 
 ```
-  preload   time
-  -------   ----
-  0         13ms
-  50        405ms
-  200       4566ms
+  preload   time      per-record
+  -------   --------  ----------
+  0         13ms      —
+  50        442ms     ~9ms
+  200       4925ms    ~25ms
+  500       14650ms   ~29ms
+  1000      27903ms   ~28ms
 ```
 
 ---
@@ -90,7 +92,7 @@ the payload copy or read. Everything below follows from that.
 
 ### Enqueue
 
-p50 is the steady-state append cost. At 256 B this is ~81 ms; at 1024 B it is ~169 ms —
+p50 is the steady-state append cost. At 256 B this is ~80 ms; at 1024 B it is ~165 ms —
 larger payloads cost more to write and flush.
 
 p99 and max reflect segment rollover events. When the current segment is full, the queue
@@ -124,8 +126,8 @@ collects all live records, rewrites them into new segments, and removes the old 
 scales with the number of segment files opened and removed, and the volume of live data
 rewritten.
 
-The light workload (256 B/burst=100) completes in 787–947 ms per step. The heavy workload
-(492 B/burst=300) takes 5052–6753 ms per step — a single step can span dozens of input
+The light workload (256 B/burst=100) completes in 783–942 ms per step. The heavy workload
+(492 B/burst=300) takes 5058–6745 ms per step — a single step can span dozens of input
 segments.
 
 **6.7 s is the planning number.** `compactIdle(1)` can block for up to ~7 s under the
@@ -134,12 +136,13 @@ heavy workload. Callers that cannot tolerate a stall of that length should call
 
 ### Mount
 
-Mount cost grows with backlog and segment history. A fully drained queue
-mounts in ~13 ms. A large backlog produces multi-second mount.
+Mount cost grows with backlog and segment history. A fully drained queue mounts in ~13 ms.
+From 200 records onward the cost is roughly linear at ~28 ms/record; the 50→200 jump is
+anomalous (4× records, ~11× time).
 
 If your use case can accumulate a large backlog across a reboot, treat mount latency as
-part of your boot budget. Draining the queue before shutdown is the most effective way to
-keep boot fast.
+part of your boot budget. A 1000-record backlog takes ~28 s. Draining the queue before
+shutdown is the most effective way to keep boot fast.
 
 ### Raw buffer vs std::string
 

@@ -652,11 +652,12 @@ one `readFile` per segment regardless of event count.
 Prior to this, replaying an ENQUEUE event required two `readAt` calls (header + payload),
 plus one segment-header `readAt` per segment — each a full open+seek+read+close on
 LittleFS (~5 ms). At 200 records that was hundreds of individual file opens; mount time
-dropped from 16 s to 4.5 s after the change.
+dropped from ~16 s to ~5 s at 200 records, and from ~47 s to ~28 s at 1000 records.
 
-**Mount anomaly.** The 50→200 record jump is anomalous: 4× records produces 11.3× mount
-time. Most likely LittleFS filesystem-state cost (directory traversal, metadata lookup)
-growing with segment/file count. The exact source has not been isolated.
+**Mount anomaly.** The 50→200 record jump is anomalous: 4× records produces ~11× mount
+time. From 200 records onward the cost is roughly linear (~28 ms/record). Most likely
+LittleFS filesystem-state cost (directory traversal, metadata lookup) growing with
+segment/file count in the early range. The exact source has not been isolated.
 
 **Persisted checkpoint index.** Writing `{seq, gen, offset, size}` per record to disk
 after each manifest publish would reduce mount to: read checkpoint + validate epoch +
