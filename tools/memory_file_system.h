@@ -102,7 +102,11 @@ public:
     }
 
     pqueue::Status recoverStaleLockFile(const std::string& name, const std::string&) override {
-        locks_.erase(name);
+        auto it = locks_.find(name);
+        if (it == locks_.end()) {
+            return pqueue::Status::noOp();
+        }
+        locks_.erase(it);
         return pqueue::Status::success();
     }
 
