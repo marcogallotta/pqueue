@@ -83,6 +83,8 @@ Mount preload of 1000 records takes ~30 s to set up; progress is printed every 1
   1000      27903ms   ~28ms
 ```
 
+Raw numbers are archived in `data/benchmark-results-device.md`.
+
 ---
 
 ## Results discussion

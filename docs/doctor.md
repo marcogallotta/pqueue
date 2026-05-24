@@ -9,30 +9,30 @@ the host sends commands and reads results.
 
 ## Connecting
 
-### Production firmware (no reflash needed)
-
-The production app polls Serial for the trigger string during sleep. Send it with
-`--trigger`:
-
-```
-python3 tools/pqueue_doctor.py \
-    --port /dev/ttyACM0 \
-    --trigger PQUEUE_DOCTOR \
-    --target api_outbox:/pqueue_api_spool reservedBytes=262144 \
-    --validate
-```
-
-The app enters doctor mode within 100 ms of the next sleep window, runs the
-session, then reboots. Doctor mode is blocking: normal app sync, drain, and log
-output is paused until `DONE`, then the device reboots.
-
 ### Standalone maintenance firmware
 
-Flash the maintenance env you added to your app's `platformio.ini` (see README
-for the setup pattern):
+Flash a dedicated maintenance image that calls `pqueue::doctor::runSession()`
+directly. No production firmware changes needed.
+
+```cpp
+// tools/esp32_pqueue_doctor/main.cpp pattern
+#include "pqueue/doctor/session.h"
+
+void setup() {
+    Serial.begin(115200);
+    LittleFS.begin(false);
+}
+
+void loop() {
+    pqueue::doctor::runSession(); // blocks until DONE
+    ESP.restart();
+}
+```
+
+Build and flash (from the repo root):
 
 ```
-pio run -e pqueue-maintenance --target upload
+pio run -d tools/esp32_pqueue_doctor --target upload
 ```
 
 Then connect without `--trigger`:
@@ -40,9 +40,42 @@ Then connect without `--trigger`:
 ```
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
-    --target api_outbox:/pqueue_api_spool reservedBytes=262144 \
+    --target api_outbox:/pqueue_api_spool \
+    --queue-config reservedBytes=262144 \
     --validate
 ```
+
+### Production firmware (trigger mode, no reflash needed)
+
+Add a trigger check to your main loop or sleep handler:
+
+```cpp
+#include "pqueue/doctor/session.h"
+
+// Inside your loop() or sleep poll:
+if (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (line == "PQUEUE_DOCTOR") {
+        pqueue::doctor::runSession(); // blocks until DONE
+        ESP.restart();
+    }
+}
+```
+
+Then send the trigger string with `--trigger`:
+
+```
+python3 tools/pqueue_doctor.py \
+    --port /dev/ttyACM0 \
+    --trigger PQUEUE_DOCTOR \
+    --target api_outbox:/pqueue_api_spool \
+    --queue-config reservedBytes=262144 \
+    --validate
+```
+
+Doctor mode is blocking: normal app sync, drain, and log output is paused until
+`DONE`, then the device reboots.
 
 ---
 
@@ -123,11 +156,16 @@ Result includes `steps`, `compactions`, `more_work`.
 **`--compact-all N`** -- runs `compactIdle` in a loop until no more work or N
 total steps are exhausted.
 
-**`--drop-front-if-corrupt`** -- drops the front record only if it fails CRC.
+**`--drop-front-if-corrupt`** -- drops the front record only if it is proven
+unreadable or corrupt (CRC mismatch or invalid record structure).
 `changed=0 code=front_not_corrupt` means the queue is healthy; not an error.
 
 **`--recover-stale-lock`** -- removes a stale `.pqueue.lock` left by a crashed
-process. `changed=0 code=lock_not_stale` means no stale lock; not an error.
+process. Only meaningful on POSIX/desktop where the lock backend writes a PID
+file; on ESP32/LittleFS the lock is an in-process FreeRTOS mutex with no
+persistent state, so this command always returns `changed=0 code=not_applicable`
+there. `changed=0 code=lock_not_stale` means the POSIX lock file exists but is
+held by a live process; not an error.
 
 **`--format`** -- destructively reinitializes the queue. Sends
 `FORMAT CONFIRM <name>` to the device, which checks the name matches the active
@@ -151,6 +189,8 @@ for debugging only.**
 ---
 
 ## Common workflows
+
+Examples below use trigger mode. Omit `--trigger` when using standalone firmware.
 
 ### Routine health check
 

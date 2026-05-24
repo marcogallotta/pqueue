@@ -126,83 +126,19 @@ configured capacity.
 
 ---
 
-## Raw-buffer API (no caller-side heap allocation)
-
-`Queue` and `Outbox` accept and return records via caller-owned buffers using
-`pqueue::Span` (read-only) and `pqueue::MutableSpan` (writable):
-
-```cpp
-struct Span        { const uint8_t* data; size_t len; };
-struct MutableSpan { uint8_t*       data; size_t len; };
-```
-
-### `Queue` raw-buffer methods
-
-```cpp
-// Enqueue from a caller-owned buffer -- no std::string at the call site.
-uint8_t payload[492];
-size_t n = buildPayload(payload);
-queue.enqueue(pqueue::Span(payload, n));
-
-// Query size without reading the payload (no I/O; size is in RAM).
-size_t sz = 0;
-auto st = queue.peekSize(sz);  // QueueEmpty if no front record
-
-// Peek into a caller-owned buffer.
-uint8_t buf[492];
-size_t written = 0;
-auto st = queue.peek(pqueue::MutableSpan(buf, sizeof(buf)), written);
-// st.code == RecordTooLarge if buf is too small; written is valid on ok().
-if (st.ok()) {
-    send(buf, written);
-    queue.pop();
-}
-```
-
-The `std::string` overloads remain first-class and are not deprecated.
-Internal record storage stays as `std::string`; only caller-side allocations
-are eliminated.
-
-The raw-buffer API avoids caller-side allocation; benchmark results show it is
-not a latency win over the `std::string` API because LittleFS I/O dominates.
-
-**Error codes:**
-- `InvalidArgument` -- `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
-- `RecordTooLarge` -- `peek(MutableSpan)` when stored record exceeds `out.len`
-- `QueueEmpty` -- `peekSize` or `peek` on an empty queue
-
-### `Outbox` raw callback
-
-`Outbox` can be constructed with a `RawSendCallback` instead of `SendCallback`:
-
-```cpp
-using RawSendCallback = SendResult (*)(void* context, pqueue::Span payload, const RetryState& retry);
-
-pqueue::Outbox outbox(queueConfig, outboxConfig, myRawSend, ctx, clock, clockCtx);
-```
-
-The callback receives a `Span` pointing into an internal buffer that is valid
-only during the callback. Do not retain the pointer after it returns. `submit(Span)` is also
-available alongside `submit(const std::string&)`.
-
-Only one callback variant is configured per instance (`SendCallback` or
-`RawSendCallback`). `http::Outbox` is unaffected and always uses the string
-path internally.
-
----
-
 ## pqueue::Outbox
 
-`Outbox` is a store-and-forward layer over `Queue`. On `submit`, it tries a
-live send first; if the backend is unavailable the payload is durably queued.
-`drain` / `drainUpTo` retry queued records according to the retry policy. The
-queue, retry state, and attempt counters all survive a power cycle.
+`Outbox` is a store-and-forward layer over `Queue`. On `submit`, if the queue
+is empty it attempts a live send; if the send fails the record is durably
+queued. If a backlog already exists the record is enqueued directly, preserving
+FIFO order. `drain` / `drainUpTo` retry queued records according to the retry
+policy. The queue, retry state, and attempt counters all survive a power cycle.
 
 ### Setup
 
 ```cpp
 pqueue::Config qcfg;
-qcfg.basePath    = "/spiffs/pqueue";
+qcfg.basePath    = "/pqueue";
 qcfg.reservedBytes = 65536;
 
 pqueue::OutboxConfig ocfg;
@@ -329,7 +265,7 @@ pqueue::http::Header headers[] = {
 };
 
 pqueue::http::Config cfg;
-cfg.queue.basePath                  = "/spiffs/pqueue";
+cfg.queue.basePath                  = "/pqueue";
 cfg.queue.reservedBytes             = 65536;
 cfg.outbox.initialRetryDelayMs      = 15000;
 cfg.outbox.maxRetryDelayMs          = 60000;
@@ -563,9 +499,75 @@ The compaction strategy picks the range with the highest fraction of dead bytes.
 Ranges with no dead bytes are skipped entirely -- compacting a fully-live range
 would waste a step without reclaiming anything.
 
-Each step is bounded by `maxOutputSegments` (default 8), so individual steps
-have predictable worst-case cost. Run compaction after drains or during reconnect
-windows, not on the enqueue path.
+Each step is bounded by `maxOutputSegments` (default 8), but a single step can
+still block for several seconds on slow flash or a large backlog. Run compaction
+after drains or during reconnect windows, not on the enqueue path.
 
 For the full strategy rationale, deadlock analysis, and on-device validation
 results, see `docs/internals.md`.
+
+
+---
+
+## Raw-buffer API (no caller-side heap allocation)
+
+`Queue` and `Outbox` accept and return records via caller-owned buffers using
+`pqueue::Span` (read-only) and `pqueue::MutableSpan` (writable):
+
+```cpp
+struct Span        { const uint8_t* data; size_t len; };
+struct MutableSpan { uint8_t*       data; size_t len; };
+```
+
+### `Queue` raw-buffer methods
+
+```cpp
+// Enqueue from a caller-owned buffer -- no std::string at the call site.
+uint8_t payload[492];
+size_t n = buildPayload(payload);
+queue.enqueue(pqueue::Span(payload, n));
+
+// Query size without reading the payload (no I/O; size is in RAM).
+size_t sz = 0;
+auto st = queue.peekSize(sz);  // QueueEmpty if no front record
+
+// Peek into a caller-owned buffer.
+uint8_t buf[492];
+size_t written = 0;
+auto st = queue.peek(pqueue::MutableSpan(buf, sizeof(buf)), written);
+// st.code == RecordTooLarge if buf is too small; written is valid on ok().
+if (st.ok()) {
+    send(buf, written);
+    queue.pop();
+}
+```
+
+The `std::string` overloads remain first-class and are not deprecated.
+Internal record storage stays as `std::string`; only caller-side allocations
+are eliminated.
+
+The raw-buffer API avoids caller-side allocation; benchmark results show it is
+not a latency win over the `std::string` API because LittleFS I/O dominates.
+
+**Error codes:**
+- `InvalidArgument` -- `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
+- `RecordTooLarge` -- `peek(MutableSpan)` when stored record exceeds `out.len`
+- `QueueEmpty` -- `peekSize` or `peek` on an empty queue
+
+### `Outbox` raw callback
+
+`Outbox` can be constructed with a `RawSendCallback` instead of `SendCallback`:
+
+```cpp
+using RawSendCallback = SendResult (*)(void* context, pqueue::Span payload, const RetryState& retry);
+
+pqueue::Outbox outbox(queueConfig, outboxConfig, myRawSend, ctx, clock, clockCtx);
+```
+
+The callback receives a `Span` pointing into an internal buffer that is valid
+only during the callback. Do not retain the pointer after it returns. `submit(Span)` is also
+available alongside `submit(const std::string&)`.
+
+Only one callback variant is configured per instance (`SendCallback` or
+`RawSendCallback`). `http::Outbox` is unaffected and always uses the string
+path internally.

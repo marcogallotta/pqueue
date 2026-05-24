@@ -20,7 +20,19 @@ that remounts cleanly.
 
 ---
 
-## Quick start
+## Which API should I use?
+
+- **`pqueue::http::Outbox`** -- HTTP POST delivery with retry and backoff. Use this for most firmware that POSTs sensor data or events to a backend.
+- **`pqueue::Outbox`** -- store-and-forward with a custom send callback. Use when you control the transport (MQTT, CoAP, WebSocket) but want durable queueing and retry built in.
+- **`pqueue::Queue`** -- raw durable FIFO. Use when you need full control over the read/send/pop loop, or when neither outbox fits your delivery model.
+
+The sections below show each API. Start with `pqueue::http::Outbox` unless you have a specific reason to drop to a lower-level API.
+
+---
+
+## Queue quick start
+
+> If you are using HTTP POST to a backend, skip to [Store-and-forward layers](#store-and-forward-layers) below.
 
 ### 1. Configure
 
@@ -98,7 +110,7 @@ ocfg.initialRetryDelayMs = 10000;
 
 pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
 
-outbox.submit(payload);          // queue or send immediately if online
+outbox.submit(payload);          // send immediately if no backlog, otherwise queue
 outbox.drainUpTo(50);            // attempt up to 50 sends
 outbox.compactIdle(1);           // reclaim dead space during idle windows
 ```
@@ -118,9 +130,10 @@ cfg.queue.basePath     = "/outbox";
 cfg.queue.reservedBytes = 65536;
 cfg.baseUrl            = "https://api.example.com";
 
+// transport: an Esp32ArduinoTransport or CallbackTransport instance (see docs/usage.md)
 pqueue::http::Outbox outbox(cfg, transport, myClock, nullptr);
 
-outbox.submitPost("/readings", body);   // queue or send immediately
+outbox.submitPost("/readings", body);   // send immediately if no backlog, otherwise queue
 outbox.drainUpTo(50);                   // replay queued requests
 outbox.compactIdle(1);                  // reclaim dead space during idle windows
 ```
@@ -130,111 +143,31 @@ outbox.compactIdle(1);                  // reclaim dead space during idle window
 
 ## Maintenance: pqueue_doctor
 
-`tools/esp32_pqueue_doctor/main.cpp` is a maintenance firmware image. Flash it
-once for an incident; it runs a serial command loop that lets you inspect,
-validate, compact, and dump queue state without modifying the production
-firmware.
+`src/pqueue/doctor/session.h` provides a serial command loop for inspecting,
+validating, compacting, and dumping queue state. The simplest path is
+`tools/esp32_pqueue_doctor/main.cpp`, a standalone maintenance image -- no
+production firmware changes needed. Trigger mode wires `runSession()` into the
+production firmware loop for use without reflashing.
 
-### Adding the build env to your app
-
-The doctor must be built with the same board, partition table, and filesystem
-settings as your app. Add this env to your app's `platformio.ini`:
-
-```ini
-[env:pqueue-maintenance]
-extends = env:<your-main-env>
-build_src_filter =
-    -<*>
-    +<path/to/pqueue/tools/esp32_pqueue_doctor/main.cpp>
-```
-
-Flash with `pio run -e pqueue-maintenance --target upload`.
-
-### Basic session
-
-Connect over serial, then send commands. Queue paths are supplied at runtime:
-
-```
-PQUEUE_DOCTOR_START
-READY
-TARGET api_outbox /pqueue_api_spool
-READY
-VALIDATE
-READY
-DONE
-```
-
-`DONE` reboots back into the maintenance firmware (the app image is not
-restored automatically -- reflash manually when finished).
-
-### Host script
-
-`tools/pqueue_doctor.py` drives the serial session. Commands run in a fixed
-order: read-only first (info/list/diag/validate), then mutations, then dump.
+`tools/pqueue_doctor.py` drives the session from the host:
 
 ```bash
-# Validate and dump all files
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --target api_outbox:/pqueue_api_spool \
-    --validate --dump-all --out-dir /tmp/pqdump
-
-# Compact then dump
-python3 tools/pqueue_doctor.py \
-    --port /dev/ttyACM0 \
-    --target api_outbox:/pqueue_api_spool \
-    --compact-all 64 --dump-all --out-dir /tmp/pqdump
-
-# Multiple targets (each dumped into out-dir/name/)
-python3 tools/pqueue_doctor.py \
-    --port /dev/ttyACM0 \
-    --targets pqueue_doctor.targets \
-    --validate --dump-all --out-dir /tmp/pqdump
+    --queue-config reservedBytes=262144 \
+    --validate
 ```
 
-Targets file format (`pqueue_doctor.targets`):
-
-```
-# name  path
-api_outbox  /pqueue_api_spool
-```
-
-After dumping, run `pqueue_appendlog_diag` (build with `make appendlog-diag`)
-on the dumped directory to inspect the manifest and segment layout offline.
-
-Stdin mode (pipe from POSIX dump tool, no device needed):
-
-```bash
-./build/pqueue-doctor-dump --base-path /path/to/spool | \
-    python3 tools/pqueue_doctor.py --out-dir /tmp/pqdump
-```
-
-### Command reference
-
-```
-TARGET <name> <path>      -- select queue (required before any other command)
-INFO                      -- filesystem stats and file list
-LIST                      -- segment files with sizes and status
-VALIDATE                  -- run Queue::validate(), print issues and repair hints
-DIAG                      -- manifest contents and segment summary
-DUMP_FILE <name>          -- transfer one file off-device
-DUMP_ALL                  -- transfer all manifest and segment files
-COMPACT <steps>           -- run compactIdle(steps)
-COMPACT_ALL <max_steps>   -- run compactIdle to completion, up to max_steps
-DROP_FRONT_IF_CORRUPT     -- drop front record only if corruption is proven
-RECOVER_STALE_LOCK        -- remove a stale lock left by a dead process
-FORMAT CONFIRM <name>     -- destructively reinitialize the queue
-DONE                      -- exit (reboots into maintenance firmware)
-```
-
-`FORMAT` requires both `CONFIRM` and the target name to prevent accidental execution.
+See `docs/doctor.md` for connection modes, all commands, config overrides, and
+common workflows.
 
 
 ---
 
 ## Further reading
 
-- `docs/usage.md` -- operating contract, configuration reference, simulator, crash safety
+- `docs/usage.md` -- operating contract, configuration reference, crash safety
 - `docs/internals.md` -- implementation internals: manifest format, segment layout, compaction mechanics, simulator, on-device validation
 - `docs/doctor.md` -- pqueue_doctor reference: commands, targets, config overrides, common workflows
 - `examples/basic_queue.cpp` -- runnable POSIX example: enqueue / drain / compact lifecycle
@@ -243,3 +176,4 @@ DONE                      -- exit (reboots into maintenance firmware)
 - `docs/benchmark.md` -- performance numbers and tuning guidance
 - `tools/pqueue_benchmark.cpp` -- POSIX benchmark source
 - `tools/pqueue_compaction_sim.cpp` -- compaction correctness sweep
+- https://github.com/marcogallotta/esp32-home-display -- real-world integration: HTTP outbox for sensor data upload on ESP32-S3/LittleFS

@@ -10,26 +10,21 @@ sync on every mutation. The implementation is split across
 `manifest.cpp` (slot election, publish, apply), and `compaction.cpp`
 (compaction, cleanup).
 
-**POSIX tests:** `tests/posix/pqueue_append_log_compaction.cpp` contains regression
-coverage for `collectLiveRecords()` FIFO ordering after rewrite+compact+remount, plus a
-transition-matrix section with one test per ugly operation sequence: pop->compact->remount,
-rewrite->compact->remount, pop->rewrite->compact->remount, rewrite->pop->compact->remount,
-rewrite-old/rotate-tail->compact->remount, subrange-compact->remount, compactFull->remount.
-`tests/posix/pqueue_append_log_validate.cpp` covers validateUnlocked: fresh store, missing
-segment, both slots corrupt, overlapping ranges, nextGeneration below max ref, wrong header
-generation, corrupt CRC in sealed segment, torn tail in tail (ok), torn tail in sealed
-(JournalCorrupt), dangling segment ignored. Tests call AppendLogStore::validateUnlocked
-directly to bypass the queue lock (which requires a successful mount).
+---
 
-`Queue::validate()` / `AppendLogStore::validateUnlocked()` is already a full-depth scan.
-It reads every event in every referenced segment (sealed and tail), CRC-checks every
-ENQUEUE/REWRITE payload, checks every footer magic, validates manifest structure and
-range consistency, and verifies every referenced segment file exists and is large enough.
-There is no shallower or deeper variant to add at the queue layer. The only validation
-not covered is application-layer envelope decoding (e.g. whether a payload is a valid
-`RequestEnvelope`), which is the responsibility of the Outbox layer via
-`Outbox::validatePayloads()`.
-Run with `make -j12 test`.
+## Module map
+
+| File | Responsibility |
+|---|---|
+| `src/pqueue/append_log_store/store.cpp` | Mount, scan, public API (`commitEnqueue`, `commitPop`, `readRecord`) |
+| `src/pqueue/append_log_store/manifest.cpp` | Slot election, `publishManifest`, `applyManifestToRam` |
+| `src/pqueue/append_log_store/compaction.cpp` | `compactRange`, `compactOneSegment`, `compactIdle`, cleanup |
+| `src/pqueue/append_log_common.h/.cpp` | Binary format: serialise/parse for manifests and events |
+| `src/pqueue/queue.cpp` | Public `Queue` API; lock wrapper over `AppendLogStore` |
+| `src/pqueue/doctor/session.h` | On-device serial command loop (`runSession`) |
+| `tests/posix/` | POSIX unit and regression tests |
+| `tools/pqueue_benchmark.cpp` | POSIX structural benchmark |
+| `tools/pqueue_compaction_sim.cpp` | Compaction correctness sweep |
 
 ---
 
@@ -491,6 +486,29 @@ The append-log design is validated by:
 
 Detailed benchmark commands and output formats live in `docs/benchmark.md`.
 
+### POSIX test coverage
+
+`tests/posix/pqueue_append_log_compaction.cpp` contains regression coverage for
+`collectLiveRecords()` FIFO ordering after rewrite+compact+remount, plus a
+transition-matrix section with one test per ugly operation sequence:
+pop->compact->remount, rewrite->compact->remount, pop->rewrite->compact->remount,
+rewrite->pop->compact->remount, rewrite-old/rotate-tail->compact->remount,
+subrange-compact->remount, compactFull->remount.
+`tests/posix/pqueue_append_log_validate.cpp` covers `validateUnlocked`: fresh store,
+missing segment, both slots corrupt, overlapping ranges, nextGeneration below max ref,
+wrong header generation, corrupt CRC in sealed segment, torn tail in tail (ok), torn
+tail in sealed (JournalCorrupt), dangling segment ignored. Tests call
+`AppendLogStore::validateUnlocked` directly to bypass the queue lock (which requires a
+successful mount). Run: `make -j12 test`.
+
+`Queue::validate()` / `AppendLogStore::validateUnlocked()` is a full-depth scan. It
+reads every event in every referenced segment (sealed and tail), CRC-checks every
+ENQUEUE/REWRITE payload, checks every footer magic, validates manifest structure and
+range consistency, and verifies every referenced segment file exists and is large enough.
+The only validation not covered is application-layer envelope decoding (e.g. whether a
+payload is a valid `RequestEnvelope`), which is the responsibility of the Outbox layer
+via `Outbox::validatePayloads()`.
+
 **Compaction results** (ESP32S3, QSPI flash, `env:esp32s3-compaction`):
 
 | Config | Compactions | NoOps | MaxOutSegs | MaxLatency | Deadlocks | CapExhausted |
@@ -592,7 +610,7 @@ know compaction is productive without coupling the timing to the write path.
 | Manifest size target | <= 64 B. LittleFS inline file threshold -- staying below it saves ~7 ms per rollover. |
 | Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful -- dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
 | Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behaviour wins. |
-| Event frame format | Shared frame with a type field (ENQUEUE/POP/REWRITE). Exact layout is an implementation detail. |
+| Event frame format | Per-type magic bytes (`PQEQ`/`PQRE`/`PQPE`). ENQUEUE and REWRITE share a variable-length layout (header + payload + CRC + footer); POP is fixed-width (20 bytes). See `## Binary format`. |
 
 ---
 
@@ -670,10 +688,9 @@ records). Revisit if real production boot backlog proves painful.
 
 ## LittleFS timing reference (ESP32-S3)
 
-Measured from prior on-device LittleFS timing runs. These are
-the authoritative numbers for design decisions on the ESP32-S3. Other devices
-will scale proportionally -- the ratios and the 4 KB block-size cliff hold
-across LittleFS targets.
+Measured from prior on-device LittleFS timing runs. These are the design
+reference numbers for the ESP32-S3. The 4 KB block-size cliff was observed on this ESP32-S3/LittleFS setup;
+absolute numbers vary by flash speed and chip.
 
 ### Flush cost curve (128 B write, open/flush/close per iter)
 
