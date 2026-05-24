@@ -68,18 +68,47 @@ static std::uint64_t pctile(const std::vector<std::uint64_t>& v, double p) {
     return v[std::min(i, v.size() - 1)];
 }
 
+// --- result storage for end-of-run summary ---
+
+struct OpResult {
+    const char*   name;
+    std::uint32_t payloadB, n;
+    std::uint64_t p50, p90, p99, max;
+};
+struct MountResult {
+    std::uint32_t preload;
+    std::uint64_t mountUs;
+};
+struct CompactResult {
+    std::uint32_t payloadB, productive, noops;
+    std::uint64_t p50, p90, p99, max;
+    bool          valid = false;
+};
+
+static OpResult      gOps[4];
+static std::uint32_t gOpCount    = 0;
+static MountResult   gMounts[4];
+static std::uint32_t gMountCount = 0;
+static CompactResult gCompact;
+
+// ---------------------------------------------
+
 static void printOpStats(const char* scenario, std::uint32_t payloadB,
                          std::uint32_t n, std::vector<std::uint64_t> s) {
     std::sort(s.begin(), s.end());
+    const auto p50 = pctile(s, 50);
+    const auto p90 = pctile(s, 90);
+    const auto p99 = pctile(s, 99);
+    const auto max = s.back();
     Serial.printf(
         "bench scenario=%s payload_b=%u n=%u"
         " p50_us=%llu p90_us=%llu p99_us=%llu max_us=%llu\n",
         scenario, payloadB, n,
-        (unsigned long long)pctile(s, 50),
-        (unsigned long long)pctile(s, 90),
-        (unsigned long long)pctile(s, 99),
-        (unsigned long long)s.back());
+        (unsigned long long)p50, (unsigned long long)p90,
+        (unsigned long long)p99, (unsigned long long)max);
     Serial.flush();
+    if (gOpCount < 4)
+        gOps[gOpCount++] = {scenario, payloadB, n, p50, p90, p99, max};
 }
 
 static void runEnqueue(std::uint32_t payloadB) {
@@ -161,6 +190,8 @@ static void runMountCase(std::uint32_t n) {
     Serial.printf("bench scenario=mount payload_b=256 preload=%u mount_us=%llu\n",
         n, (unsigned long long)dt);
     Serial.flush();
+    if (gMountCount < 4)
+        gMounts[gMountCount++] = {n, dt};
 }
 
 static void runCompactIdle(std::uint32_t payloadB) {
@@ -221,6 +252,14 @@ static void runCompactIdle(std::uint32_t payloadB) {
 
     std::sort(stepSamples.begin(), stepSamples.end());
     const bool hasSamples = !stepSamples.empty();
+    gCompact = {
+        payloadB, prodTotal, noopTotal,
+        hasSamples ? pctile(stepSamples, 50) : 0,
+        hasSamples ? pctile(stepSamples, 90) : 0,
+        hasSamples ? pctile(stepSamples, 99) : 0,
+        hasSamples ? stepSamples.back()      : 0,
+        true
+    };
     Serial.printf(
         "bench scenario=compact_idle payload_b=%u summary"
         " cycles=%u productive=%u noops=%u"
@@ -235,6 +274,44 @@ static void runCompactIdle(std::uint32_t payloadB) {
 
     TEST_ASSERT_GREATER_THAN_UINT32_MESSAGE(
         0, prodTotal, "no productive compaction steps -- workload did not exercise compaction");
+}
+
+static void printSummary() {
+    Serial.println();
+    Serial.println("==================== results ====================");
+
+    Serial.println();
+    Serial.println("  scenario     payload    n     p50      p90      p99      max");
+    Serial.println("  ----------  --------  ---  ------   ------   ------   ------");
+    for (std::uint32_t i = 0; i < gOpCount; ++i) {
+        const auto& r = gOps[i];
+        Serial.printf("  %-10s   %4uB  %3u  %6.0fms  %6.0fms  %6.0fms  %6.0fms\n",
+            r.name, r.payloadB, r.n,
+            r.p50 / 1000.0, r.p90 / 1000.0, r.p99 / 1000.0, r.max / 1000.0);
+    }
+
+    Serial.println();
+    Serial.println("  mount    payload  preload      time");
+    Serial.println("  -----   --------  -------  --------");
+    for (std::uint32_t i = 0; i < gMountCount; ++i) {
+        const auto& m = gMounts[i];
+        Serial.printf("  mount     256B    %5u   %7.0fms\n",
+            m.preload, m.mountUs / 1000.0);
+    }
+
+    if (gCompact.valid) {
+        const auto& c = gCompact;
+        Serial.println();
+        Serial.println("  scenario      payload  steps  noops    p50      p90      p99      max");
+        Serial.println("  ------------  -------  -----  -----  ------   ------   ------   ------");
+        Serial.printf("  compact_idle   %4uB  %5u  %5u  %6.0fms  %6.0fms  %6.0fms  %6.0fms\n",
+            c.payloadB, c.productive, c.noops,
+            c.p50 / 1000.0, c.p90 / 1000.0, c.p99 / 1000.0, c.max / 1000.0);
+    }
+
+    Serial.println();
+    Serial.println("=================================================");
+    Serial.flush();
 }
 
 } // namespace
@@ -274,6 +351,7 @@ void setup() {
     RUN_TEST(test_mount);
     RUN_TEST(test_compact_idle_256b);
     UNITY_END();
+    printSummary();
 }
 
 void loop() {}
