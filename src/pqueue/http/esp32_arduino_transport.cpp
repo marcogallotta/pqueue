@@ -4,9 +4,7 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 
 #include <string>
 
@@ -117,8 +115,7 @@ Response Esp32ArduinoTransport::post(
         clientConfigured_ = true;
     }
 
-    HTTPClient http;
-    if (!http.begin(client_, url)) {
+    if (!http_.begin(client_, url)) {
         client_.stop();
         emitTransportEvent(
             config_.common,
@@ -131,18 +128,18 @@ Response Esp32ArduinoTransport::post(
         return {kNoStatusCode, TransportError::Network};
     }
 
-    http.setTimeout(static_cast<std::uint16_t>(config_.common.timeoutMs));
-    http.setReuse(true);
+    http_.setTimeout(static_cast<std::uint16_t>(config_.common.timeoutMs));
+    http_.setReuse(true);
     if (config_.common.userAgent != nullptr) {
-        http.setUserAgent(config_.common.userAgent);
+        http_.setUserAgent(config_.common.userAgent);
     }
-    http.setFollowRedirects(config_.common.followRedirects ? HTTPC_STRICT_FOLLOW_REDIRECTS : HTTPC_DISABLE_FOLLOW_REDIRECTS);
+    http_.setFollowRedirects(config_.common.followRedirects ? HTTPC_STRICT_FOLLOW_REDIRECTS : HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
     for (std::size_t i = 0; i < headerCount; ++i) {
         if (headers[i].name == nullptr || headers[i].value == nullptr) {
             continue;
         }
-        http.addHeader(headers[i].name, headers[i].value);
+        http_.addHeader(headers[i].name, headers[i].value);
     }
 
     emitTransportEvent(
@@ -154,12 +151,12 @@ Response Esp32ArduinoTransport::post(
         headerCount,
         bodySize);
 
-    int code = http.POST(const_cast<std::uint8_t*>(body), bodySize);
+    int code = http_.POST(const_cast<std::uint8_t*>(body), bodySize);
     Response response;
     if (code > 0) {
         response.statusCode = code;
         response.error = TransportError::None;
-        response.body = http.getString().c_str();
+        response.body = http_.getString().c_str();
     } else {
         response.statusCode = kNoStatusCode;
         response.error = mapHttpClientError(code);
@@ -177,7 +174,7 @@ Response Esp32ArduinoTransport::post(
         bodySize,
         response.statusCode);
 
-    http.end();
+    http_.end();
 
     if (response.error != TransportError::None) {
         client_.stop();

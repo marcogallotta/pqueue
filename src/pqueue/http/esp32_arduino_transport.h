@@ -4,6 +4,7 @@
 
 #ifdef ARDUINO
 
+#include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
 #include <cstdint>
@@ -46,6 +47,7 @@ private:
 
     Esp32ArduinoTransportConfig config_;
     WiFiClientSecure client_;
+    HTTPClient http_;
     std::string caCertStorage_;
     bool clientConfigured_ = false;
 };
