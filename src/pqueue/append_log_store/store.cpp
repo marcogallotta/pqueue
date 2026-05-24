@@ -194,6 +194,9 @@ Status AppendLogStore::scanSegments() {
         }
         SegmentHeader segHeader;
         if (!parseSegmentHeader(headerBytes, segHeader)) {
+            if (segHeader.version != kFormatVersion) {
+                return Status::failure(StatusCode::DataCorrupt, "segment version mismatch");
+            }
             return Status::failure(StatusCode::DataCorrupt, "corrupt segment header");
         }
         if (segHeader.generation != gen) {
@@ -996,7 +999,12 @@ ValidationResult AppendLogStore::validateUnlocked(const ValidationOptions& optio
         }
         SegmentHeader segHdr;
         if (!parseSegmentHeader(hdrBytes, segHdr)) {
-            addErr(ValidationIssueCode::MetadataCorrupt, "corrupt segment header in " + name);
+            if (segHdr.version != kFormatVersion) {
+                addErr(ValidationIssueCode::MetadataCorrupt,
+                    "segment version mismatch in " + name);
+            } else {
+                addErr(ValidationIssueCode::MetadataCorrupt, "corrupt segment header in " + name);
+            }
             return;
         }
         if (segHdr.generation != gen) {

@@ -15,7 +15,7 @@ constexpr std::uint32_t kRewriteMagic  = 0x45525150; // "PQRE"
 constexpr std::uint32_t kFooterMagic   = 0x214B4F50; // "POK!"
 constexpr std::uint32_t kManifestMagic = 0x464D5150; // "PQMF"
 
-constexpr std::uint16_t kFormatVersion   = 0;
+constexpr std::uint16_t kFormatVersion   = 1;
 constexpr std::uint16_t kManifestVersion = 1;
 
 // Manifest binary layout sizes

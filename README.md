@@ -94,7 +94,7 @@ qcfg.basePath       = "/outbox";
 qcfg.reservedBytes  = 65536;
 
 pqueue::OutboxConfig ocfg;
-ocfg.retryDelayMs   = 10000;
+ocfg.initialRetryDelayMs = 10000;
 
 pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
 
@@ -240,4 +240,7 @@ DONE                      -- exit (reboots into maintenance firmware)
 - `examples/basic_queue.cpp` -- runnable POSIX example: enqueue / drain / compact lifecycle
 - `examples/outbox.cpp` -- runnable POSIX example: store-and-forward with retry
 - `examples/esp32_http_outbox/main.cpp` -- ESP32 firmware reference sketch
-- `tools/pqueue_profiling.cpp` -- profiling and simulation tool source
+- `docs/benchmark.md` -- benchmark and CI regression workflow
+- `data/benchmark-results-posix.md` -- POSIX structural benchmark baseline and interpretation
+- `tools/pqueue_benchmark.cpp` -- POSIX benchmark source
+- `tools/pqueue_compaction_sim.cpp` -- compaction correctness sweep

@@ -1,6 +1,6 @@
 {
   "name": "pqueue",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Persistent queue and outbox for embedded store-and-forward workloads",
   "license": "MIT",
   "authors": [

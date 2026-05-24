@@ -105,7 +105,7 @@ Two invariants make this safe:
 
 **`append_log_common.h/.cpp`** defines the binary format layer (`pqueue::append_log_detail` namespace): `ManifestRange { startGen, endGen }`, `ManifestData { epoch, nextGeneration, tailGeneration, ranges }`, `serialiseManifest` / `parseManifest`, and the segment/event serialisers and parsers.
 
-There are two format version fields: `kFormatVersion = 0` is used in segment
+There are two format version fields: `kFormatVersion = 1` is used in segment
 headers and all event types; `kManifestVersion = 1` is the manifest-specific
 format version. These are versioned independently.
 
@@ -113,7 +113,7 @@ format version. These are versioned independently.
 
 ```
 magic       4 bytes   0x47535150 ("PQSG")
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   20
 generation  4 bytes   u32, matches the segment generation encoded in the filename; live sealed segments are referenced by manifest ranges, and the active tail is referenced by tailGeneration
 startSeq    4 bytes   u32, informational: first enqueue sequence expected
@@ -124,7 +124,7 @@ headerCrc   4 bytes   CRC32 over preceding 16 bytes
 
 ```
 magic       4 bytes   0x51455150 ("PQEQ") for ENQUEUE, 0x45525150 ("PQRE") for REWRITE
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   16  (kEnqueueHeaderBytes)
 sequence    4 bytes   u32
 payloadBytes 4 bytes  u32
@@ -137,7 +137,7 @@ footer      4 bytes   0x214B4F50 ("POK!")
 
 ```
 magic       4 bytes   0x45505150 ("PQPE")
-version     2 bytes   kFormatVersion = 0
+version     2 bytes   kFormatVersion = 1
 headerBytes 2 bytes   20
 sequence    4 bytes   u32
 eventCrc    4 bytes   CRC32 over magic + version + headerBytes + sequence
@@ -455,108 +455,46 @@ abort at 1000 failures).
 
 Drives the real `AppendLogStore` API through two workload families:
 
-**Random interleaved.** enqP in {0.55, 0.65, 0.80}, record size 19 bytes.
+**Random interleaved.** enqP in {0.55, 0.65, 0.80}, record size 150 bytes.
 
 **Burst.** Models offline-consumer pattern: enqueue N, drain popRatio fraction,
-repeat. burstSize in {12, 60, 250}, popRatio in {0.25, 0.5, 0.9}, recordSize
-in {8, 19, 62} bytes. Parameters scaled ~1/8 from production values to keep
-runs fast while preserving records-per-segment ratio.
+repeat. burstSize in {100, 500, 2000}, popRatio in {0.25, 0.5, 0.9}, recordSize
+in {64, 150, 492} bytes. These match production LittleFS block sizes and payload
+sizes.
+
+The simulator calls `store.compactRange()` directly rather than going through
+`compactOneSegment()` → `narrowRange()`, so it is not subject to the
+`maxOutputSegments` bound. `MaxOutSeg` values in simulator output reflect
+unconstrained strategy behaviour, not the bounded per-step latency that
+production `compactIdle(1)` delivers.
 
 Compaction trigger: rising-edge on segment count (new segment written), fires
 if any range exceeds `deadRatioTrigger` or range count reaches
 `rangePressureTrigger`. Segment count is the correct rising edge -- range count
 stays at 1 with a single contiguous range.
 
-### Latency profiler
-
-`tools/pqueue_profiling.cpp`. Build: `make -j12 profiling`. All modes use an
-in-memory FS and complete in under a second.
-
-```
-./build/pqueue-profiling compaction <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling compaction-sim <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling idle <burst> <payloadBytes> <cycles> [flags]
-./build/pqueue-profiling idle-sim <burst> <payloadBytes> <cycles> [flags]
-```
-
-`compaction`: I/O op counts and wall-clock latency. Use for correctness and
-op-count regression.
-
-`compaction-sim`: simulated latency using per-op LittleFS cost estimates (no
-sleeping). Use to predict on-device MaxLatency before flashing.
-
-`idle` / `idle-sim`: models the burst->drain->compactIdle pattern. Phase 1
-enqueues a burst, detecting hot-path compactions via readFile delta (rotations
-produce no readFile; compactions do). Phase 2 drains popRatio fraction. Phase 3
-calls `compactIdle(1)` in a loop until noOp, measuring per-step latency.
-Reports idleSteps, idleNoOps, maxStepLatency, totalIdleLatency, and
-hotCompactions. `hotCompactions = 0` confirms the clean-storage invariant: idle
-compaction between cycles prevents hot-path compaction during the next burst.
-
-**Flags** (apply to all modes):
-
-```
---pop <pct>                drain percentage per cycle (default 90)
---multiplier <f>           scale sim latency constants (default 1.0)
---max-segment-bytes <n>    cfg.maxSegmentBytes (default 4096)
---max-total-bytes <n>      cfg.maxTotalBytes (default 1048576)
---max-segments <n>         cfg.maxSegments (default 200)
---max-output-segments <n>  cfg.maxOutputSegments (default 8)
---min-free-bytes <n>       cfg.minFreeBytes: FS floor; enqueue fails if freeBytes drops below n (default 0 = disabled)
---fs-total-bytes <n>       simulated FS total size in bytes (default 0 = effectively unlimited)
-```
-
-`--fs-total-bytes` and `--min-free-bytes` model the real safety floor: on
-device, LittleFS free space is shared with other files, metadata, and logs, so
-the queue may be rejected by the FS floor before its own footprint cap
-(`maxTotalBytes`) is hit. Without these flags the sim cannot detect this failure
-mode. Results report `fsFloorHit` (enqueues rejected by FS floor) separately
-from `capExhausted` (rejected by queue footprint cap) so the two failure modes
-are distinguishable.
-
-**Simulated latency model** (`littleFsSimLatency()`, scaled 100x from observed
-device timings):
-
-```
-readFile/readAt: 345us   (~35ms on device, open+read+close)
-writeFile:       1380us fixed + 518us/KB  (~138ms + ~52ms/KB on device)
-writeAt:         138us   (~14ms on device)
-removeFile:      166us   (~17ms on device)
-listFiles:       690us base + 86us/file  (~69ms + ~8.6ms/file on device)
-```
-
-Calibrated for ESP32S3 with QSPI flash: simMaxLatency x 100 = predicted device
-ms at `--multiplier 1.0`. Calibrated from on-device Run 4 (burst=500/pop=90%/
-rec=492B/cycles=3): simMaxLatency=48.6ms x 100 = 4860ms, actual 4861ms.
-
-**Idle compaction sim results** (burst->drain->compactIdle pattern):
-
-```
-burst=500 payload=492B cycles=3 pop=90%:  idleSteps=10  maxStep=48.5ms  total=154.4ms  hotCompactions=0
-burst=100 payload=150B cycles=5 pop=90%:  idleSteps=18  maxStep=10.0ms  total=65.6ms   hotCompactions=0
-```
-
-Predicted max step on device (x100): 4850ms (heavy), 1000ms (light). Total
-idle budget: ~15400ms (heavy, 3 cycles), ~6560ms (light, 5 cycles).
-
 ---
 
-## On-device validation
+## Validation coverage
 
-Test: `tests/arduino/test_pqueue_compaction/test_main.cpp`.
-Environment: `esp32s3-compaction`.
-Build and upload: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-testing`.
+The append-log design is validated by:
 
-**Results** (ESP32S3, QSPI flash):
+- **POSIX tests:** deterministic coverage of manifest election, segment replay, compaction transitions, torn-tail handling, validate, and regression scenarios. Run: `make -j12 test`.
+- **Arduino/LittleFS tests:** real filesystem persistence, reboot survival across mid-operation crashes, locking, outbox backlog, compactIdle durability, and DropOldest eviction.
+- **POSIX benchmark:** structural I/O regression — op counts, write amplification, idle compaction invariants. Run: `make -j12 benchmark`.
+- **On-device benchmark:** actual ESP32S3/LittleFS runtime latency for enqueue, peek+pop, mount, and compactIdle.
+
+Detailed benchmark commands and output formats live in `docs/benchmark.md`.
+
+**Compaction results** (ESP32S3, QSPI flash, `env:esp32s3-compaction`):
 
 | Config | Compactions | NoOps | MaxOutSegs | MaxLatency | Deadlocks | CapExhausted |
 |---|---|---|---|---|---|---|
 | burst=100/pop=90%/rec=150B/5cy | 100 | 0 | 1 | 1090ms | 0 | 0 |
 | burst=500/pop=90%/rec=492B/3cy | 17 | 6 | 8 | 4861ms | 0 | 0 |
 
-The heavy workload (Run 4) was the calibration baseline for the sim model. Prior
-to O(1) preflight sizing, bulk collectLiveRecords reads, and targeted cleanup,
-the same workload produced 82580ms MaxLatency; the bottlenecks were directory
+Prior to O(1) preflight sizing, bulk collectLiveRecords reads, and targeted cleanup,
+the heavy workload produced 82580ms MaxLatency; the bottlenecks were directory
 scans and per-record fileSize calls on the hot path.
 
 ---
@@ -655,7 +593,7 @@ know compaction is productive without coupling the timing to the write path.
 
 ## LittleFS timing reference (ESP32-S3)
 
-Measured with the on-device profiler (`pqueue_profiling_main.cpp`). These are
+Measured from prior on-device LittleFS timing runs. These are
 the authoritative numbers for design decisions on the ESP32-S3. Other devices
 will scale proportionally -- the ratios and the 4 KB block-size cliff hold
 across LittleFS targets.
