@@ -67,8 +67,8 @@ int main() {
 
     // --- Idle compaction phase ---
     // Run after drain (or during a reconnect delay) to reclaim flash from
-    // tombstoned records. Each compactIdle(1) call does one bounded step;
-    // loop until compactions reaches zero.
+    // tombstoned records. Desktop example: loop to completion so the output is
+    // easy to read. On firmware, call one step per idle window instead.
     printf("\n=== compact ===\n");
     pqueue::CompactIdleResult cr;
     std::size_t totalSteps = 0;

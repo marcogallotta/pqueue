@@ -6,7 +6,7 @@
 // Key differences from the POSIX examples:
 //   - storageBackend = LittleFS (not default POSIX)
 //   - esp_timer_get_time()/1000 for the monotonic clock
-//   - esp_task_wdt_reset() / vTaskDelay() to yield the watchdog during compaction
+//   - esp_task_wdt_reset() after compactIdle(1) to keep the watchdog happy
 
 #include <Arduino.h>
 #include <LittleFS.h>
@@ -90,15 +90,11 @@ void loop() {
     const auto dr = outbox->drainUpTo(5);
 
     // Compact after a drain that freed records, or continue a previous pass.
-    // Each compactIdle(1) call is one bounded step; yield the watchdog between
-    // steps so the loop stays responsive.
+    // One step per loop() tick keeps latency bounded; moreCompactionWork
+    // carries the flag across ticks until compaction is done.
     if (dr.removedQueuedBytes > 0 || moreCompactionWork) {
-        pqueue::CompactIdleResult cr;
-        do {
-            cr = outbox->compactIdle(1);
-            esp_task_wdt_reset();
-            vTaskDelay(1);
-        } while (cr.compactions > 0);
-        moreCompactionWork = cr.moreWorkLikely;
+        const auto cr = outbox->compactIdle(1);
+        esp_task_wdt_reset();
+        moreCompactionWork = cr.status.ok() && cr.moreWorkLikely;
     }
 }

@@ -99,6 +99,8 @@ int main() {
     // After all records are sent, each sealed segment still holds the original
     // ENQUEUE bytes as dead data. compactIdle rewrites those segments to reclaim
     // the space; the tail (never a compaction candidate) is left alone.
+    // Desktop example: loop to completion so the output is easy to read.
+    // On firmware, call one step per idle window instead.
     printf("\n=== compact ===\n");
     pqueue::CompactIdleResult cr;
     std::size_t totalSteps = 0;
