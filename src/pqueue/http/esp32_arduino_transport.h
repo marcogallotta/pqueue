@@ -4,14 +4,14 @@
 
 #ifdef ARDUINO
 
+#include <WiFiClientSecure.h>
+
 #include <cstdint>
 #include <string>
 
 namespace fs {
 class FS;
 }
-
-class WiFiClientSecure;
 
 namespace pqueue::http {
 
@@ -42,9 +42,12 @@ public:
 private:
     bool isNetworkReady() const;
     TransportError mapHttpClientError(int code) const;
-    bool configureTlsClient(WiFiClientSecure& client, std::string& caCertStorage) const;
+    bool configureTlsClient();
 
     Esp32ArduinoTransportConfig config_;
+    WiFiClientSecure client_;
+    std::string caCertStorage_;
+    bool clientConfigured_ = false;
 };
 
 } // namespace pqueue::http

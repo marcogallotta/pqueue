@@ -102,22 +102,24 @@ Response Esp32ArduinoTransport::post(
         return {kNoStatusCode, TransportError::Network};
     }
 
-    WiFiClientSecure client;
-    std::string caCertStorage;
-    if (!configureTlsClient(client, caCertStorage)) {
-        emitTransportEvent(
-            config_.common,
-            Severity::Error,
-            Status::failure(StatusCode::SendFailed, "failed to configure TLS client"),
-            "configure_tls",
-            url,
-            headerCount,
-            bodySize);
-        return {kNoStatusCode, TransportError::Tls};
+    if (!clientConfigured_) {
+        if (!configureTlsClient()) {
+            emitTransportEvent(
+                config_.common,
+                Severity::Error,
+                Status::failure(StatusCode::SendFailed, "failed to configure TLS client"),
+                "configure_tls",
+                url,
+                headerCount,
+                bodySize);
+            return {kNoStatusCode, TransportError::Tls};
+        }
+        clientConfigured_ = true;
     }
 
     HTTPClient http;
-    if (!http.begin(client, url)) {
+    if (!http.begin(client_, url)) {
+        client_.stop();
         emitTransportEvent(
             config_.common,
             Severity::Error,
@@ -126,10 +128,11 @@ Response Esp32ArduinoTransport::post(
             url,
             headerCount,
             bodySize);
-        return {kNoStatusCode, TransportError::Unknown};
+        return {kNoStatusCode, TransportError::Network};
     }
 
     http.setTimeout(static_cast<std::uint16_t>(config_.common.timeoutMs));
+    http.setReuse(true);
     if (config_.common.userAgent != nullptr) {
         http.setUserAgent(config_.common.userAgent);
     }
@@ -175,6 +178,11 @@ Response Esp32ArduinoTransport::post(
         response.statusCode);
 
     http.end();
+
+    if (response.error != TransportError::None) {
+        client_.stop();
+    }
+
     return response;
 }
 
@@ -198,18 +206,18 @@ TransportError Esp32ArduinoTransport::mapHttpClientError(int code) const {
     }
 }
 
-bool Esp32ArduinoTransport::configureTlsClient(WiFiClientSecure& client, std::string& caCertStorage) const {
+bool Esp32ArduinoTransport::configureTlsClient() {
     if (config_.common.allowInsecureTls) {
-        client.setInsecure();
+        client_.setInsecure();
         return true;
     }
 
-    caCertStorage = readFileToString(config_.caCertFileSystem, config_.caCertPath);
-    if (caCertStorage.empty()) {
+    caCertStorage_ = readFileToString(config_.caCertFileSystem, config_.caCertPath);
+    if (caCertStorage_.empty()) {
         return false;
     }
 
-    client.setCACert(caCertStorage.c_str());
+    client_.setCACert(caCertStorage_.c_str());
     return true;
 }
 
