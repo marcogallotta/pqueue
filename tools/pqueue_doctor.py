@@ -584,7 +584,7 @@ def main() -> None:
     p.add_argument("--drop-front-if-corrupt", action="store_true",
                    help="Drop front record only if corruption is proven")
     p.add_argument("--recover-stale-lock", action="store_true",
-                   help="Remove a stale lock left by a dead process")
+                   help="Recover stale POSIX lock; no-op on ESP32/LittleFS")
     p.add_argument("--format", action="store_true",
                    help="Destructively reinitialize the queue (sends FORMAT CONFIRM <name>)")
 

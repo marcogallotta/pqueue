@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
     addConfigOptions(*dropFront, config);
     dropFront->callback([&command]() { command = Command::DropFrontIfCorrupt; });
 
-    auto* recoverLock = app.add_subcommand("recover-stale-lock", "Remove a stale lock left by a dead process");
+    auto* recoverLock = app.add_subcommand("recover-stale-lock", "Recover stale POSIX lock; no-op on ESP32/LittleFS");
     addConfigOptions(*recoverLock, config);
     recoverLock->callback([&command]() { command = Command::RecoverStaleLock; });
 
@@ -153,6 +153,10 @@ int main(int argc, char** argv) {
             return printDropFrontStatus(queue.dropFrontIfCorrupt());
         case Command::RecoverStaleLock: {
             const pqueue::Status st = queue.recoverStaleLock();
+            if (st.isNoOp()) {
+                std::cout << "Not applicable: lock backend has no persistent state (ESP32/LittleFS or lock file absent).\n";
+                return 0;
+            }
             if (st.ok()) {
                 std::cout << "Stale lock removed.\n";
                 return 0;
