@@ -468,7 +468,7 @@ in {64, 150, 492} bytes. These match production LittleFS block sizes and payload
 sizes.
 
 The simulator calls `store.compactRange()` directly rather than going through
-`compactOneSegment()` → `narrowRange()`, so it is not subject to the
+`compactOneSegment()` -> `narrowRange()`, so it is not subject to the
 `maxOutputSegments` bound. `MaxOutSeg` values in simulator output reflect
 unconstrained strategy behaviour, not the bounded per-step latency that
 production `compactIdle(1)` delivers.
@@ -486,7 +486,7 @@ The append-log design is validated by:
 
 - **POSIX tests:** deterministic coverage of manifest election, segment replay, compaction transitions, torn-tail handling, validate, and regression scenarios. Run: `make -j12 test`.
 - **Arduino/LittleFS tests:** real filesystem persistence, reboot survival across mid-operation crashes, locking, outbox backlog, compactIdle durability, and DropOldest eviction.
-- **POSIX benchmark:** structural I/O regression — op counts, write amplification, idle compaction invariants. Run: `make -j12 benchmark`.
+- **POSIX benchmark:** structural I/O regression -- op counts, write amplification, idle compaction invariants. Run: `make -j12 benchmark`.
 - **On-device benchmark:** actual ESP32S3/LittleFS runtime latency for enqueue, peek+pop, mount, and compactIdle.
 
 Detailed benchmark commands and output formats live in `docs/benchmark.md`.
@@ -591,7 +591,7 @@ know compaction is productive without coupling the timing to the write path.
 | Target segment size | 4 KB. Measured flush cost cliff at 4 KB -> 8 KB makes this the clear winner (see LittleFS timing reference below). |
 | Manifest size target | <= 64 B. LittleFS inline file threshold -- staying below it saves ~7 ms per rollover. |
 | Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful -- dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
-| Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behavior wins. |
+| Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behaviour wins. |
 | Event frame format | Shared frame with a type field (ENQUEUE/POP/REWRITE). Exact layout is an implementation detail. |
 
 ---
@@ -602,7 +602,7 @@ know compaction is productive without coupling the timing to the write path.
 
 Runs on an in-memory POSIX filesystem. Deterministic and machine-independent for the
 fields that matter: I/O op counts, write amplification, and idle compaction invariants.
-Wall-clock times are host-local and informational only — do not use them to predict
+Wall-clock times are host-local and informational only -- do not use them to predict
 device latency.
 
 ```bash
@@ -614,7 +614,7 @@ make update-benchmark-baseline  # regenerate data/benchmark-results-posix.json
 CI builds the benchmark, runs it with `--json --strict`, and diffs the output against
 `data/benchmark-results-posix.json` using `tools/benchmark_regression.py`.
 
-**`--strict` invariants** — exits 1 if any of these fail:
+**`--strict` invariants** -- exits 1 if any of these fail:
 
 - `enqueue`: `writeAt == N`, `readAt == 0`, `remove == 0`
 - `peek_pop`: `writeAt == N`, `readAt == N`, `read_bpp == payloadBytes`, `remove == 0`
@@ -650,11 +650,11 @@ allocation guard (`kMaxReplaySegmentReadBytes = 256 KB`). This gives one `fileSi
 one `readFile` per segment regardless of event count.
 
 Prior to this, replaying an ENQUEUE event required two `readAt` calls (header + payload),
-plus one segment-header `readAt` per segment — each a full open+seek+read+close on
+plus one segment-header `readAt` per segment -- each a full open+seek+read+close on
 LittleFS (~5 ms). At 200 records that was hundreds of individual file opens; mount time
 dropped from ~16 s to ~5 s at 200 records, and from ~47 s to ~28 s at 1000 records.
 
-**Mount anomaly.** The 50→200 record jump is anomalous: 4× records produces ~11× mount
+**Mount anomaly.** The 50->200 record jump is anomalous: 4x records produces ~11x mount
 time. From 200 records onward the cost is roughly linear (~28 ms/record). Most likely
 LittleFS filesystem-state cost (directory traversal, metadata lookup) growing with
 segment/file count in the early range. The exact source has not been isolated.
@@ -663,7 +663,7 @@ segment/file count in the early range. The exact source has not been isolated.
 after each manifest publish would reduce mount to: read checkpoint + validate epoch +
 replay tail only. This was decided against: the checkpoint would be written on every
 rotation, adding write amplification on a path that already dominates latency for
-large-payload callers, and checkpoint size grows with queue depth (~16–24 KB at 1000
+large-payload callers, and checkpoint size grows with queue depth (~16-24 KB at 1000
 records). Revisit if real production boot backlog proves painful.
 
 ---

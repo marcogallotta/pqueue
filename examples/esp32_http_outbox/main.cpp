@@ -69,7 +69,10 @@ static unsigned long lastSubmitMs = 0;
 // --- Arduino lifecycle ---
 
 void setup() {
-    LittleFS.begin(true);
+    if (!LittleFS.begin(false)) {
+        Serial.println("LittleFS mount failed -- halting");
+        while (true) { delay(1000); }
+    }
     transport.emplace(makeTransportConfig());
     outbox.emplace(makeConfig(), *transport, monotonicMs, nullptr);
 }

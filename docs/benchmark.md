@@ -13,7 +13,7 @@ Two environments share the same test file:
 | Environment | Mode | Approx. runtime | N | burst | mount preloads |
 |---|---|---|---|---|---|
 | `esp32s3-benchmark` | full | ~17 min | 100 | 100 | 0 / 50 / 200 / 500 / 1000 |
-| `esp32s3-benchmark-fast` | fast | ~1–2 min | 10 | 20 | 0 / 50 / 200 |
+| `esp32s3-benchmark-fast` | fast | ~1-2 min | 10 | 20 | 0 / 50 / 200 |
 
 Fast mode is enough to confirm operations succeed and latency is in the right order of
 magnitude. Use full mode for release measurements.
@@ -43,7 +43,7 @@ booted.
 | `peek_pop` | 256 B, 1 KB | Each `q.peek()` + `q.pop()` pair |
 | `raw_enqueue` | 256 B | Each `q.enqueue(Span)` call (full mode only) |
 | `raw_peek_pop` | 256 B | Each `q.peek(MutableSpan)` + `q.pop()` pair (full mode only) |
-| `mount` | 256 B (fixed) | First `q.statsResult()` after construction — captures lazy-mount I/O |
+| `mount` | 256 B (fixed) | First `q.statsResult()` after construction -- captures lazy-mount I/O |
 | `compact_idle` | 256 B | Each productive `q.compactIdle(1)` step; burst=100/pop=90% |
 | `compact_idle_heavy` | 492 B | Each productive `q.compactIdle(1)` step; burst=300/pop=90% (full mode only) |
 
@@ -54,7 +54,7 @@ Mount preload of 1000 records takes ~30 s to set up; progress is printed every 1
 
 ## Representative results
 
-**Operations** — full run, N=100:
+**Operations** -- full run, N=100:
 
 ```
   scenario       payload    n     p50      p90      p99      max
@@ -71,12 +71,12 @@ Mount preload of 1000 records takes ~30 s to set up; progress is printed every 1
   compact_idle_heavy   492B    300      4      2    5058ms    6745ms    6745ms    6745ms
 ```
 
-**Mount** — full run, 256 B payload:
+**Mount** -- full run, 256 B payload:
 
 ```
   preload   time      per-record
   -------   --------  ----------
-  0         13ms      —
+  0         13ms      -
   50        442ms     ~9ms
   200       4925ms    ~25ms
   500       14650ms   ~29ms
@@ -92,17 +92,19 @@ the payload copy or read. Everything below follows from that.
 
 ### Enqueue
 
-p50 is the steady-state append cost. At 256 B this is ~80 ms; at 1024 B it is ~165 ms —
+p50 is the steady-state append cost. At 256 B this is ~80 ms; at 1024 B it is ~165 ms --
 larger payloads cost more to write and flush.
 
 p99 and max reflect segment rollover events. When the current segment is full, the queue
 seals it, creates a new one, and publishes the manifest (~45 ms extra), then the record
 lands in the fresh segment. Per-record size on disk = 24 B overhead + payload, giving:
 
+```
   payload   records/segment   rollover frequency
   -------   ---------------   ------------------
   256 B     ~14               ~1 in 14  (~7%)
   1024 B     3                ~1 in 3   (~33%)
+```
 
 At 256 B, rollover cost appears only at p99 and max. At 1024 B, ~33 of 100 samples are
 rollovers, so rollover cost pushes p90 up as well.
@@ -116,7 +118,7 @@ scale with payload.
 The headline result: drain throughput is payload-size independent. The burst-drain
 workload performs as well at 1024 B as at 256 B.
 
-Rare flash/filesystem tail outliers exist (p99 ≈ max in some cases) with no queue-level
+Rare flash/filesystem tail outliers exist (p99 ~ max in some cases) with no queue-level
 cause.
 
 ### Compaction (compactIdle)
@@ -126,8 +128,8 @@ collects all live records, rewrites them into new segments, and removes the old 
 scales with the number of segment files opened and removed, and the volume of live data
 rewritten.
 
-The light workload (256 B/burst=100) completes in 783–942 ms per step. The heavy workload
-(492 B/burst=300) takes 5058–6745 ms per step — a single step can span dozens of input
+The light workload (256 B/burst=100) completes in 783-942 ms per step. The heavy workload
+(492 B/burst=300) takes 5058-6745 ms per step -- a single step can span dozens of input
 segments.
 
 **6.7 s is the planning number.** `compactIdle(1)` can block for up to ~7 s under the
@@ -137,8 +139,8 @@ heavy workload. Callers that cannot tolerate a stall of that length should call
 ### Mount
 
 Mount cost grows with backlog and segment history. A fully drained queue mounts in ~13 ms.
-From 200 records onward the cost is roughly linear at ~28 ms/record; the 50→200 jump is
-anomalous (4× records, ~11× time).
+From 200 records onward the cost is roughly linear at ~28 ms/record; the 50->200 jump is
+anomalous (4x records, ~11x time).
 
 If your use case can accumulate a large backlog across a reboot, treat mount latency as
 part of your boot budget. A 1000-record backlog takes ~28 s. Draining the queue before
@@ -154,13 +156,15 @@ is not a latency optimization.
 
 ## Tuning
 
+```
   operation     lever                         effect
   -----------   ----------------------------  ---------------------------------------------
   enqueue       smaller payload               fewer rollovers; lower p50 and p99
   enqueue       larger segment (e.g. 8 KB)    fewer rollovers but higher steady-state flush
                                               cost; trade-off needs a targeted benchmark
-  peek_pop      —                             no lever; drain throughput is payload-independent
+  peek_pop      -                             no lever; drain throughput is payload-independent
   compactIdle   call more frequently          prevents large cleanup batches; once a large
                                               backlog exists, a single step can still be
                                               expensive
   mount         drain before shutdown         keeps backlog near zero; fast boot
+```

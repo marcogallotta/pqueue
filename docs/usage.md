@@ -167,9 +167,9 @@ The raw-buffer API avoids caller-side allocation; benchmark results show it is
 not a latency win over the `std::string` API because LittleFS I/O dominates.
 
 **Error codes:**
-- `InvalidArgument` — `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
-- `RecordTooLarge` — `peek(MutableSpan)` when stored record exceeds `out.len`
-- `QueueEmpty` — `peekSize` or `peek` on an empty queue
+- `InvalidArgument` -- `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
+- `RecordTooLarge` -- `peek(MutableSpan)` when stored record exceeds `out.len`
+- `QueueEmpty` -- `peekSize` or `peek` on an empty queue
 
 ### `Outbox` raw callback
 
@@ -216,12 +216,12 @@ pqueue::Outbox outbox(qcfg, ocfg, mySend, ctx, myClock, clockCtx);
 
 ### Callbacks
 
-**`ClockCallback`** — must return monotonic milliseconds. Never use wall/NTP
+**`ClockCallback`** -- must return monotonic milliseconds. Never use wall/NTP
 time; the outbox uses it only for cooldown comparisons, so clock adjustments
 would cause spurious notDue results. On ESP32:
 `[](void*){ return esp_timer_get_time() / 1000; }`.
 
-**`SendCallback`** — called synchronously during `submit` and `drain`. Return
+**`SendCallback`** -- called synchronously during `submit` and `drain`. Return
 one of:
 
 | Decision | Meaning |
@@ -241,7 +241,7 @@ pqueue::SendResult mySend(void* ctx, const std::string& payload, const pqueue::R
 `RetryState::attempts` is the number of prior failed attempts, persisted in the
 envelope and available across reboots.
 
-**`RandCallback`** (optional) — supplies randomness for jitter. If `nullptr`,
+**`RandCallback`** (optional) -- supplies randomness for jitter. If `nullptr`,
 jitter is disabled regardless of `jitterPct`. On ESP32:
 ```cpp
 [](void*, uint32_t range) -> uint32_t { return esp_random() % range; }
@@ -283,8 +283,8 @@ On `RetryLater`, the outbox applies exponential backoff before the next drain
 attempt:
 
 ```
-delay = min(maxRetryDelayMs, initialRetryDelayMs × 2^attempts)
-delay ±= rand(0, delay × jitterPct / 100)   // only if RandCallback supplied
+delay = min(maxRetryDelayMs, initialRetryDelayMs * 2^attempts)
+delay = delay +/- rand(0, delay * jitterPct / 100)   // only if RandCallback supplied
 ```
 
 If the send callback sets `SendResult::retryAfterMs > 0`, that hint is used
@@ -306,7 +306,7 @@ reason.
 |---|---|---|
 | `initialRetryDelayMs` | 10000 | Base delay before the first retry (attempt 0 failed). Doubles each subsequent attempt up to `maxRetryDelayMs`. |
 | `maxRetryDelayMs` | 60000 | Ceiling for the exponential backoff. Keep modest: a cooling front record blocks all records behind it. |
-| `jitterPct` | 20 | ±% applied to the computed delay after capping. No effect unless a `RandCallback` is supplied. |
+| `jitterPct` | 20 | +/-% applied to the computed delay after capping. No effect unless a `RandCallback` is supplied. |
 | `maxDrainAttemptsPerSecond` | 5 | Rate cap for `drain` calls. 0 is treated as 1. Prevents tight retry loops from hammering the backend. |
 | `maxCorruptDropsPerLifetime` | 3 | Corrupt front records the outbox will silently discard per process lifetime before halting. 0 disables automatic dropping. |
 
@@ -338,7 +338,11 @@ cfg.baseUrl                         = "https://api.example.com";
 cfg.headers                         = headers;
 cfg.headerCount                     = 2;
 
-pqueue::http::Esp32ArduinoTransport transport(cfg.transport);
+pqueue::http::Esp32ArduinoTransportConfig transportCfg;
+transportCfg.caCertPath       = "/certs/server.pem";
+transportCfg.caCertFileSystem = &LittleFS;
+
+pqueue::http::Esp32ArduinoTransport transport(transportCfg);
 pqueue::http::Outbox outbox(cfg, transport, myClock, clockCtx);
 ```
 
@@ -388,7 +392,7 @@ classify callback if needed.
 // Called for every response, success or failure:
 cfg.onResponse = [](void*, const pqueue::http::RequestEnvelope& req,
                     const pqueue::http::Response& resp) {
-    log("POST %s → %d", req.path.c_str(), resp.statusCode);
+    log("POST %s -> %d", req.path.c_str(), resp.statusCode);
 };
 
 // Called when a record is permanently dropped:
@@ -404,9 +408,9 @@ cfg.onDrop = [](void*, const pqueue::http::RequestEnvelope* req,
 
 | Field | Default | Description |
 |---|---|---|
-| `queue` | — | Forwarded to the underlying `Queue`. See Queue config table. |
-| `outbox` | — | Forwarded to the inner `pqueue::Outbox`. See OutboxConfig table. |
-| `fullQueuePolicy` | `DropOldest` | What to do when the queue is full on `submitPost`. `DropOldest` evicts the front record; `ReturnError` returns `QueueFull`. |
+| `queue` | - | Forwarded to the underlying `Queue`. See Queue config table. |
+| `outbox` | - | Forwarded to the inner `pqueue::Outbox`. See OutboxConfig table. |
+| `fullQueuePolicy` | `DropOldest` | What to do when the queue is full on `submitPost`. `DropOldest` evicts the front record; `RejectNewest` returns `QueueFull`. |
 | `baseUrl` | `""` | Prepended to every `submitPost` path. Leading/trailing slashes are normalised. |
 | `headers` / `headerCount` | `nullptr` / `0` | Static headers sent with every request (e.g. auth tokens, content type). |
 | `classify` / `classifyContext` | `nullptr` | Override the default response classifier. Return `Sent`, `RetryLater`, or `Drop`. |
@@ -419,7 +423,7 @@ cfg.onDrop = [](void*, const pqueue::http::RequestEnvelope* req,
 
 Both `pqueue::Outbox` and `pqueue::http::Outbox` expose `compactIdle(maxSteps)`
 which forwards to the underlying `Queue`. Drive it the same way as with `Queue`
-directly — after a drain completes, during a reconnect delay, or in a
+directly -- after a drain completes, during a reconnect delay, or in a
 low-priority task:
 
 ```cpp
@@ -556,7 +560,7 @@ input segments it just replaced.
 ## Compaction behaviour
 
 The compaction strategy picks the range with the highest fraction of dead bytes.
-Ranges with no dead bytes are skipped entirely — compacting a fully-live range
+Ranges with no dead bytes are skipped entirely -- compacting a fully-live range
 would waste a step without reclaiming anything.
 
 Each step is bounded by `maxOutputSegments` (default 8), so individual steps

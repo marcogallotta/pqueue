@@ -252,7 +252,7 @@ Status Queue::enqueue(Span record) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "enqueue");
     }
     if (!store_->canEnqueue(record.len)) {
-        if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest) {
+        if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
             const Status evictStatus = evictFront();
             if (!evictStatus.ok()) {
                 return evictStatus;

@@ -11,7 +11,8 @@ Initial stable release of `pqueue`.
 - POSIX and Arduino LittleFS storage backends.
 - `Queue` API for enqueue, peek, pop, stats, validation, and idle compaction.
 - Raw-buffer queue API using `Span` / `MutableSpan` to avoid caller-side heap allocation on hot paths.
-- Store-and-forward `Outbox` with retry metadata, payload validation, and HTTP transport support.
+- Store-and-forward `Outbox` with persisted retry metadata, payload validation, backoff, and rate limiting.
+- HTTP outbox wrapper and transport interface for queued HTTP POST workloads.
 - Configurable full-queue behaviour, including drop-oldest mode for telemetry/outbox workloads.
 - Idle and full compaction support for reclaiming dead log data.
 - Validation and repair/doctor tooling for append-log stores.
@@ -23,3 +24,9 @@ Initial stable release of `pqueue`.
 
 - This release establishes the v1 on-disk format.
 - POSIX benchmark latency numbers are host-local only; device runtime numbers should be measured on target hardware.
+
+### Known limitations
+
+- Mount latency grows with backlog size and retained segment history; a large offline backlog can take seconds to replay on boot.
+- Idle compaction is bounded by step count, but a single step may still block for several seconds on slow flash or large ranges.
+- Built-in HTTP transports do not parse `Retry-After`; custom transports or classify callbacks may populate `retryAfterMs`.
