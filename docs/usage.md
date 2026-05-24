@@ -486,9 +486,8 @@ accumulate many files; too large and each compaction step processes more data
 than needed.
 
 With the default `maxOutputSegments=8` and `maxSegmentBytes=4096`, a heavy
-compaction step reads and writes up to ~32KB, predicting roughly 5s on device
-(ESP32S3 with QSPI flash). See the simulator section to predict your specific
-config.
+compaction step reads and writes up to ~32KB. Actual LittleFS latency depends on
+filesystem state and flash wear; see `docs/benchmark.md` for on-device numbers.
 
 
 ---
@@ -507,8 +506,8 @@ See `data/benchmark-results-posix.md` for the baseline and interpretation of eac
 scenario. The key metric for idle compaction is `hot_compactions = 0`, which confirms
 the clean-storage invariant holds for your workload parameters.
 
-For real device latency numbers, run `env:esp32s3-idle-sanity` on hardware. The POSIX
-benchmark does not predict device timing.
+The POSIX benchmark does not predict device timing. For on-device latency numbers,
+see `docs/benchmark.md`.
 
 
 ---

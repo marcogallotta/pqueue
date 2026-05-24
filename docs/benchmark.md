@@ -1,6 +1,6 @@
 # Benchmark
 
-Two complementary benchmarks cover performance: a POSIX structural benchmark for CI
+Two complementary tools cover performance: a POSIX structural benchmark for CI
 regression, and on-device tests for real LittleFS latency.
 
 ---
@@ -27,82 +27,7 @@ To update the baseline after an intentional change:
 make update-benchmark-baseline
 ```
 
----
-
-## On-device benchmark — real LittleFS latency
-
-The POSIX benchmark does **not** predict device latency. LittleFS op costs vary with
-filesystem load, file size, and flash wear state in ways a fixed-cost model cannot
-capture. For real timing numbers, run the on-device tests against actual hardware.
-
-### `env:esp32s3-benchmark` — structured latency benchmark
-
-The primary on-device benchmark. Measures application-visible `Queue` latency across
-six scenarios on real LittleFS. Uses the `std::string` Queue API — numbers reflect
-the full string-path overhead that production callers pay.
-
-Two environments share the same test file; a build flag selects the parameter set:
-
-| Environment | Mode | Approx. runtime | When to use |
-|---|---|---|---|
-| `esp32s3-benchmark` | full | ~10 min | Release measurement, baseline capture |
-| `esp32s3-benchmark-fast` | fast | ~1–2 min | Quick sanity check after a code change |
-
-Fast mode: `N=10`, `burst=20`, `cycles=1`, mount up to 200 records. Enough to confirm
-operations succeed and latency is in the right order of magnitude — not enough for a
-reliable distribution.
-
-```bash
-~/venvs/esp/bin/pio test -e esp32s3-benchmark --without-testing
-~/venvs/esp/bin/pio device monitor
-
-# or fast mode:
-~/venvs/esp/bin/pio test -e esp32s3-benchmark-fast --without-testing
-~/venvs/esp/bin/pio device monitor
-```
-
-The test runner (`pio test` without `--without-testing`) swallows non-Unity serial
-lines. Always use `--without-testing` + `pio device monitor` to see the benchmark
-output. Press the reset button after the monitor connects if the device has already
-booted. The first `bench config` line reports `mode=full` or `mode=fast`.
-
-**Config:** `reserved_bytes=2108736`, `max_segments=200`, matching the
-`esp32s3-idle-sanity` and `esp32s3-compaction` configs for direct comparability.
-
-**Scenarios and output columns:**
-
-| Scenario | Output line | Key fields |
-|---|---|---|
-| `enqueue` 256 B, 1 KB | `scenario=enqueue payload_b=N n=100` | `p50_us` `p90_us` `p99_us` `max_us` |
-| `peek_pop` 256 B, 1 KB | `scenario=peek_pop payload_b=N n=100` | `p50_us` `p90_us` `p99_us` `max_us` |
-| `mount` | `scenario=mount payload_b=256 preload=N` | `mount_us` — time for `statsResult()` after construction; captures lazy-mount I/O |
-| `compact_idle` per step | `scenario=compact_idle payload_b=256 cycle=N step=N` | `dt_us` — one productive `compactIdle(1)` step |
-| `compact_idle` summary | `scenario=compact_idle payload_b=256 summary` | `p50_us` `p90_us` `p99_us` `max_us` `total_us` `productive` `noops` |
-
-Mount sub-cases: preload = 0, 50, 200, 1000 records. The 1000-record preload takes
-~30 s; progress is printed every 100 records.
-
-Compaction workload: burst=100 / pop=90% / rec=256 B / cycles=2. Lighter than the
-`idle-sanity` heavy case; use it to characterise step latency without the wear of the
-500-burst workload.
-
-All output lines are prefixed `bench ` with `key=value` fields — grep-friendly and
-paste-ready into a spreadsheet.
-
-### `env:esp32s3-idle-sanity` — heavy compaction evidence run
-
-Measures worst-case `compactIdle(1)` step latency under the heavy workload
-(burst=500/pop=90%/rec=492B/cycles=3). Kept as the authoritative evidence run;
-`esp32s3-benchmark` is the structured release benchmark.
-
-```bash
-~/venvs/esp/bin/pio test -e esp32s3-idle-sanity --without-testing
-~/venvs/esp/bin/pio device monitor
-```
-
----
-
-## Workload matrix
+### Workload matrix
 
 | Scenario | N | Payload sizes |
 |---|---|---|
@@ -125,11 +50,9 @@ path, not a live send.
 **Mount capacity.** The mount scenarios use a fixed payload of 256 B. The setup store is
 configured with capacity sufficient for 1000 records at that size.
 
----
+### Output columns
 
-## Output columns
-
-### Enqueue, peek+pop, outbox submit, mount
+#### Enqueue, peek+pop, outbox submit, mount
 
 | Column | Description |
 |---|---|
@@ -138,7 +61,7 @@ configured with capacity sufficient for 1000 records at that size.
 | `read_bpp` | Bytes read per record (`bytesRead / N`) |
 | `writeFile` `writeAt` `readAt` `remove` | I/O op counts |
 
-### Idle compaction
+#### Idle compaction
 
 | Column | Description |
 |---|---|
@@ -147,9 +70,7 @@ configured with capacity sufficient for 1000 records at that size.
 | `hot_compactions` | Compactions triggered on the enqueue write path (should be 0) |
 | `cap_exhausted` | Enqueues rejected because live data filled the store |
 
----
-
-## `--strict` mode
+### `--strict` mode
 
 Exits 1 on correctness anomalies only. The following must always hold:
 
@@ -159,9 +80,7 @@ Exits 1 on correctness anomalies only. The following must always hold:
 - `mount`: `writeAt == 0`, `writeFile == 0`, `remove == 0`
 - `idle_compaction`: `hot_compactions == 0`, `cap_exhausted == 0`
 
----
-
-## Regression test
+### Regression test
 
 `tools/benchmark_regression.py` compares deterministic fields against the committed
 baseline. Numeric fields fail on increase, pass silently on decrease (improvement).
@@ -171,6 +90,94 @@ Compared fields: `writeFile`, `writeAt`, `readAt`, `remove`, `write_amp`, `read_
 `idle_steps`, `idle_noops`, `hot_compactions`, `cap_exhausted`.
 
 Not compared: wall-clock times (`p50_us` … `max_us`).
+
+---
+
+## On-device benchmarks — real LittleFS latency
+
+The POSIX benchmark does **not** predict device latency. LittleFS op costs vary with
+filesystem load, file size, and flash wear state in ways a fixed-cost model cannot
+capture. For real timing numbers, run the on-device tests against actual hardware.
+
+### `env:esp32s3-benchmark` — structured latency benchmark
+
+The primary on-device benchmark. Measures application-visible `Queue` latency across
+six scenarios on real LittleFS. Uses the `std::string` Queue API — numbers reflect
+the full string-path overhead that production callers pay.
+
+**Config:** `reserved_bytes=2108736`, `max_segments=200`, matching the
+`esp32s3-idle-sanity` and `esp32s3-compaction` configs for direct comparability.
+
+Two benchmark environments share the same test file; a build flag selects the parameter set:
+
+| Environment | Mode | Approx. runtime | N | burst | cycles | mount preloads |
+|---|---|---|---|---|---|---|
+| `esp32s3-benchmark` | full | ~10 min | 100 | 100 | 2 | 0 / 50 / 200 / 1000 |
+| `esp32s3-benchmark-fast` | fast | ~1–2 min | 10 | 20 | 1 | 0 / 50 / 200 |
+
+Fast mode is enough to confirm operations succeed and latency is in the right order of
+magnitude. Use full mode for release measurements and baseline capture.
+
+```bash
+~/venvs/esp/bin/pio test -e esp32s3-benchmark --without-testing
+~/venvs/esp/bin/pio device monitor
+
+# or fast mode:
+~/venvs/esp/bin/pio test -e esp32s3-benchmark-fast --without-testing
+~/venvs/esp/bin/pio device monitor
+```
+
+The test runner swallows non-Unity serial lines; always use `--without-testing` +
+`pio device monitor`. Press reset after the monitor connects if the device has already
+booted.
+
+**Output.** Each scenario emits a machine-readable `bench key=value` line as it
+completes (grep-friendly, paste-ready into a spreadsheet). After all tests finish, a
+human-readable summary table is printed in ms:
+
+```
+==================== results ====================
+
+  scenario     payload    n     p50      p90      p99      max
+  enqueue       256B   100      81ms     139ms     339ms     354ms
+  enqueue      1024B   100     168ms     533ms    1139ms    1322ms
+  peek_pop      256B   100      84ms     102ms     332ms     332ms
+  peek_pop     1024B   100      88ms     104ms     797ms     800ms
+
+  mount    payload  preload      time
+  mount     256B        0        13ms
+  mount     256B       50      1714ms
+  mount     256B      200     16132ms
+  mount     256B     1000     47161ms
+
+  scenario      payload  steps  noops    p50      p90      p99      max
+  compact_idle   256B      4      2     789ms     941ms     941ms     941ms
+
+=================================================
+```
+
+**Scenarios:**
+
+| Scenario | Payload sizes | What is timed |
+|---|---|---|
+| `enqueue` | 256 B, 1 KB | Each `q.enqueue()` call; payloads pre-built before the loop |
+| `peek_pop` | 256 B, 1 KB | Each `q.peek()` + `q.pop()` pair |
+| `mount` | 256 B (fixed) | `q.statsResult()` after construction — captures lazy-mount I/O |
+| `compact_idle` | 256 B | Each productive `q.compactIdle(1)` step; workload burst=100/pop=90% |
+
+Mount preload of 1000 records takes ~30 s to set up; progress is printed every 100
+records.
+
+### `env:esp32s3-idle-sanity` — heavy compaction evidence run
+
+Measures worst-case `compactIdle(1)` step latency under the heavy workload
+(burst=500/pop=90%/rec=492B/cycles=3). Kept as the authoritative evidence run for the
+worst-case production scenario; `esp32s3-benchmark` is the structured release benchmark.
+
+```bash
+~/venvs/esp/bin/pio test -e esp32s3-idle-sanity --without-testing
+~/venvs/esp/bin/pio device monitor
+```
 
 ---
 

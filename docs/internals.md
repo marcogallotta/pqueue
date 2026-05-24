@@ -469,31 +469,18 @@ stays at 1 with a single contiguous range.
 
 ---
 
-## On-device validation
+## Validation coverage
 
-**esp32s3-littlefs** (`tests/arduino/test_pqueue_littlefs/test_main.cpp`): LittleFS
-correctness suite. Covers basic FIFO, remount persistence, pop/rewrite/compact
-persistence across reboots, capacity behaviour, validate, record size boundaries,
-independent lock paths, outbox backlog persistence, retryable-failure semantics,
-compactIdle survival across remount, and DropOldest eviction.
-Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs`.
+The append-log design is validated by:
 
-**esp32s3-littlefs-slow** (`tests/arduino/test_pqueue_littlefs_slow/test_main.cpp`):
-Multi-reboot sequence tests. Each test triggers a deliberate reboot mid-operation
-and verifies state after remount. Covers: fifo-many, pop-remaining, rewrite-front,
-outbox-drain, compaction-reboot, and a churn pass without reboot.
-Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs-slow`.
+- **POSIX tests:** deterministic coverage of manifest election, segment replay, compaction transitions, torn-tail handling, validate, and regression scenarios. Run: `make -j12 test`.
+- **Arduino/LittleFS tests:** real filesystem persistence, reboot survival across mid-operation crashes, locking, outbox backlog, compactIdle durability, and DropOldest eviction.
+- **POSIX benchmark:** structural I/O regression — op counts, write amplification, idle compaction invariants. Run: `make -j12 benchmark`.
+- **On-device benchmark:** actual ESP32S3/LittleFS runtime latency for enqueue, peek+pop, mount, and compactIdle.
 
-**esp32s3-littlefs-soak** (`tests/arduino/test_pqueue_littlefs_soak/test_pqueue_littlefs_soak_test_main.cpp`):
-30-cycle enqueue/pop churn with segment rollover on real LittleFS. Verifies
-remount correctness under sustained load. Does not call compactIdle (compaction
-soak is covered by focused POSIX tests).
-Run: `~/venvs/esp/bin/pio test -e esp32s3-littlefs-soak`.
+Detailed benchmark commands and output formats live in `docs/benchmark.md`.
 
-**esp32s3-compaction** (`tests/arduino/test_pqueue_compaction/test_main.cpp`):
-Compaction benchmarker. Build and upload only: `~/venvs/esp/bin/pio test -e esp32s3-compaction --without-testing`.
-
-**Results** (ESP32S3, QSPI flash):
+**Compaction results** (ESP32S3, QSPI flash, `env:esp32s3-compaction`):
 
 | Config | Compactions | NoOps | MaxOutSegs | MaxLatency | Deadlocks | CapExhausted |
 |---|---|---|---|---|---|---|

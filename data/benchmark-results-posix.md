@@ -25,7 +25,8 @@ not a device latency predictor. Use it to catch:
 Wall-clock times (`p50_us` … `max_us`) are host-local and machine-dependent. They are
 informational only and excluded from CI regression comparisons.
 
-For real device latency numbers, see the on-device tests:
+For real device latency numbers, see the on-device tests (documented in `docs/benchmark.md`):
+- `env:esp32s3-benchmark` — structured latency benchmark: enqueue, peek+pop, mount, compactIdle
 - `env:esp32s3-idle-sanity` — worst-case `compactIdle(1)` step timing on real LittleFS
 
 ---
