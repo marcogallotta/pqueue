@@ -472,9 +472,9 @@ int main() {
     // dead bytes -- exactly the case compaction must handle.
     //
     // Parameters swept:
-    //   burstSize  -- records enqueued per offline cycle (12=short, 250=long outage)
+    //   burstSize  -- records enqueued per offline cycle (100=short, 2000=long outage)
     //   popRatio   -- fraction of queue drained per online cycle (25%=slow, 90%=fast)
-    //   recordSize -- bytes per record (8=small, 19=target app, 62=large)
+    //   recordSize -- bytes per record (64=small, 150=target app, 492=large)
     //
     // Record size matters because it determines records-per-segment, which controls
     // how many pops are needed before a segment can be eliminated by compaction.

@@ -455,12 +455,18 @@ abort at 1000 failures).
 
 Drives the real `AppendLogStore` API through two workload families:
 
-**Random interleaved.** enqP in {0.55, 0.65, 0.80}, record size 19 bytes.
+**Random interleaved.** enqP in {0.55, 0.65, 0.80}, record size 150 bytes.
 
 **Burst.** Models offline-consumer pattern: enqueue N, drain popRatio fraction,
-repeat. burstSize in {12, 60, 250}, popRatio in {0.25, 0.5, 0.9}, recordSize
-in {8, 19, 62} bytes. Parameters scaled ~1/8 from production values to keep
-runs fast while preserving records-per-segment ratio.
+repeat. burstSize in {100, 500, 2000}, popRatio in {0.25, 0.5, 0.9}, recordSize
+in {64, 150, 492} bytes. These match production LittleFS block sizes and payload
+sizes.
+
+The simulator calls `store.compactRange()` directly rather than going through
+`compactOneSegment()` → `narrowRange()`, so it is not subject to the
+`maxOutputSegments` bound. `MaxOutSeg` values in simulator output reflect
+unconstrained strategy behaviour, not the bounded per-step latency that
+production `compactIdle(1)` delivers.
 
 Compaction trigger: rising-edge on segment count (new segment written), fires
 if any range exceeds `deadRatioTrigger` or range count reaches
