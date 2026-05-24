@@ -106,7 +106,7 @@ six scenarios on real LittleFS. Uses the `std::string` Queue API — numbers ref
 the full string-path overhead that production callers pay.
 
 **Config:** `reserved_bytes=2108736`, `max_segments=200`, matching the
-`esp32s3-idle-sanity` and `esp32s3-compaction` configs for direct comparability.
+`esp32s3-compaction` config for direct comparability.
 
 Two benchmark environments share the same test file; a build flag selects the parameter set:
 
@@ -175,16 +175,127 @@ human-readable summary table is printed in ms:
 Mount preload of 1000 records takes ~30 s to set up; progress is printed every 100
 records.
 
-### `env:esp32s3-idle-sanity` — heavy compaction evidence run
+---
 
-Measures worst-case `compactIdle(1)` step latency under the heavy workload
-(burst=500/pop=90%/rec=492B/cycles=3). Kept as the authoritative evidence run for the
-worst-case production scenario; `esp32s3-benchmark` is the structured release benchmark.
+## Results discussion
 
-```bash
-~/venvs/esp/bin/pio test -e esp32s3-idle-sanity --without-testing
-~/venvs/esp/bin/pio device monitor
-```
+The dominant cost in every operation is LittleFS I/O: open, flush, and close each carry
+fixed overhead that dwarfs the actual read or write. Everything below follows from that.
+
+### Enqueue
+
+p50 is the steady-state append cost — open the tail segment, write the record, flush,
+close. At 256 B this is ~81 ms; at 1024 B it is ~169 ms, because a larger payload means
+a larger file write and higher flush cost.
+
+p99 and max reflect rotation events. The enqueue path checks capacity before writing:
+when the payload would overflow the tail segment, `rotateSegment` fires first (seal
+current segment + create new header + publish manifest, ~45 ms total), then the record
+lands in the fresh segment at low cost. Per-record size on disk = 24 B event overhead +
+payload, giving:
+
+  payload   record on disk   records/segment   rotation frequency
+  -------   --------------   ---------------   ------------------
+  256 B     ~280 B           ~14               ~1 in 14  (~7%)
+  1024 B    ~1048 B           3                ~1 in 3   (~33%)
+
+At 256 B, rotation cost appears only at p99 and max (~7 events in N=100). At 1024 B,
+~33 of 100 samples are rotations, so rotation cost pushes p90 up as well.
+
+### Peek+pop
+
+p50 is nearly payload-size independent: 83 ms at 256 B, 88 ms at 1024 B. Peek reads
+the payload from a sealed segment (~5 ms); pop appends a fixed 20-byte POP tombstone to
+the tail (~60 ms). The tombstone cost dominates and does not scale with payload size —
+the opposite of enqueue, where writing the full payload drives p50.
+
+The distribution is tighter than enqueue. p90 sits only ~20 ms above p50 because a
+20-byte tombstone almost never overflows the tail segment. In this benchmark it cannot
+overflow at all: after 100 enqueues the active tail holds 2 records at 256 B (580 B) or
+1 record at 1024 B (1068 B); 100 POP tombstones add 2000 B, leaving the tail at 2580 B
+and 3068 B respectively — both well under 4 KB.
+
+p99 and max are single-sample outliers (p99 ≈ max) with no queue-level explanation —
+most likely a LittleFS flash-state event (block erase or CoW) on that one write.
+
+The headline result: drain throughput is payload-size independent. The burst-drain
+workload performs as well at 1024 B as at 256 B.
+
+### Compaction (compactIdle)
+
+Each `compactIdle(1)` step selects the range with the highest dead/total byte ratio,
+collects all live records from it, rewrites them into new segment(s), publishes the
+manifest, and removes the old segments. Cost scales with the number of segment files
+opened and removed, and the volume of live data rewritten.
+
+The light workload (256 B/burst=100) completes in 787–947 ms per step. The heavy workload
+(492 B/burst=300) takes 5052–6753 ms per step — a single productive step in the heavy
+case can span dozens of input segment files, which is why the cost is seconds rather than
+milliseconds.
+
+**6.7 s is the caller's planning number.** `compactIdle(1)` blocks for up to ~7 s under
+the heavy workload. Callers that cannot tolerate a single stall of that length should
+call `compactIdle` more frequently to spread the work across smaller idle windows.
+
+### Mount latency
+
+Mount does a full replay on every boot: reads the manifest, then scans every event in
+every active segment to reconstruct the in-RAM record index (`records_`). The manifest
+stores segment layout only — record-level metadata (sequence, generation, payload offset
+and size) is never persisted and must be derived by replaying events. Every `readAt` call
+during the scan is a full open+seek+read+close cycle on LittleFS (~5 ms each); each
+ENQUEUE event currently requires 2 `readAt` calls, plus one segment-header `readAt` per
+segment.
+
+  preload   time      per-record
+  -------   --------  ----------
+  0         13ms      —
+  50        1713ms    ~34ms
+  200       16137ms   ~80ms
+  500       30795ms   ~62ms
+  1000      47148ms   ~47ms
+
+The 13 ms baseline is manifest reads plus an empty directory scan. The 50→200 jump
+(4× records, 9.4× time) is anomalous and not fully characterised — likely LittleFS
+directory traversal cost growing with segment count. From 200 records onward the cost
+is roughly linear.
+
+**The first fix to try is whole-segment reads.** The current per-event `readAt` pattern
+makes I/O cost O(events × file-open overhead). Replacing it with a single `readFile` per
+segment (~5 ms flat for 4 KB) and parsing events from a RAM buffer should reduce the
+dominant per-event open/seek/read/close cost significantly. This is a contained change —
+the scan logic is unchanged, only how it fetches data. Re-benchmark after this before
+considering a persisted checkpoint index: store `{seq, gen, offset, size}` per record,
+validate against the manifest epoch on mount, and replay only events written after the
+checkpoint.
+
+Today mount is acceptable for the production pattern — queue is typically near-empty
+after a successful drain, so boot-time replay is fast. A 1000-record backlog at boot
+(47 s) is a documented worst case that the whole-segment fix should close before release.
+
+### Raw-buffer API vs std::string
+
+`enqueue(Span)` and `peek(MutableSpan)` produce identical latency to their `std::string`
+counterparts at every percentile (within 1 ms). Neither path is zero-copy: `enqueue(Span)`
+copies into a `std::string` internally; `peek(MutableSpan)` reads into a temporary
+`std::string` then copies out. A 256 B memcpy costs ~1 µs; a LittleFS open+flush costs
+~24 ms. The copy disappears into noise.
+
+The result confirms the `std::string` API overhead is not the latency issue. The
+raw-buffer API is for callers that want to avoid a caller-side allocation, not for
+hot-path latency.
+
+### Tuning summary
+
+  operation     lever                       effect
+  -----------   --------------------------  -----------------------------------------------
+  enqueue       smaller payload             fewer rotations; lower p50 and p99
+  enqueue       larger segment (e.g. 8 KB)  fewer rotations but higher steady-state flush
+                                            cost; trade-off needs a targeted benchmark
+  peek_pop      —                           no lever; tombstone write is the minimum;
+                                            drain throughput is already payload-independent
+  compactIdle   call more frequently        spreads work across more idle windows;
+                                            per-step cost is unchanged
 
 ---
 
