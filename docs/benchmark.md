@@ -112,7 +112,7 @@ Two benchmark environments share the same test file; a build flag selects the pa
 
 | Environment | Mode | Approx. runtime | N | burst | cycles | mount preloads |
 |---|---|---|---|---|---|---|
-| `esp32s3-benchmark` | full | ~5 min | 100 | 100 | 2 | 0 / 50 / 200 / 500 / 1000 |
+| `esp32s3-benchmark` | full | ~17 min | 100 | 100 | 2 | 0 / 50 / 200 / 500 / 1000 |
 | `esp32s3-benchmark-fast` | fast | ~1–2 min | 10 | 20 | 1 | 0 / 50 / 200 |
 
 Fast mode is enough to confirm operations succeed and latency is in the right order of
@@ -143,19 +143,19 @@ human-readable summary table is printed in ms:
   enqueue      1024B   100     168ms     533ms    1139ms    1322ms
   peek_pop      256B   100      84ms     102ms     332ms     332ms
   peek_pop     1024B   100      88ms     104ms     797ms     800ms
-  raw_enqueue   256B   100       ?ms       ?ms       ?ms       ?ms
-  raw_peek_pop  256B   100       ?ms       ?ms       ?ms       ?ms
+  raw_enqueue   256B   100      80ms     136ms     334ms     351ms
+  raw_peek_pop  256B   100      83ms     102ms     330ms     330ms
 
   mount    payload  preload      time
   mount     256B        0        13ms
-  mount     256B       50      1714ms
-  mount     256B      200     16132ms
-  mount     256B      500        ?ms
-  mount     256B     1000     47161ms
+  mount     256B       50      1713ms
+  mount     256B      200     16137ms
+  mount     256B      500     30795ms
+  mount     256B     1000     47148ms
 
   scenario           payload  burst  steps  noops    p50      p90      p99      max
-  compact_idle        256B    100      4      2     789ms     941ms     941ms     941ms
-  compact_idle_heavy  492B    300      ?      ?       ?ms       ?ms       ?ms       ?ms
+  compact_idle        256B    100      4      2     787ms     947ms     947ms     947ms
+  compact_idle_heavy  492B    300      4      2    5052ms    6753ms    6753ms    6753ms
 
 =================================================
 ```
