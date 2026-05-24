@@ -101,7 +101,7 @@ inline void plantSegment(std::uint32_t gen, std::uint32_t firstSeq = 0, const st
 struct SegmentSpec {
     std::uint32_t gen;
     std::uint32_t firstSeq = 0;
-    std::string body;
+    std::string body = {};
 };
 
 struct LayoutSpec {
