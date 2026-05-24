@@ -15,5 +15,18 @@
   },
   "build": {
     "includeDir": "src"
+  },
+  "export": {
+    "exclude": [
+      ".git",
+      ".gitignore",
+      ".github",
+      ".gitmodules",
+      ".pio",
+      "build",
+      "docs/.gitignore",
+      "tests",
+      "third_party/doctest"
+    ]
   }
 }
