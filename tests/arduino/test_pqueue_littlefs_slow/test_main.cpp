@@ -45,6 +45,7 @@ pqueue::Config appendLogQueueConfigForBase(const char* basePath) {
 
 struct FakeSender {
     pqueue::SendDecision decision = pqueue::SendDecision::Sent;
+    std::vector<pqueue::SendDecision> decisions;
     std::uint16_t calls = 0;
     std::string lastPayload;
     std::uint8_t lastAttempts = 0;
@@ -57,7 +58,12 @@ pqueue::SendResult fakeSend(void* context, const std::string& payload, const pqu
     sender->calls += 1;
     sender->lastPayload  = payload;
     sender->lastAttempts = retry.attempts;
-    return {sender->decision};
+    pqueue::SendDecision d = sender->decision;
+    if (!sender->decisions.empty()) {
+        d = sender->decisions.front();
+        sender->decisions.erase(sender->decisions.begin());
+    }
+    return {d};
 }
 
 pqueue::OutboxConfig outboxConfig() {
@@ -231,20 +237,38 @@ void test_reboot_rewrite_front() {
     if (phase == 0) {
         cleanLittleFs();
         {
-            pqueue::Queue queue(appendLogQueueConfigForBase(kBasePath));
-            TEST_ASSERT_TRUE(queue.enqueue("old-front").ok());
-            TEST_ASSERT_TRUE(queue.enqueue("tail").ok());
-            TEST_ASSERT_TRUE(queue.rewriteFront("new-front").ok());
+            FakeSender retrying;
+            retrying.decision = pqueue::SendDecision::RetryLater;
+            pqueue::Outbox outbox(appendLogQueueConfigForBase(kBasePath), outboxConfig(),
+                                  fakeSend, &retrying, fakeClock, nullptr);
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued),
+                                  static_cast<int>(outbox.submit("old-front").status));
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued),
+                                  static_cast<int>(outbox.submit("tail").status));
+            const pqueue::DrainResult r = outbox.drain();
+            TEST_ASSERT_EQUAL_UINT16(1, r.attempts);
+            TEST_ASSERT_EQUAL_UINT16(0, r.sent);
+            TEST_ASSERT_FALSE(r.queueError);
         }
         rebootTo(SlowTest::RewriteFront, 1);
     }
 
     TEST_ASSERT_EQUAL_UINT8(1, phase);
     {
-        pqueue::Queue queue(appendLogQueueConfigForBase(kBasePath));
-        expectFrontAndPop(queue, "new-front");
-        expectFrontAndPop(queue, "tail");
-        expectQueueEmpty(queue);
+        FakeSender succeeding;
+        succeeding.decision = pqueue::SendDecision::Sent;
+        pqueue::Outbox outbox(appendLogQueueConfigForBase(kBasePath), outboxConfig(),
+                              fakeSend, &succeeding, fakeClock, nullptr);
+        TEST_ASSERT_EQUAL_UINT32(2, outbox.stats().count);
+        pqueue::DrainResult d1 = outbox.drain();
+        TEST_ASSERT_EQUAL_UINT16(1, d1.sent);
+        TEST_ASSERT_EQUAL_STRING("old-front", succeeding.lastPayload.c_str());
+        TEST_ASSERT_EQUAL_UINT8(2, succeeding.lastAttempts);
+        pqueue::DrainResult d2 = outbox.drain();
+        TEST_ASSERT_EQUAL_UINT16(1, d2.sent);
+        TEST_ASSERT_EQUAL_STRING("tail", succeeding.lastPayload.c_str());
+        TEST_ASSERT_EQUAL_UINT8(0, succeeding.lastAttempts);
+        TEST_ASSERT_EQUAL_UINT32(0, outbox.stats().count);
     }
     completeSlowTest();
 }
@@ -294,34 +318,48 @@ void test_reboot_outbox_drain() {
 void test_reboot_compaction() {
     const std::uint8_t phase = phaseFor(SlowTest::CompactionReboot);
 
-    // maxSegmentBytes=45: exactly one 1-byte record per segment
-    // (20 seg header + 16 enqueue header + 1 payload + 8 trailer = 45).
+    // Outbox envelope overhead is 14 bytes; 1-byte payload → 15 bytes stored.
+    // maxSegmentBytes=59 = 20 (seg header) + 16 (event header) + 15 (envelope) + 8 (trailer):
+    // exactly one record per segment, so A/B/C each seal a segment and the rewrite of B
+    // leaves dead bytes for compactIdle to reclaim.
     pqueue::Config cfg = appendLogQueueConfigForBase(kBasePath);
-    cfg.maxSegmentBytes = 45;
+    cfg.maxSegmentBytes = 59;
 
     if (phase == 0) {
         cleanLittleFs();
         {
-            pqueue::Queue queue(cfg);
-            TEST_ASSERT_TRUE(queue.enqueue("A").ok());
-            TEST_ASSERT_TRUE(queue.enqueue("B").ok());
-            TEST_ASSERT_TRUE(queue.enqueue("C").ok());
-            TEST_ASSERT_EQUAL_UINT32(3, queue.stats().count);
+            FakeSender retrying;
+            retrying.decision = pqueue::SendDecision::RetryLater;
+            pqueue::Outbox outbox(cfg, outboxConfig(), fakeSend, &retrying, fakeClock, nullptr);
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued),
+                                  static_cast<int>(outbox.submit("A").status));
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued),
+                                  static_cast<int>(outbox.submit("B").status));
+            TEST_ASSERT_EQUAL_INT(static_cast<int>(pqueue::SubmitStatus::Queued),
+                                  static_cast<int>(outbox.submit("C").status));
+            TEST_ASSERT_EQUAL_UINT32(3, outbox.stats().count);
         }
         rebootTo(SlowTest::CompactionReboot, 1);
     }
 
-    // Phase 1: pop A, rewrite B -> X, compactIdle -- all in one boot so that
+    // Phase 1: drain A (Sent), rewrite B via RetryLater, compactIdle -- all in one boot so that
     // activeTailDependenciesTracked_ is true when compaction runs and the active
     // segment (containing the rewrite event) is folded into the compaction range.
     if (phase == 1) {
         {
-            pqueue::Queue queue(cfg);
-            TEST_ASSERT_EQUAL_UINT32(3, queue.stats().count);
-            TEST_ASSERT_TRUE(queue.pop().ok());              // drop A
-            TEST_ASSERT_TRUE(queue.rewriteFront("X").ok());  // B -> X
-            TEST_ASSERT_EQUAL_UINT32(2, queue.stats().count);
-            const pqueue::CompactIdleResult result = queue.compactIdle(16);
+            FakeSender sender;
+            sender.decisions = {pqueue::SendDecision::Sent, pqueue::SendDecision::RetryLater};
+            pqueue::Outbox outbox(cfg, outboxConfig(), fakeSend, &sender, fakeClock, nullptr);
+            TEST_ASSERT_EQUAL_UINT32(3, outbox.stats().count);
+            pqueue::DrainResult d1 = outbox.drain();
+            TEST_ASSERT_EQUAL_UINT16(1, d1.sent);
+            TEST_ASSERT_FALSE(d1.queueError);
+            pqueue::DrainResult d2 = outbox.drain();
+            TEST_ASSERT_EQUAL_UINT16(1, d2.attempts);
+            TEST_ASSERT_EQUAL_UINT16(0, d2.sent);
+            TEST_ASSERT_FALSE(d2.queueError);
+            TEST_ASSERT_EQUAL_UINT32(2, outbox.stats().count);
+            const pqueue::CompactIdleResult result = outbox.compactIdle(16);
             TEST_ASSERT_TRUE(result.status.ok());
             TEST_ASSERT_GREATER_THAN(0u, static_cast<std::uint32_t>(result.compactions));
         }
@@ -330,10 +368,18 @@ void test_reboot_compaction() {
 
     TEST_ASSERT_EQUAL_UINT8(2, phase);
     {
-        pqueue::Queue queue(cfg);
-        expectFrontAndPop(queue, "X");
-        expectFrontAndPop(queue, "C");
-        expectQueueEmpty(queue);
+        FakeSender succeeding;
+        succeeding.decision = pqueue::SendDecision::Sent;
+        pqueue::Outbox outbox(cfg, outboxConfig(), fakeSend, &succeeding, fakeClock, nullptr);
+        TEST_ASSERT_EQUAL_UINT32(2, outbox.stats().count);
+        pqueue::DrainResult d1 = outbox.drain();
+        TEST_ASSERT_EQUAL_UINT16(1, d1.sent);
+        TEST_ASSERT_EQUAL_STRING("B", succeeding.lastPayload.c_str());
+        TEST_ASSERT_GREATER_THAN(0u, static_cast<std::uint32_t>(succeeding.lastAttempts));
+        pqueue::DrainResult d2 = outbox.drain();
+        TEST_ASSERT_EQUAL_UINT16(1, d2.sent);
+        TEST_ASSERT_EQUAL_STRING("C", succeeding.lastPayload.c_str());
+        TEST_ASSERT_EQUAL_UINT32(0, outbox.stats().count);
     }
     completeSlowTest();
 }
@@ -342,8 +388,7 @@ void test_churn_without_reboot() {
     cleanLittleFs();
 
     // maxSegmentBytes=128: 3-char payloads use 27 bytes/record, 4 records per segment.
-    // Five rounds of enqueue/rewriteFront/pop/compactIdle exercise rotation and
-    // compaction.
+    // Five rounds of enqueue/pop/compactIdle exercise rotation and compaction.
     pqueue::Config cfg = appendLogQueueConfigForBase(kBasePath);
     cfg.maxSegmentBytes = 128;
 
@@ -355,11 +400,6 @@ void test_churn_without_reboot() {
             const std::string rec = numbered("r", round * 6 + i);
             TEST_ASSERT_TRUE(queue.enqueue(rec).ok());
             model.push_back(rec);
-        }
-        if (!model.empty()) {
-            const std::string rewritten = numbered("x", round);
-            TEST_ASSERT_TRUE(queue.rewriteFront(rewritten).ok());
-            model.front() = rewritten;
         }
         const int toPop = static_cast<int>(model.size()) / 2;
         for (int i = 0; i < toPop; ++i) {
