@@ -34,7 +34,7 @@ struct Response {
     int statusCode = kNoStatusCode;
     TransportError error = TransportError::Unknown;
     std::string body;
-    std::uint32_t retryAfterMs = 0; // optional; custom transports or classify callbacks may set
+    std::uint32_t retryAfterMs = 0; // optional; custom transports may set
 };
 
 struct TransportConfig {

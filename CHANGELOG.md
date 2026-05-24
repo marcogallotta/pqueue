@@ -29,5 +29,5 @@ Initial stable release of `pqueue`.
 
 - Mount latency grows with backlog size and retained segment history; a large offline backlog can take seconds to replay on boot.
 - Idle compaction is bounded by step count, but a single step may still block for several seconds on slow flash or large ranges.
-- Built-in HTTP transports do not parse `Retry-After`; custom transports or classify callbacks may populate `retryAfterMs`.
+- Built-in HTTP transports do not parse `Retry-After`; custom transports may populate `retryAfterMs`.
 - Doctor dump commands copy raw binary files off-device; there is no restore path. Use dumps for offline debugging only.

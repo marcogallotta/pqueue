@@ -319,8 +319,7 @@ cfg.classifyContext = nullptr;
 
 When a transport sets `Response::retryAfterMs`, the outbox honours it (capped
 at `maxRetryDelayMs`). The built-in transports do not yet parse the
-`Retry-After` header; populate `retryAfterMs` from your own transport or
-classify callback if needed.
+`Retry-After` header; populate `retryAfterMs` from your own transport if needed.
 
 ### Observability callbacks
 
