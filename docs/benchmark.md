@@ -41,15 +41,30 @@ The primary on-device benchmark. Measures application-visible `Queue` latency ac
 six scenarios on real LittleFS. Uses the `std::string` Queue API — numbers reflect
 the full string-path overhead that production callers pay.
 
+Two environments share the same test file; a build flag selects the parameter set:
+
+| Environment | Mode | Approx. runtime | When to use |
+|---|---|---|---|
+| `esp32s3-benchmark` | full | ~10 min | Release measurement, baseline capture |
+| `esp32s3-benchmark-fast` | fast | ~1–2 min | Quick sanity check after a code change |
+
+Fast mode: `N=10`, `burst=20`, `cycles=1`, mount up to 200 records. Enough to confirm
+operations succeed and latency is in the right order of magnitude — not enough for a
+reliable distribution.
+
 ```bash
 ~/venvs/esp/bin/pio test -e esp32s3-benchmark --without-testing
+~/venvs/esp/bin/pio device monitor
+
+# or fast mode:
+~/venvs/esp/bin/pio test -e esp32s3-benchmark-fast --without-testing
 ~/venvs/esp/bin/pio device monitor
 ```
 
 The test runner (`pio test` without `--without-testing`) swallows non-Unity serial
 lines. Always use `--without-testing` + `pio device monitor` to see the benchmark
 output. Press the reset button after the monitor connects if the device has already
-booted.
+booted. The first `bench config` line reports `mode=full` or `mode=fast`.
 
 **Config:** `reserved_bytes=2108736`, `max_segments=200`, matching the
 `esp32s3-idle-sanity` and `esp32s3-compaction` configs for direct comparability.

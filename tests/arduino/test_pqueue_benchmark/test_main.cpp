@@ -19,12 +19,22 @@
 
 namespace {
 
-constexpr const char*   kBasePath  = "/pqueue_bench";
+constexpr const char* kBasePath = "/pqueue_bench";
+constexpr float       kPopRatio = 0.90f;
+
+#ifdef PQUEUE_BENCH_FAST
+constexpr std::uint32_t kEnqN      = 10;
+constexpr std::uint32_t kPpN       = 10;
+constexpr std::uint32_t kBurst     = 20;
+constexpr std::uint32_t kCycles    = 1;
+constexpr std::uint32_t kMountMax  = 200;
+#else
 constexpr std::uint32_t kEnqN      = 100;
 constexpr std::uint32_t kPpN       = 100;
 constexpr std::uint32_t kBurst     = 100;
-constexpr float         kPopRatio  = 0.90f;
 constexpr std::uint32_t kCycles    = 2;
+constexpr std::uint32_t kMountMax  = 1000;
+#endif
 
 static void formatFs() {
     LittleFS.end();
@@ -239,7 +249,7 @@ void test_mount() {
     runMountCase(0);
     runMountCase(50);
     runMountCase(200);
-    runMountCase(1000);
+    if constexpr (kMountMax >= 1000) runMountCase(1000);
 }
 
 void setup() {
@@ -247,9 +257,14 @@ void setup() {
     delay(2000);
     Serial.println("=== pqueue on-device benchmark ===");
     Serial.printf(
-        "bench config reserved_bytes=%u max_segments=%u"
-        " enq_n=%u pp_n=%u burst=%u pop_ratio=%.2f cycles=%u\n",
-        2108736u, 200u, kEnqN, kPpN, kBurst, (double)kPopRatio, kCycles);
+        "bench config mode=%s reserved_bytes=%u max_segments=%u"
+        " enq_n=%u pp_n=%u burst=%u pop_ratio=%.2f cycles=%u mount_max=%u\n",
+#ifdef PQUEUE_BENCH_FAST
+        "fast",
+#else
+        "full",
+#endif
+        2108736u, 200u, kEnqN, kPpN, kBurst, (double)kPopRatio, kCycles, kMountMax);
     Serial.flush();
     UNITY_BEGIN();
     RUN_TEST(test_enqueue_256b);
