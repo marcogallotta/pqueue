@@ -112,7 +112,7 @@ Two benchmark environments share the same test file; a build flag selects the pa
 
 | Environment | Mode | Approx. runtime | N | burst | cycles | mount preloads |
 |---|---|---|---|---|---|---|
-| `esp32s3-benchmark` | full | ~10 min | 100 | 100 | 2 | 0 / 50 / 200 / 1000 |
+| `esp32s3-benchmark` | full | ~5 min | 100 | 100 | 2 | 0 / 50 / 200 / 500 / 1000 |
 | `esp32s3-benchmark-fast` | fast | ~1–2 min | 10 | 20 | 1 | 0 / 50 / 200 |
 
 Fast mode is enough to confirm operations succeed and latency is in the right order of
@@ -143,15 +143,19 @@ human-readable summary table is printed in ms:
   enqueue      1024B   100     168ms     533ms    1139ms    1322ms
   peek_pop      256B   100      84ms     102ms     332ms     332ms
   peek_pop     1024B   100      88ms     104ms     797ms     800ms
+  raw_enqueue   256B   100       ?ms       ?ms       ?ms       ?ms
+  raw_peek_pop  256B   100       ?ms       ?ms       ?ms       ?ms
 
   mount    payload  preload      time
   mount     256B        0        13ms
   mount     256B       50      1714ms
   mount     256B      200     16132ms
+  mount     256B      500        ?ms
   mount     256B     1000     47161ms
 
-  scenario      payload  steps  noops    p50      p90      p99      max
-  compact_idle   256B      4      2     789ms     941ms     941ms     941ms
+  scenario           payload  burst  steps  noops    p50      p90      p99      max
+  compact_idle        256B    100      4      2     789ms     941ms     941ms     941ms
+  compact_idle_heavy  492B    300      ?      ?       ?ms       ?ms       ?ms       ?ms
 
 =================================================
 ```
@@ -160,10 +164,13 @@ human-readable summary table is printed in ms:
 
 | Scenario | Payload sizes | What is timed |
 |---|---|---|
-| `enqueue` | 256 B, 1 KB | Each `q.enqueue()` call; payloads pre-built before the loop |
-| `peek_pop` | 256 B, 1 KB | Each `q.peek()` + `q.pop()` pair |
+| `enqueue` | 256 B, 1 KB | Each `q.enqueue(std::string)` call; payloads pre-built before the loop |
+| `peek_pop` | 256 B, 1 KB | Each `q.peek(std::string)` + `q.pop()` pair |
+| `raw_enqueue` | 256 B | Each `q.enqueue(Span)` call; measures raw-buffer path vs string path (full mode only) |
+| `raw_peek_pop` | 256 B | Each `q.peek(MutableSpan)` + `q.pop()` pair (full mode only) |
 | `mount` | 256 B (fixed) | `q.statsResult()` after construction — captures lazy-mount I/O |
-| `compact_idle` | 256 B | Each productive `q.compactIdle(1)` step; workload burst=100/pop=90% |
+| `compact_idle` | 256 B | Each productive `q.compactIdle(1)` step; workload burst=100/pop=90%/cycles=2 |
+| `compact_idle_heavy` | 492 B | Each productive `q.compactIdle(1)` step; heavier workload burst=300/pop=90%/cycles=2 (full mode only) |
 
 Mount preload of 1000 records takes ~30 s to set up; progress is printed every 100
 records.
