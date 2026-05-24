@@ -161,11 +161,10 @@ unreadable or corrupt (CRC mismatch or invalid record structure).
 `changed=0 code=front_not_corrupt` means the queue is healthy; not an error.
 
 **`--recover-stale-lock`** -- removes a stale `.pqueue.lock` left by a crashed
-process. Only meaningful on POSIX/desktop where the lock backend writes a PID
-file; on ESP32/LittleFS the lock is an in-process FreeRTOS mutex with no
-persistent state, so this command always returns `changed=0 code=not_applicable`
-there. `changed=0 code=lock_not_stale` means the POSIX lock file exists but is
-held by a live process; not an error.
+POSIX process. On ESP32/LittleFS the lock is an in-process FreeRTOS mutex with
+no persistent state; this command always returns `changed=0 code=not_applicable`
+there. `changed=0 code=lock_not_stale` means the POSIX lock file is held by a
+live process; not an error.
 
 **`--format`** -- destructively reinitializes the queue. Sends
 `FORMAT CONFIRM <name>` to the device, which checks the name matches the active

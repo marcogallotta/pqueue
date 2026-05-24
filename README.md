@@ -13,7 +13,7 @@ that remounts cleanly.
 - Not a general-purpose embedded queue. The AppendLog compaction model assumes
   bursty write / batch-drain cycles. Continuous random enqueue/pop will work
   but is not the tuned path.
-- Not concurrent. All operations serialize. A background compaction task would
+- Not concurrent. All operations serialise. A background compaction task would
   still block foreground I/O -- LittleFS has no parallelism. Drive compaction
   from your main loop instead.
 
