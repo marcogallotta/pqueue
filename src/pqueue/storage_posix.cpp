@@ -64,11 +64,12 @@ public:
 
     Status recoverStale(const std::string& name, const std::string&) override {
         std::error_code ec;
-        if (!std::filesystem::exists(path(name), ec)) {
-            return Status::noOp();
-        }
+        const bool exists = std::filesystem::exists(path(name), ec);
         if (ec) {
             return Status::failure(StatusCode::ReadFailed, "failed to inspect queue lock file", ec.value());
+        }
+        if (!exists) {
+            return Status::noOp();
         }
         if (removeStalePosixLock(name)) {
             return Status::success();
