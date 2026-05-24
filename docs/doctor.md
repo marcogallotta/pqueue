@@ -31,13 +31,13 @@ void loop() {
 
 Build and flash (from the repo root):
 
-```
+```bash
 pio run -d tools/esp32_pqueue_doctor --target upload
 ```
 
 Then connect without `--trigger`:
 
-```
+```bash
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --target api_outbox:/pqueue_api_spool \
@@ -65,7 +65,7 @@ if (Serial.available()) {
 
 Then send the trigger string with `--trigger`:
 
-```
+```bash
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --trigger PQUEUE_DOCTOR \
@@ -81,20 +81,20 @@ Doctor mode is blocking: normal app sync, drain, and log output is paused until
 
 ## Targets
 
-A target is a name and a LittleFS base path, plus optional queue config overrides.
-Config overrides must match what the app passes to `pqueue::Config` -- if they
-differ, validate/compact/format will behave differently from the app.
+A target is a name and a LittleFS base path, plus optional queue config
+overrides. Config overrides must match what the app passes to `pqueue::Config`
+-- if they differ, validate/compact/format will behave differently from the app.
 
 ### Command line
 
-```
+```text
 --target NAME:PATH
 --queue-config KEY=VAL   # applies to all --target targets; repeatable
 ```
 
 Example:
 
-```
+```text
 --target api_outbox:/pqueue_api_spool --queue-config reservedBytes=262144
 ```
 
@@ -102,7 +102,7 @@ Example:
 
 One target per line. Pass with `--targets FILE`. Config overrides are inline:
 
-```
+```text
 # name          path                    config
 api_outbox      /pqueue_api_spool       reservedBytes=262144
 ```
@@ -111,13 +111,26 @@ Multiple targets are processed in order; each gets its own command run.
 
 ### Config keys
 
-| Key              | Type     | Constraint | Default  |
-|------------------|----------|------------|----------|
-| reservedBytes    | uint32   | > 0        | 131072   |
-| recordSizeBytes  | uint32   | > 0        | 492      |
-| maxSegmentBytes  | uint32   | > 0        | 4096     |
-| minFreeBytes     | uint32   | >= 0       | 32768    |
-| maxSegments      | uint8    | 1-255      | 16       |
+- **Key:** reservedBytes
+  - **Type:** uint32
+  - **Constraint:** > 0
+  - **Default:** 131072
+- **Key:** recordSizeBytes
+  - **Type:** uint32
+  - **Constraint:** > 0
+  - **Default:** 492
+- **Key:** maxSegmentBytes
+  - **Type:** uint32
+  - **Constraint:** > 0
+  - **Default:** 4096
+- **Key:** minFreeBytes
+  - **Type:** uint32
+  - **Constraint:** >= 0
+  - **Default:** 32768
+- **Key:** maxSegments
+  - **Type:** uint8
+  - **Constraint:** 1-255
+  - **Default:** 16
 
 Defaults shown are pqueue library defaults, not necessarily the app's production
 values. Always check the app config and pass overrides where they differ.
@@ -143,7 +156,7 @@ ranges, dangling segment count. Returns `ok=0` if mount or list failed.
 **`--validate`** -- runs `Queue::validate()`. Prints each issue with a
 `repair_hint`. Result includes `issues=N`.
 
-```
+```text
 RESULT command=VALIDATE ok=0 issues=1
 issue code=record_crc_mismatch message=... repair_hint=drop_front_if_corrupt
 ```
@@ -157,8 +170,8 @@ Result includes `steps`, `compactions`, `more_work`.
 total steps are exhausted.
 
 **`--drop-front-if-corrupt`** -- drops the front record only if it is proven
-unreadable or corrupt (CRC mismatch or invalid record structure).
-`changed=0 code=front_not_corrupt` means the queue is healthy; not an error.
+unreadable or corrupt (CRC mismatch or invalid record structure). `changed=0
+code=front_not_corrupt` means the queue is healthy; not an error.
 
 **`--recover-stale-lock`** -- removes a stale `.pqueue.lock` left by a crashed
 POSIX process. On ESP32/LittleFS the lock is an in-process FreeRTOS mutex with
@@ -166,9 +179,9 @@ no persistent state; this command always returns `changed=0 code=not_applicable`
 there. `changed=0 code=lock_not_stale` means the POSIX lock file is held by a
 live process; not an error.
 
-**`--format`** -- destructively reinitializes the queue. Sends
-`FORMAT CONFIRM <name>` to the device, which checks the name matches the active
-target. Prints a dump recommendation before executing.
+**`--format`** -- destructively reinitializes the queue. Sends `FORMAT CONFIRM
+<name>` to the device, which checks the name matches the active target. Prints a
+dump recommendation before executing.
 
 ### Dump
 
@@ -189,11 +202,12 @@ for debugging only.**
 
 ## Common workflows
 
-Examples below use trigger mode. Omit `--trigger` when using standalone firmware.
+Examples below use trigger mode. Omit `--trigger` when using standalone
+firmware.
 
 ### Routine health check
 
-```
+```bash
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --trigger PQUEUE_DOCTOR \
@@ -203,7 +217,7 @@ python3 tools/pqueue_doctor.py \
 
 ### Compact before a low-space incident
 
-```
+```bash
 python3 tools/pqueue_doctor.py \
     --port /dev/ttyACM0 \
     --trigger PQUEUE_DOCTOR \
@@ -213,7 +227,7 @@ python3 tools/pqueue_doctor.py \
 
 ### Recover from a corrupt front record
 
-```
+```bash
 # 1. Validate to confirm the issue and repair hint
 python3 tools/pqueue_doctor.py ... --validate
 
@@ -226,7 +240,7 @@ python3 tools/pqueue_doctor.py ... --validate
 
 ### Format a queue that cannot be repaired
 
-```
+```bash
 # 1. Dump first as forensic evidence
 python3 tools/pqueue_doctor.py ... --dump-all --out-dir /tmp/pqdump
 
@@ -242,7 +256,7 @@ Commands are sent as plain text lines. The device responds with human-readable
 output followed by a machine-readable `RESULT` line, then `READY`. Example
 exchange:
 
-```
+```text
 host -> TARGET api_outbox /pqueue_api_spool reservedBytes=262144
 dev  -> target: api_outbox path=/pqueue_api_spool reservedBytes=262144
 dev  -> READY
@@ -258,7 +272,7 @@ Dump commands use a different protocol -- no `RESULT` line. `DUMP_FILE` emits a
 single file block; `DUMP_ALL` wraps multiple file blocks in `DUMP_BEGIN` /
 `DUMP_END`:
 
-```
+```text
 host -> DUMP_ALL
 dev  -> DUMP_BEGIN
 dev  -> FILE_BEGIN name=manifest-a.bin size=64

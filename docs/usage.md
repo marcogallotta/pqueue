@@ -5,20 +5,21 @@
 ## Operating contract
 
 On ESP32-S3/LittleFS, pqueue operations are durable but not microsecond-fast.
-Expect enqueue and pop in the tens of milliseconds, larger payloads to cost more,
-and occasional tail spikes from segment rollover or flash-state outliers. Large
-offline backlogs also increase boot replay time. See `docs/benchmark.md` for
-exact numbers.
+Expect enqueue and pop in the tens of milliseconds, larger payloads to cost
+more, and occasional tail spikes from segment rollover or flash-state outliers.
+Large offline backlogs also increase boot replay time. See `docs/benchmark.md`
+for exact numbers.
 
 The design keeps the normal enqueue/pop path simple and append-only. To avoid
-expensive cleanup on the enqueue path, run idle compaction after drains or during
-reconnect windows.
+expensive cleanup on the enqueue path, run idle compaction after drains or
+during reconnect windows.
 
 There are three distinct phases. Each has a cost profile:
 
 ### Enqueue
 
-`enqueue()` appends to the active segment. Normally no compaction on a clean store.
+`enqueue()` appends to the active segment. Normally no compaction on a clean
+store.
 
 If the segment is full, enqueue seals it and opens a new one (segment rollover).
 If the store approaches its segment or byte limits and idle compaction was
@@ -38,9 +39,10 @@ automatically on the drain path.
 
 ### Idle compaction
 
-`compactIdle(n)` performs up to `n` compaction steps. Each step reads a range
-of segments, collects live records, and rewrites them into fresh output segments.
-Dead records are dropped. The step is bounded by `maxOutputSegments` (default 8).
+`compactIdle(n)` performs up to `n` compaction steps. Each step reads a range of
+segments, collects live records, and rewrites them into fresh output segments.
+Dead records are dropped. The step is bounded by `maxOutputSegments` (default
+8).
 
 One `compactIdle(1)` step can block for up to ~7 s under a heavy backlog (see
 `docs/benchmark.md`). Call at most one step per normal idle window rather than
@@ -64,9 +66,9 @@ do {
 } while (cr.compactions > 0);
 ```
 
-**If you never call `compactIdle`**, the queue is still durable and correct.
-But dead data from completed drains will accumulate, and the next enqueue burst
-will eventually trigger compaction on the write path.
+**If you never call `compactIdle`**, the queue is still durable and correct. But
+dead data from completed drains will accumulate, and the next enqueue burst will
+eventually trigger compaction on the write path.
 
 ### Boot / mount cost
 
@@ -74,24 +76,35 @@ On mount, the queue rebuilds its in-RAM index by replaying active segment files.
 Cost grows with backlog and segment history. A fully drained queue mounts in
 milliseconds; a large offline backlog can take seconds. This is a one-time boot
 cost, not a per-operation cost. Keep queues drained when possible, and size
-`reservedBytes` for the largest offline window you are willing to replay after
-a reboot.
+`reservedBytes` for the largest offline window you are willing to replay after a
+reboot.
 
 `CompactIdleResult` fields:
 
-| Field | Meaning |
-|---|---|
-| `status` | `ok()` on success, error otherwise. Always `ok()` when steps returned noOp -- check `noOps` or `compactions` for that. |
-| `stepsRun` | Steps attempted (including noOps). |
-| `compactions` | Steps that did real work. |
-| `noOps` | Steps that found no compaction candidates. |
-| `moreWorkLikely` | True when the loop exhausted `maxSteps` after at least one successful compaction. Use as a scheduling hint to re-run next cycle. |
-| `bytesReclaimed` | `totalOnDiskBytes` before minus after. May be 0 after a live rewrite that reduces dead bytes but has not yet freed files. |
-| `deadBytesBefore` | Dead bytes across referenced sealed segments before the call. |
-| `remainingDeadBytes` | Dead bytes across referenced sealed segments after the call. More reliable than `bytesReclaimed` as a measure of remaining cleanup work. |
-| `inputSegments` | Total sealed segments consumed across all steps in this call. |
-| `outputSegments` | Total segments written across all steps in this call. |
-
+- **Field:** `status`
+  - **Meaning:** `ok()` on success, error otherwise. Always `ok()` when steps
+    returned noOp -- check `noOps` or `compactions` for that.
+- **Field:** `stepsRun`
+  - **Meaning:** Steps attempted (including noOps).
+- **Field:** `compactions`
+  - **Meaning:** Steps that did real work.
+- **Field:** `noOps`
+  - **Meaning:** Steps that found no compaction candidates.
+- **Field:** `moreWorkLikely`
+  - **Meaning:** True when the loop exhausted `maxSteps` after at least one
+    successful compaction. Use as a scheduling hint to re-run next cycle.
+- **Field:** `bytesReclaimed`
+  - **Meaning:** `totalOnDiskBytes` before minus after. May be 0 after a live
+    rewrite that reduces dead bytes but has not yet freed files.
+- **Field:** `deadBytesBefore`
+  - **Meaning:** Dead bytes across referenced sealed segments before the call.
+- **Field:** `remainingDeadBytes`
+  - **Meaning:** Dead bytes across referenced sealed segments after the call.
+    More reliable than `bytesReclaimed` as a measure of remaining cleanup work.
+- **Field:** `inputSegments`
+  - **Meaning:** Total sealed segments consumed across all steps in this call.
+- **Field:** `outputSegments`
+  - **Meaning:** Total segments written across all steps in this call.
 
 ---
 
@@ -118,21 +131,20 @@ feedWatchdog();
 // cr.moreWorkLikely: schedule another pass next idle window.
 ```
 
-The clean-storage invariant: if `compactIdle` runs to completion between
-cycles, the next enqueue burst writes only fresh live data and does not trigger
+The clean-storage invariant: if `compactIdle` runs to completion between cycles,
+the next enqueue burst writes only fresh live data and does not trigger
 compaction-induced stalls -- assuming the burst and remaining live data fit the
 configured capacity.
-
 
 ---
 
 ## pqueue::Outbox
 
-`Outbox` is a store-and-forward layer over `Queue`. On `submit`, if the queue
-is empty it attempts a live send; if the send fails the record is durably
-queued. If a backlog already exists the record is enqueued directly, preserving
-FIFO order. `drain` / `drainUpTo` retry queued records according to the retry
-policy. The queue, retry state, and attempt counters all survive a power cycle.
+`Outbox` is a store-and-forward layer over `Queue`. On `submit`, if the queue is
+empty it attempts a live send; if the send fails the record is durably queued.
+If a backlog already exists the record is enqueued directly, preserving FIFO
+order. `drain` / `drainUpTo` retry queued records according to the retry policy.
+The queue, retry state, and attempt counters all survive a power cycle.
 
 ### Setup
 
@@ -154,20 +166,24 @@ pqueue::Outbox outbox(qcfg, ocfg, mySend, ctx, myClock, clockCtx);
 
 **`ClockCallback`** -- must return monotonic milliseconds. Never use wall/NTP
 time; the outbox uses it only for cooldown comparisons, so clock adjustments
-would cause spurious notDue results. On ESP32:
-`[](void*){ return esp_timer_get_time() / 1000; }`.
+would cause spurious notDue results. On ESP32: `[](void*){ return
+esp_timer_get_time() / 1000; }`.
 
 **`SendCallback`** -- called synchronously during `submit` and `drain`. Return
 one of:
 
-| Decision | Meaning |
-|---|---|
-| `SendDecision::Sent` | Backend accepted the record; remove it from the queue. |
-| `SendDecision::RetryLater` | Transient failure; re-queue and apply backoff. Optionally set `retryAfterMs` to a server-supplied hint (see Retry policy). |
-| `SendDecision::Drop` | Permanent failure; remove the record without retrying. |
+- **Decision:** `SendDecision::Sent`
+  - **Meaning:** Backend accepted the record; remove it from the queue.
+- **Decision:** `SendDecision::RetryLater`
+  - **Meaning:** Transient failure; re-queue and apply backoff. Optionally set
+    `retryAfterMs` to a server-supplied hint (see Retry policy).
+- **Decision:** `SendDecision::Drop`
+  - **Meaning:** Permanent failure; remove the record without retrying.
 
 ```cpp
-pqueue::SendResult mySend(void* ctx, const std::string& payload, const pqueue::RetryState& retry) {
+pqueue::SendResult mySend(void* ctx,
+                             const std::string& payload,
+                             const pqueue::RetryState& retry) {
     if (backend.post(payload))   return {pqueue::SendDecision::Sent};
     if (retry.attempts > 50)     return {pqueue::SendDecision::Drop};
     return {pqueue::SendDecision::RetryLater};
@@ -179,6 +195,7 @@ envelope and available across reboots.
 
 **`RandCallback`** (optional) -- supplies randomness for jitter. If `nullptr`,
 jitter is disabled regardless of `jitterPct`. On ESP32:
+
 ```cpp
 [](void*, uint32_t range) -> uint32_t { return esp_random() % range; }
 ```
@@ -202,23 +219,32 @@ outbox.drainUpTo(5);    // up to 5 attempts if rate and cooldown allow
 
 `DrainResult` fields:
 
-| Field | Meaning |
-|---|---|
-| `attempts` | Send attempts made this call. |
-| `sent` | Records successfully sent and removed. |
-| `dropped` | Records removed by a `Drop` decision. |
-| `corruptDropped` | Proven-corrupt front records discarded (see `maxCorruptDropsPerLifetime`). |
-| `removedQueuedBytes` | Raw queue bytes freed (sent + dropped). Useful for sizing compaction budget. |
-| `rateLimited` | True when the per-second drain cap prevented an attempt. |
-| `notDue` | True when the front record is still in its retry cooldown window. |
-| `queueError` / `sendError` | Storage or callback configuration failure. |
+- **Field:** `attempts`
+  - **Meaning:** Send attempts made this call.
+- **Field:** `sent`
+  - **Meaning:** Records successfully sent and removed.
+- **Field:** `dropped`
+  - **Meaning:** Records removed by a `Drop` decision.
+- **Field:** `corruptDropped`
+  - **Meaning:** Proven-corrupt front records discarded (see
+    `maxCorruptDropsPerLifetime`).
+- **Field:** `removedQueuedBytes`
+  - **Meaning:** Raw queue bytes freed (sent + dropped). Useful for sizing
+    compaction budget.
+- **Field:** `rateLimited`
+  - **Meaning:** True when the per-second drain cap prevented an attempt.
+- **Field:** `notDue`
+  - **Meaning:** True when the front record is still in its retry cooldown
+    window.
+- **Field:** `queueError` / `sendError`
+  - **Meaning:** Storage or callback configuration failure.
 
 ### Retry policy
 
 On `RetryLater`, the outbox applies exponential backoff before the next drain
 attempt:
 
-```
+```text
 delay = min(maxRetryDelayMs, initialRetryDelayMs * 2^attempts)
 delay = delay +/- rand(0, delay * jitterPct / 100)   // only if RandCallback supplied
 ```
@@ -238,13 +264,26 @@ reason.
 
 ### OutboxConfig reference
 
-| Field | Default | Description |
-|---|---|---|
-| `initialRetryDelayMs` | 10000 | Base delay before the first retry (attempt 0 failed). Doubles each subsequent attempt up to `maxRetryDelayMs`. |
-| `maxRetryDelayMs` | 60000 | Ceiling for the exponential backoff. Keep modest: a cooling front record blocks all records behind it. |
-| `jitterPct` | 20 | +/-% applied to the computed delay after capping. No effect unless a `RandCallback` is supplied. |
-| `maxDrainAttemptsPerSecond` | 5 | Rate cap for `drain` calls. 0 is treated as 1. Prevents tight retry loops from hammering the backend. |
-| `maxCorruptDropsPerLifetime` | 3 | Corrupt front records the outbox will silently discard per process lifetime before halting. 0 disables automatic dropping. |
+- **Field:** `initialRetryDelayMs`
+  - **Default:** 10000
+  - **Description:** Base delay before the first retry (attempt 0 failed).
+    Doubles each subsequent attempt up to `maxRetryDelayMs`.
+- **Field:** `maxRetryDelayMs`
+  - **Default:** 60000
+  - **Description:** Ceiling for the exponential backoff. Keep modest: a cooling
+    front record blocks all records behind it.
+- **Field:** `jitterPct`
+  - **Default:** 20
+  - **Description:** +/-% applied to the computed delay after capping. No effect
+    unless a `RandCallback` is supplied.
+- **Field:** `maxDrainAttemptsPerSecond`
+  - **Default:** 5
+  - **Description:** Rate cap for `drain` calls. 0 is treated as 1. Prevents
+    tight retry loops from hammering the backend.
+- **Field:** `maxCorruptDropsPerLifetime`
+  - **Default:** 3
+  - **Description:** Corrupt front records the outbox will silently discard per
+    process lifetime before halting. 0 disables automatic dropping.
 
 ---
 
@@ -254,7 +293,7 @@ reason.
 request encoding, response classification, and optional Retry-After compliance.
 Use it when your backend speaks HTTP/HTTPS.
 
-### Setup
+### HTTP setup
 
 ```cpp
 #include "pqueue/http/outbox.h"
@@ -296,13 +335,16 @@ outbox.drain();
 
 `defaultClassifyResponse` maps HTTP status codes to send decisions:
 
-| Status range | Decision |
-|---|---|
-| 2xx | `Sent` |
-| 408, 429, 5xx | `RetryLater` (transient) |
-| 501, 505, 508 | `Drop` (permanent server capability error) |
-| All other 4xx, 3xx | `Drop` |
-| Transport error (timeout, TLS, network) | `RetryLater` |
+- **Status range:** 2xx
+  - **Decision:** `Sent`
+- **Status range:** 408, 429, 5xx
+  - **Decision:** `RetryLater` (transient)
+- **Status range:** 501, 505, 508
+  - **Decision:** `Drop` (permanent server capability error)
+- **Status range:** All other 4xx, 3xx
+  - **Decision:** `Drop`
+- **Status range:** Transport error (timeout, TLS, network)
+  - **Decision:** `RetryLater`
 
 Supply `cfg.classify` to override the default for your endpoint:
 
@@ -317,9 +359,9 @@ cfg.classifyContext = nullptr;
 
 ### Retry-After compliance
 
-When a transport sets `Response::retryAfterMs`, the outbox honours it (capped
-at `maxRetryDelayMs`). The built-in transports do not yet parse the
-`Retry-After` header; populate `retryAfterMs` from your own transport if needed.
+When a transport sets `Response::retryAfterMs`, the outbox honours it (capped at
+`maxRetryDelayMs`). The built-in transports do not yet parse the `Retry-After`
+header; populate `retryAfterMs` from your own transport if needed.
 
 ### Observability callbacks
 
@@ -341,16 +383,37 @@ cfg.onDrop = [](void*, const pqueue::http::RequestEnvelope* req,
 
 ### http::Config reference
 
-| Field | Default | Description |
-|---|---|---|
-| `queue` | - | Forwarded to the underlying `Queue`. See Queue config table. |
-| `outbox` | - | Forwarded to the inner `pqueue::Outbox`. See OutboxConfig table. |
-| `fullQueuePolicy` | `DropOldest` | What to do when the queue is full on `submitPost`. `DropOldest` evicts the front record; `RejectNewest` returns `QueueFull`. |
-| `baseUrl` | `""` | Prepended to every `submitPost` path. Leading/trailing slashes are normalised. |
-| `headers` / `headerCount` | `nullptr` / `0` | Static headers sent with every request (e.g. auth tokens, content type). |
-| `classify` / `classifyContext` | `nullptr` | Override the default response classifier. Return `Sent`, `RetryLater`, or `Drop`. |
-| `onResponse` / `responseContext` | `nullptr` | Observer called for every HTTP response before the send decision is applied. |
-| `onDrop` / `dropContext` | `nullptr` | Observer called when a record is permanently dropped. |
+- **Field:** `queue`
+  - **Default:** -
+  - **Description:** Forwarded to the underlying `Queue`. See Queue config
+    table.
+- **Field:** `outbox`
+  - **Default:** -
+  - **Description:** Forwarded to the inner `pqueue::Outbox`. See OutboxConfig
+    table.
+- **Field:** `fullQueuePolicy`
+  - **Default:** `DropOldest`
+  - **Description:** What to do when the queue is full on `submitPost`.
+    `DropOldest` evicts the front record; `RejectNewest` returns `QueueFull`.
+- **Field:** `baseUrl`
+  - **Default:** `""`
+  - **Description:** Prepended to every `submitPost` path. Leading/trailing
+    slashes are normalised.
+- **Field:** `headers` / `headerCount`
+  - **Default:** `nullptr` / `0`
+  - **Description:** Static headers sent with every request (e.g. auth tokens,
+    content type).
+- **Field:** `classify` / `classifyContext`
+  - **Default:** `nullptr`
+  - **Description:** Override the default response classifier. Return `Sent`,
+    `RetryLater`, or `Drop`.
+- **Field:** `onResponse` / `responseContext`
+  - **Default:** `nullptr`
+  - **Description:** Observer called for every HTTP response before the send
+    decision is applied.
+- **Field:** `onDrop` / `dropContext`
+  - **Default:** `nullptr`
+  - **Description:** Observer called when a record is permanently dropped.
 
 ---
 
@@ -371,13 +434,13 @@ feedWatchdog();
 
 `DrainResult` (returned by `drain()` and `drainUpTo()`) includes
 `removedQueuedBytes`: the sum of raw pqueue record bytes for records
-successfully removed from the queue (sent or dropped). Records dropped due to
-an unreadable corrupt front contribute to the count but 0 bytes (the byte
-count is unavailable).
+successfully removed from the queue (sent or dropped). Records dropped due to an
+unreadable corrupt front contribute to the count but 0 bytes (the byte count is
+unavailable).
 
-This field is a useful scheduling signal for compaction: when the drain
-removes records, it creates dead bytes in the sealed segments. The amount
-removed is a rough proxy for how much compaction work has been created.
+This field is a useful scheduling signal for compaction: when the drain removes
+records, it creates dead bytes in the sealed segments. The amount removed is a
+rough proxy for how much compaction work has been created.
 
 A budget-aware compaction pattern:
 
@@ -399,11 +462,10 @@ if (dr.removedQueuedBytes > 0 || moreWork) {
 }
 ```
 
-`removedQueuedBytes` does not include per-record append-log overhead (~24
-bytes per record). It is a proportional guide, not an exact dead-byte count.
-Use `CompactIdleResult::remainingDeadBytes` after compaction to see how much
-dead data is still on disk.
-
+`removedQueuedBytes` does not include per-record append-log overhead (~24 bytes
+per record). It is a proportional guide, not an exact dead-byte count. Use
+`CompactIdleResult::remainingDeadBytes` after compaction to see how much dead
+data is still on disk.
 
 ---
 
@@ -411,23 +473,42 @@ dead data is still on disk.
 
 These fields on `pqueue::Config` control the AppendLog backend:
 
-| Field | Default | Description |
-|---|---|---|
-| `maxSegmentBytes` | 4096 | Max bytes per segment file. Larger segments mean fewer files and less directory overhead, but coarser compaction granularity. |
-| `reservedBytes` | 131072 | Logical footprint cap for queue segment files (`maxTotalBytes` in the underlying store). Does not reserve or preallocate flash. When the total size of all segment files approaches this limit, writes compact or fail rather than growing further. |
-| `maxSegments` | 16 | Compaction pressure threshold. When the live segment count exceeds this value, `enqueue` attempts one compaction step before rotating. Not a hard file-count limit: if compaction is a no-op (all data is live), segment count can exceed this value. |
-| `minFreeBytes` | 32768 | Real filesystem safety floor. Writes are rejected when LittleFS free space would drop below this value. This is the actual guard against consuming all available flash, independent of `reservedBytes`. |
-| `recordSizeBytes` | 492 | Maximum record payload size. `enqueue` returns `RecordTooLarge` for records exceeding this limit. Also caps how large a single record can be relative to `maxSegmentBytes`. |
+- **Field:** `maxSegmentBytes`
+  - **Default:** 4096
+  - **Description:** Max bytes per segment file. Larger segments mean fewer
+    files and less directory overhead, but coarser compaction granularity.
+- **Field:** `reservedBytes`
+  - **Default:** 131072
+  - **Description:** Logical footprint cap for queue segment files
+    (`maxTotalBytes` in the underlying store). Does not reserve or preallocate
+    flash. When the total size of all segment files approaches this limit,
+    writes compact or fail rather than growing further.
+- **Field:** `maxSegments`
+  - **Default:** 16
+  - **Description:** Compaction pressure threshold. When the live segment count
+    exceeds this value, `enqueue` attempts one compaction step before rotating.
+    Not a hard file-count limit: if compaction is a no-op (all data is live),
+    segment count can exceed this value.
+- **Field:** `minFreeBytes`
+  - **Default:** 32768
+  - **Description:** Real filesystem safety floor. Writes are rejected when
+    LittleFS free space would drop below this value. This is the actual guard
+    against consuming all available flash, independent of `reservedBytes`.
+- **Field:** `recordSizeBytes`
+  - **Default:** 492
+  - **Description:** Maximum record payload size. `enqueue` returns
+    `RecordTooLarge` for records exceeding this limit. Also caps how large a
+    single record can be relative to `maxSegmentBytes`.
 
 `maxOutputSegments` (max output segments per compaction step, default 8) is only
-configurable at the `AppendLogStore` level. Through `Queue` it is fixed at 8.
-To change it, construct an `AppendLogStore` directly instead of using `Queue`.
+configurable at the `AppendLogStore` level. Through `Queue` it is fixed at 8. To
+change it, construct an `AppendLogStore` directly instead of using `Queue`.
 
 ### Sizing guidance
 
 A rough clean-burst capacity estimate:
 
-```
+```text
 records_per_burst ~ reservedBytes / (payloadBytes + 24)
 ```
 
@@ -446,7 +527,6 @@ With the default `maxOutputSegments=8` and `maxSegmentBytes=4096`, a heavy
 compaction step reads and writes up to ~32KB. Actual LittleFS latency depends on
 filesystem state and flash wear; see `docs/benchmark.md` for on-device numbers.
 
-
 ---
 
 ## Performance
@@ -454,19 +534,18 @@ filesystem state and flash wear; see `docs/benchmark.md` for on-device numbers.
 For current ESP32-S3/LittleFS latency numbers and benchmark commands, see
 `docs/benchmark.md`.
 
-
 ---
 
 ## Durability and crash safety
 
 The AppendLog store is built on two durability primitives:
 
-**Append-only segments.** Enqueue events and pop tombstones are appended to
-the active tail segment. Compaction writes surviving records into new segment
-files, then publishes a new manifest. Existing segment content is never
-overwritten. A torn write at the active tail (crash mid-append) is detected on
-remount by checksum and the partial event is truncated; all events before it are
-intact. Corruption in a sealed (non-active) segment is fatal: remount returns
+**Append-only segments.** Enqueue events and pop tombstones are appended to the
+active tail segment. Compaction writes surviving records into new segment files,
+then publishes a new manifest. Existing segment content is never overwritten. A
+torn write at the active tail (crash mid-append) is detected on remount by
+checksum and the partial event is truncated; all events before it are intact.
+Corruption in a sealed (non-active) segment is fatal: remount returns
 `DataCorrupt`.
 
 **Atomic manifest publish.** The manifest (the index of which segment
@@ -489,7 +568,6 @@ input segments it just replaced.
 - An `enqueue` or `pop` that was in flight at crash time.
 - A compaction step whose manifest was not yet committed.
 
-
 ---
 
 ## Compaction behaviour
@@ -504,7 +582,6 @@ after drains or during reconnect windows, not on the enqueue path.
 
 For the full strategy rationale, deadlock analysis, and on-device validation
 results, see `docs/internals.md`.
-
 
 ---
 
@@ -541,15 +618,17 @@ if (st.ok()) {
 }
 ```
 
-The `std::string` overloads remain first-class and are not deprecated.
-Internal record storage stays as `std::string`; only caller-side allocations
-are eliminated.
+The `std::string` overloads remain first-class and are not deprecated. Internal
+record storage stays as `std::string`; only caller-side allocations are
+eliminated.
 
 The raw-buffer API avoids caller-side allocation; benchmark results show it is
 not a latency win over the `std::string` API because LittleFS I/O dominates.
 
 **Error codes:**
-- `InvalidArgument` -- `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
+
+- `InvalidArgument` -- `Span` or `MutableSpan` has `len > 0` and `data ==
+  nullptr`
 - `RecordTooLarge` -- `peek(MutableSpan)` when stored record exceeds `out.len`
 - `QueueEmpty` -- `peekSize` or `peek` on an empty queue
 
@@ -558,15 +637,18 @@ not a latency win over the `std::string` API because LittleFS I/O dominates.
 `Outbox` can be constructed with a `RawSendCallback` instead of `SendCallback`:
 
 ```cpp
-using RawSendCallback = SendResult (*)(void* context, pqueue::Span payload, const RetryState& retry);
+using RawSendCallback = SendResult (*)(void* context,
+                                          pqueue::Span payload,
+                                          const RetryState& retry);
 
-pqueue::Outbox outbox(queueConfig, outboxConfig, myRawSend, ctx, clock, clockCtx);
+pqueue::Outbox outbox(queueConfig, outboxConfig, myRawSend,
+                        ctx, clock, clockCtx);
 ```
 
 The callback receives a `Span` pointing into an internal buffer that is valid
-only during the callback. Do not retain the pointer after it returns. `submit(Span)` is also
-available alongside `submit(const std::string&)`.
+only during the callback. Do not retain the pointer after it returns.
+`submit(Span)` is also available alongside `submit(const std::string&)`.
 
 Only one callback variant is configured per instance (`SendCallback` or
-`RawSendCallback`). `http::Outbox` is unaffected and always uses the string
-path internally.
+`RawSendCallback`). `http::Outbox` is unaffected and always uses the string path
+internally.
