@@ -219,6 +219,11 @@ replay loop iterates `activeGenerations_` in manifest order (not numeric
 generation order); a referenced segment that is missing or too small is
 `DataCorrupt`.
 
+Each segment is read with a single `readFile` call into a RAM buffer; events are parsed
+from the buffer without further I/O. A `fileSize` probe precedes the read as an allocation
+guard (`kMaxReplaySegmentReadBytes = 256 KB`). See `## Benchmark infrastructure` for
+mount performance rationale and the checkpoint-index decision.
+
 ---
 
 ## Rollover
@@ -588,6 +593,77 @@ know compaction is productive without coupling the timing to the write path.
 | Compaction journal over manifest-authority model | Rejected. With a journal over discovered segment files, the existence of a normal segment file becomes meaningful -- dangling compacted outputs can poison mount without a separate pending-intent mechanism. The "unreferenced files are garbage" invariant is lost. |
 | Page/block preallocation | Rejected. LittleFS is COW with dynamic block allocation; preallocation does not deliver the expected flash-behavior wins. |
 | Event frame format | Shared frame with a type field (ENQUEUE/POP/REWRITE). Exact layout is an implementation detail. |
+
+---
+
+## Benchmark infrastructure
+
+### POSIX structural benchmark
+
+Runs on an in-memory POSIX filesystem. Deterministic and machine-independent for the
+fields that matter: I/O op counts, write amplification, and idle compaction invariants.
+Wall-clock times are host-local and informational only — do not use them to predict
+device latency.
+
+```bash
+make -j12 benchmark             # build only
+make benchmark-markdown         # print markdown table to stdout
+make update-benchmark-baseline  # regenerate data/benchmark-results-posix.json
+```
+
+CI builds the benchmark, runs it with `--json --strict`, and diffs the output against
+`data/benchmark-results-posix.json` using `tools/benchmark_regression.py`.
+
+**`--strict` invariants** — exits 1 if any of these fail:
+
+- `enqueue`: `writeAt == N`, `readAt == 0`, `remove == 0`
+- `peek_pop`: `writeAt == N`, `readAt == N`, `read_bpp == payloadBytes`, `remove == 0`
+- `outbox_offline_submit`: `writeAt == N`, `read_bpp == 0`, `remove == 0`
+- `mount`: `writeAt == 0`, `writeFile == 0`, `remove == 0`
+- `idle_compaction`: `hot_compactions == 0`, `cap_exhausted == 0`
+
+**Regression fields** compared against baseline: `writeFile`, `writeAt`, `readAt`,
+`remove`, `write_amp`, `read_bpp`, `idle_steps`, `idle_noops`, `hot_compactions`,
+`cap_exhausted`. Numeric fields fail on increase, pass silently on decrease. Wall-clock
+times are not compared.
+
+Update the baseline after any intentional change to I/O behaviour:
+
+```bash
+make update-benchmark-baseline
+```
+
+### Simulator
+
+`tools/pqueue_compaction_sim.cpp` is a correctness sweep tool separate from the
+benchmark. It drives the real `AppendLogStore` API through random-interleaved and
+burst workload families, calling `store.compactRange()` directly (bypassing
+`narrowRange()`), so it is not subject to the `maxOutputSegments` bound. `MaxOutSeg`
+values in simulator output reflect unconstrained strategy behaviour, not the bounded
+per-step latency that production `compactIdle(1)` delivers. Build: `make -j12 sim`.
+
+### Mount performance rationale
+
+Each segment is read with a single `readFile` call into a RAM buffer; events are parsed
+from the buffer without further I/O. A `fileSize` probe precedes the read as an
+allocation guard (`kMaxReplaySegmentReadBytes = 256 KB`). This gives one `fileSize` +
+one `readFile` per segment regardless of event count.
+
+Prior to this, replaying an ENQUEUE event required two `readAt` calls (header + payload),
+plus one segment-header `readAt` per segment — each a full open+seek+read+close on
+LittleFS (~5 ms). At 200 records that was hundreds of individual file opens; mount time
+dropped from 16 s to 4.5 s after the change.
+
+**Mount anomaly.** The 50→200 record jump is anomalous: 4× records produces 11.3× mount
+time. Most likely LittleFS filesystem-state cost (directory traversal, metadata lookup)
+growing with segment/file count. The exact source has not been isolated.
+
+**Persisted checkpoint index.** Writing `{seq, gen, offset, size}` per record to disk
+after each manifest publish would reduce mount to: read checkpoint + validate epoch +
+replay tail only. This was decided against: the checkpoint would be written on every
+rotation, adding write amplification on a path that already dominates latency for
+large-payload callers, and checkpoint size grows with queue depth (~16–24 KB at 1000
+records). Revisit if real production boot backlog proves painful.
 
 ---
 

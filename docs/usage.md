@@ -4,60 +4,78 @@
 
 ## Operating contract
 
-LittleFS has high per-operation latency (~35ms per file open on ESP32S3) and
-significant write amplification under garbage collection. The AppendLog store is
-designed so you pay those costs at chosen moments -- not as surprise stalls
-during enqueue.
+On ESP32-S3/LittleFS, pqueue operations are durable but not microsecond-fast.
+Expect enqueue and pop in the tens of milliseconds, larger payloads to cost more,
+and occasional tail spikes from segment rollover or flash-state outliers. Large
+offline backlogs also increase boot replay time. See `docs/benchmark.md` for
+exact numbers.
+
+The design keeps the normal enqueue/pop path simple and append-only. To avoid
+expensive cleanup on the enqueue path, run idle compaction after drains or during
+reconnect windows.
 
 There are three distinct phases. Each has a cost profile:
 
 ### Enqueue
 
-`enqueue()` appends to the active segment. Cost: one `writeAt` (~14ms on
-device). No reads. Normally no compaction on a clean store.
+`enqueue()` appends to the active segment. Normally no compaction on a clean store.
 
-If the store approaches its segment or byte limits and the previous idle
-compaction was skipped, `enqueue` may trigger a compaction step before
-returning. This is the stall you want to avoid. The way to avoid it is to
-ensure the store is fully compacted before the burst arrives (see Idle
-compaction below).
+If the segment is full, enqueue seals it and opens a new one (segment rollover).
+If the store approaches its segment or byte limits and idle compaction was
+skipped, `enqueue` may trigger a compaction step before returning. The way to
+avoid this is to keep the store compacted between bursts (see Idle compaction
+below).
 
 ### Drain
 
-`pop()` appends a tombstone to the active tail segment. The common case is one
-`writeAt`. If the active tail is full, the pop rotates the tail first (writes a
-new segment header and publishes a manifest) before appending the tombstone.
-Pops never trigger compaction, but they are not always a single write.
+`pop()` appends a small durable pop marker to the active tail segment. Pops
+never trigger compaction, but if the tail is full, a segment rollover happens
+before the marker is written.
 
-It does not rewrite old segment files or reclaim space immediately. Dead records
-accumulate in the existing segments until compaction runs.
-
-The drain phase intentionally does not compact. Compaction during drain would
-add latency to every pop, which is usually network-bound and already slow
-enough. Dead data from a completed drain sits on flash until idle compaction
-runs.
+Dead records accumulate in the existing segments until compaction runs.
+Compaction during drain would add latency to every pop, so it does not happen
+automatically on the drain path.
 
 ### Idle compaction
 
 `compactIdle(n)` performs up to `n` compaction steps. Each step reads a range
 of segments, collects live records, and rewrites them into fresh output segments.
-Dead records are dropped. The step is bounded by `maxOutputSegments` (default 8)
-so each call has a bounded amount of queue work per step.
+Dead records are dropped. The step is bounded by `maxOutputSegments` (default 8).
 
-Call `compactIdle` when the system has budget: after a drain completes, during
-WiFi reconnect delay, or in a low-priority task. Run it in a loop until it
-returns zero compactions:
+One `compactIdle(1)` step can block for up to ~7 s under a heavy backlog (see
+`docs/benchmark.md`). Call at most one step per normal idle window rather than
+looping to completion on every tick:
 
 ```cpp
-while (queue.compactIdle(1).compactions > 0) {
-    // yield / feed watchdog if needed
-}
+// Preferred: one step per idle window, re-schedule if more work likely.
+auto cr = queue.compactIdle(1);
+feedWatchdog();
+// cr.moreWorkLikely: schedule another pass next idle window.
+```
+
+Loop to completion only in a maintenance window where multi-second stalls are
+acceptable:
+
+```cpp
+pqueue::CompactIdleResult cr;
+do {
+    cr = queue.compactIdle(1);
+    feedWatchdog();
+} while (cr.compactions > 0);
 ```
 
 **If you never call `compactIdle`**, the queue is still durable and correct.
 But dead data from completed drains will accumulate, and the next enqueue burst
-will eventually trigger compaction on the write path -- paying the cleanup cost
-at the worst possible moment.
+will eventually trigger compaction on the write path.
+
+### Boot / mount cost
+
+On mount, the queue rebuilds its in-RAM index by replaying active segment files.
+Cost grows with backlog and segment history. A fully drained queue mounts in
+milliseconds; a large offline backlog can take seconds. This is a one-time boot
+cost, not a per-operation cost. Keep queues drained when possible, and size
+`reservedBytes` for the largest offline window you are willing to replay after
+a reboot.
 
 `CompactIdleResult` fields:
 
@@ -95,11 +113,9 @@ while (queue.peek(rec).ok()) {
 }
 
 // When the system has idle budget (e.g. after drain, during reconnect delay):
-pqueue::CompactIdleResult cr;
-do {
-    cr = queue.compactIdle(1);
-    feedWatchdog();
-} while (cr.compactions > 0);
+auto cr = queue.compactIdle(1);
+feedWatchdog();
+// cr.moreWorkLikely: schedule another pass next idle window.
 ```
 
 The clean-storage invariant: if `compactIdle` runs to completion between
@@ -146,6 +162,9 @@ if (st.ok()) {
 The `std::string` overloads remain first-class and are not deprecated.
 Internal record storage stays as `std::string`; only caller-side allocations
 are eliminated.
+
+The raw-buffer API avoids caller-side allocation; benchmark results show it is
+not a latency win over the `std::string` API because LittleFS I/O dominates.
 
 **Error codes:**
 - `InvalidArgument` — `Span` or `MutableSpan` has `len > 0` and `data == nullptr`
@@ -400,15 +419,13 @@ cfg.onDrop = [](void*, const pqueue::http::RequestEnvelope* req,
 
 Both `pqueue::Outbox` and `pqueue::http::Outbox` expose `compactIdle(maxSteps)`
 which forwards to the underlying `Queue`. Drive it the same way as with `Queue`
-directly -- after a drain completes, during a reconnect delay, or in a
+directly — after a drain completes, during a reconnect delay, or in a
 low-priority task:
 
 ```cpp
-pqueue::CompactIdleResult cr;
-do {
-    cr = outbox.compactIdle(1);
-    feedWatchdog();
-} while (cr.compactions > 0);
+auto cr = outbox.compactIdle(1);
+feedWatchdog();
+// cr.moreWorkLikely: schedule another pass next idle window.
 ```
 
 ### Drain-informed compaction
@@ -481,9 +498,10 @@ headers (~20 bytes amortized per record at 8-16 records per segment), pop
 tombstones, rewrite events, dead data from partial drain cycles, or dangling
 files. For a 64KB budget with 492-byte payloads: ~64000 / 516 = ~124 records.
 
-Set `maxSegmentBytes` so each segment holds 8-16 records. Too small and you
-accumulate many files; too large and each compaction step processes more data
-than needed.
+Keep `maxSegmentBytes=4096` (the default) unless you have measured a reason to
+change it. Larger segments reduce rollover frequency but increase flush cost and
+make compaction steps heavier. For large payloads, accepting fewer records per
+segment is usually better than jumping to 8 KB blindly.
 
 With the default `maxOutputSegments=8` and `maxSegmentBytes=4096`, a heavy
 compaction step reads and writes up to ~32KB. Actual LittleFS latency depends on
@@ -492,22 +510,10 @@ filesystem state and flash wear; see `docs/benchmark.md` for on-device numbers.
 
 ---
 
-## Measuring performance
+## Performance
 
-The POSIX benchmark reports I/O op counts, write amplification, and idle compaction
-structural metrics. These are deterministic and suitable for CI regression:
-
-```bash
-make -j12 benchmark
-make benchmark-markdown
-```
-
-See `data/benchmark-results-posix.md` for the baseline and interpretation of each
-scenario. The key metric for idle compaction is `hot_compactions = 0`, which confirms
-the clean-storage invariant holds for your workload parameters.
-
-The POSIX benchmark does not predict device timing. For on-device latency numbers,
-see `docs/benchmark.md`.
+For current ESP32-S3/LittleFS latency numbers and benchmark commands, see
+`docs/benchmark.md`.
 
 
 ---
@@ -547,21 +553,15 @@ input segments it just replaced.
 
 ---
 
-## Compaction internals (advanced)
+## Compaction behaviour
 
-The compaction strategy is **HighestDeadRatio**: on each step, pick the range
-with the highest fraction of dead bytes. Ranges with no dead bytes are skipped.
-This prevents compacting fully-live ranges, which would consume a step and a
-range slot without reclaiming anything.
+The compaction strategy picks the range with the highest fraction of dead bytes.
+Ranges with no dead bytes are skipped entirely — compacting a fully-live range
+would waste a step without reclaiming anything.
 
-Each compaction step operates on a subrange of a manifest range, bounded by
-`maxOutputSegments`. This limits the amount of work per step while still making
-progress on large ranges.
-
-The manifest tracks up to 4 contiguous ranges. Range fragmentation (more than
-one range) arises from compaction producing output that does not align with the
-active write tail. The store merges contiguous ranges automatically after each
-compaction step.
+Each step is bounded by `maxOutputSegments` (default 8), so individual steps
+have predictable worst-case cost. Run compaction after drains or during reconnect
+windows, not on the enqueue path.
 
 For the full strategy rationale, deadlock analysis, and on-device validation
 results, see `docs/internals.md`.

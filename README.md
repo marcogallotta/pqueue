@@ -63,8 +63,8 @@ while (queue.peek(rec).ok()) {
 ### 4. Compact during idle
 
 ```cpp
-pqueue::CompactIdleResult cr;
-do { cr = queue.compactIdle(1); } while (cr.compactions > 0);
+auto cr = queue.compactIdle(1);
+// cr.moreWorkLikely: schedule another pass next idle window.
 ```
 
 
@@ -100,7 +100,7 @@ pqueue::Outbox outbox(qcfg, ocfg, mySend, nullptr, myClock, nullptr);
 
 outbox.submit(payload);          // queue or send immediately if online
 outbox.drainUpTo(50);            // attempt up to 50 sends
-while (outbox.compactIdle(1).compactions > 0) {}  // reclaim dead space
+outbox.compactIdle(1);           // reclaim dead space during idle windows
 ```
 
 ### pqueue::http::Outbox
@@ -122,7 +122,7 @@ pqueue::http::Outbox outbox(cfg, transport, myClock, nullptr);
 
 outbox.submitPost("/readings", body);   // queue or send immediately
 outbox.drainUpTo(50);                   // replay queued requests
-while (outbox.compactIdle(1).compactions > 0) {}  // reclaim dead space
+outbox.compactIdle(1);                  // reclaim dead space during idle windows
 ```
 
 
@@ -240,7 +240,6 @@ DONE                      -- exit (reboots into maintenance firmware)
 - `examples/basic_queue.cpp` -- runnable POSIX example: enqueue / drain / compact lifecycle
 - `examples/outbox.cpp` -- runnable POSIX example: store-and-forward with retry
 - `examples/esp32_http_outbox/main.cpp` -- ESP32 firmware reference sketch
-- `docs/benchmark.md` -- benchmark and CI regression workflow
-- `data/benchmark-results-posix.md` -- POSIX structural benchmark baseline and interpretation
+- `docs/benchmark.md` -- performance numbers and tuning guidance
 - `tools/pqueue_benchmark.cpp` -- POSIX benchmark source
 - `tools/pqueue_compaction_sim.cpp` -- compaction correctness sweep
