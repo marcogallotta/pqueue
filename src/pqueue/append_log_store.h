@@ -135,6 +135,20 @@ private:
     void cleanupInputSegments(const CompactionRange& effectiveRange);
     void cleanupOneDanglingSegment();
 
+#ifdef ARDUINO
+    void emitSlowCommitEnqueue(
+        std::uint32_t sequence,
+        std::uint32_t recordBytes,
+        bool didRotate,
+        bool didCompact,
+        std::uint32_t msEnsure,
+        std::uint32_t msCompact,
+        std::uint32_t msRotate,
+        std::uint32_t msEnsureSegment,
+        std::uint32_t msAppend,
+        std::uint32_t msTotal) const;
+#endif
+
     // Applies manifest fields to RAM state (activeGenerations_, nextGeneration_).
     // Called by publishManifest() after a successful write, and by scanSegments()
     // in Stage 3b after readManifest() returns the winning slot. One path avoids

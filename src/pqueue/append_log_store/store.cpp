@@ -85,6 +85,38 @@ Status AppendLogStore::diagnostic(Severity severity, Status status, const char* 
     return emit(Event{EventKind::Diagnostic, severity, status, "AppendLogStore", operation});
 }
 
+#ifdef ARDUINO
+void AppendLogStore::emitSlowCommitEnqueue(
+    std::uint32_t sequence,
+    std::uint32_t recordBytes,
+    bool didRotate,
+    bool didCompact,
+    std::uint32_t msEnsure,
+    std::uint32_t msCompact,
+    std::uint32_t msRotate,
+    std::uint32_t msEnsureSegment,
+    std::uint32_t msAppend,
+    std::uint32_t msTotal) const {
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+        "recBytes=%u rotate=%u compact=%u ensure_ms=%u compact_ms=%u "
+        "rotate_ms=%u ensure_seg_ms=%u append_ms=%u total_ms=%u",
+        recordBytes,
+        static_cast<unsigned>(didRotate),
+        static_cast<unsigned>(didCompact),
+        msEnsure, msCompact, msRotate, msEnsureSegment, msAppend, msTotal);
+    Event event;
+    event.kind = EventKind::Diagnostic;
+    event.severity = Severity::Debug;
+    event.status = Status{StatusCode::Ok, 0, buf};
+    event.component = "AppendLogStore";
+    event.operation = "commitEnqueue";
+    event.sequence = sequence;
+    event.bodyBytes = recordBytes;
+    emit(event);
+}
+#endif
+
 std::string AppendLogStore::segmentName(std::uint32_t generation) const {
     return std::string(kSegmentPrefix) + formatGeneration(generation) + kSegmentSuffix;
 }
@@ -657,12 +689,17 @@ Status AppendLogStore::commitEnqueue(std::uint32_t sequence, const std::string& 
 #ifdef ARDUINO
     const std::uint32_t ms_total = millis() - t_wr_start;
     if (ms_total > 500) {
-        Serial.printf("[commitEnqueue] seq=%u recBytes=%u rotate=%u compact=%u "
-            "ensure_ms=%u compact_ms=%u rotate_ms=%u ensure_seg_ms=%u append_ms=%u total_ms=%u\n",
-            sequence, static_cast<unsigned>(record.size()),
-            static_cast<unsigned>(did_rotate), static_cast<unsigned>(did_compact),
-            ms_ensure, ms_compact, ms_rotate, ms_ensure_seg, ms_append, ms_total);
-        Serial.flush();
+        emitSlowCommitEnqueue(
+            sequence,
+            static_cast<std::uint32_t>(record.size()),
+            did_rotate,
+            did_compact,
+            ms_ensure,
+            ms_compact,
+            ms_rotate,
+            ms_ensure_seg,
+            ms_append,
+            ms_total);
     }
 #endif
 
