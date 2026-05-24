@@ -225,7 +225,7 @@ Status Queue::recoverStaleLock() {
     if (!st.ok()) {
         return diagnostic(Severity::Error, st, "recoverStaleLock");
     }
-    return Status::success();
+    return st; // preserve NoOp for LittleFS (mutex-based lock has no stale state)
 }
 
 Status Queue::loadLatestIndex() {

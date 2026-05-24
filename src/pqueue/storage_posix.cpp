@@ -65,7 +65,7 @@ public:
     Status recoverStale(const std::string& name, const std::string&) override {
         std::error_code ec;
         if (!std::filesystem::exists(path(name), ec)) {
-            return Status::success();
+            return Status::noOp();
         }
         if (ec) {
             return Status::failure(StatusCode::ReadFailed, "failed to inspect queue lock file", ec.value());

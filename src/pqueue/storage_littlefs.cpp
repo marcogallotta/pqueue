@@ -137,7 +137,7 @@ public:
     }
 
     Status recoverStale(const std::string&, const std::string&) override {
-        return Status::success();
+        return Status::noOp(); // FreeRTOS mutex has no stale state to recover
     }
 
 private:
@@ -161,7 +161,7 @@ public:
     }
 
     Status recoverStale(const std::string&, const std::string&) override {
-        return Status::success();
+        return Status::noOp(); // FreeRTOS mutex has no stale state to recover
     }
 };
 

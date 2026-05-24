@@ -243,7 +243,10 @@ inline void cmdRecoverStaleLock(const CurrentTarget& t) {
     pqueue::Queue q(makeQueueConfig(t));
     const auto st = q.recoverStaleLock();
     char result[80];
-    if (st.ok()) {
+    if (st.isNoOp()) {
+        sprintln("recover_lock: not_applicable");
+        sprintln("RESULT command=RECOVER_STALE_LOCK ok=1 changed=0 code=not_applicable");
+    } else if (st.ok()) {
         sprintln("recover_lock: ok");
         sprintln("RESULT command=RECOVER_STALE_LOCK ok=1 changed=1");
     } else if (st.code == pqueue::StatusCode::LockTimeout) {

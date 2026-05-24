@@ -151,7 +151,7 @@ private:
 
     // Applies manifest fields to RAM state (activeGenerations_, nextGeneration_).
     // Called by publishManifest() after a successful write, and by scanSegments()
-    // in Stage 3b after readManifest() returns the winning slot. One path avoids
+    // during mount after readManifest() returns the winning slot. One path avoids
     // divergence between publish and mount reconstruction.
     void applyManifestToRam(const append_log_detail::ManifestData& manifest);
 
