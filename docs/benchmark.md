@@ -133,7 +133,8 @@ booted.
 
 **Output.** Each scenario emits a machine-readable `bench key=value` line as it
 completes (grep-friendly, paste-ready into a spreadsheet). After all tests finish, a
-human-readable summary table is printed in ms:
+human-readable summary table is printed in ms (example below is pre-whole-segment-replay;
+current mount numbers are in the Results discussion):
 
 ```
 ==================== results ====================
@@ -242,36 +243,28 @@ call `compactIdle` more frequently to spread the work across smaller idle window
 Mount does a full replay on every boot: reads the manifest, then scans every event in
 every active segment to reconstruct the in-RAM record index (`records_`). The manifest
 stores segment layout only — record-level metadata (sequence, generation, payload offset
-and size) is never persisted and must be derived by replaying events. Every `readAt` call
-during the scan is a full open+seek+read+close cycle on LittleFS (~5 ms each); each
-ENQUEUE event currently requires 2 `readAt` calls, plus one segment-header `readAt` per
-segment.
+and size) is never persisted and must be derived by replaying events. `scanSegments` reads
+each segment with a single `readFile` call (~5 ms flat for 4 KB), then parses all events
+from the in-RAM buffer — one whole-segment read per segment regardless of event count.
+
+Post whole-segment replay fast benchmark:
 
   preload   time      per-record
   -------   --------  ----------
   0         13ms      —
-  50        1713ms    ~34ms
-  200       16137ms   ~80ms
-  500       30795ms   ~62ms
-  1000      47148ms   ~47ms
+  50        405ms     ~8ms
+  200       4566ms    ~23ms
 
-The 13 ms baseline is manifest reads plus an empty directory scan. The 50→200 jump
-(4× records, 9.4× time) is anomalous and not fully characterised — likely LittleFS
-directory traversal cost growing with segment count. From 200 records onward the cost
-is roughly linear.
+The 500/1000-record post-fix mount cases have not been remeasured; avoid rerunning the
+full hardware benchmark unless release evidence is needed.
 
-**The first fix to try is whole-segment reads.** The current per-event `readAt` pattern
-makes I/O cost O(events × file-open overhead). Replacing it with a single `readFile` per
-segment (~5 ms flat for 4 KB) and parsing events from a RAM buffer should reduce the
-dominant per-event open/seek/read/close cost significantly. This is a contained change —
-the scan logic is unchanged, only how it fetches data. Re-benchmark after this before
-considering a persisted checkpoint index: store `{seq, gen, offset, size}` per record,
-validate against the manifest epoch on mount, and replay only events written after the
-checkpoint.
+The 13 ms baseline is manifest reads plus an empty directory scan. The 50→200 jump is
+anomalous (4× records, 11.3× time) — likely LittleFS filesystem-state cost growing with
+segment count/file count; the exact source has not been isolated.
 
-Today mount is acceptable for the production pattern — queue is typically near-empty
-after a successful drain, so boot-time replay is fast. A 1000-record backlog at boot
-(47 s) is a documented worst case that the whole-segment fix should close before release.
+The next candidate is a persisted checkpoint index: store `{seq, gen, offset, size}` per
+record, validate against the manifest epoch on mount, and replay only events written after
+the checkpoint.
 
 ### Raw-buffer API vs std::string
 

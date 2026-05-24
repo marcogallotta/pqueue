@@ -1,6 +1,6 @@
 {
   "config": {
-    "gitHash": "a0608cb",
+    "gitHash": "013eca9",
     "maxSegmentBytes": 4096,
     "maxSegments": 200,
     "maxTotalBytes": 2108736,
@@ -13,7 +13,7 @@
       "payloadBytes": 64,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 16, "p90_us": 20, "p99_us": 55, "max_us": 222,
+      "p50_us": 16, "p90_us": 18, "p99_us": 42, "max_us": 254,
       "write_amp": 1.395, "read_bpp": 0.0,
       "writeFile": 44, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -23,7 +23,7 @@
       "payloadBytes": 256,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 17, "p90_us": 42, "p99_us": 87, "max_us": 530,
+      "p50_us": 16, "p90_us": 39, "p99_us": 60, "max_us": 221,
       "write_amp": 1.110, "read_bpp": 0.0,
       "writeFile": 144, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -33,7 +33,7 @@
       "payloadBytes": 1024,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 22, "p90_us": 62, "p99_us": 135, "max_us": 445,
+      "p50_us": 21, "p90_us": 56, "p99_us": 78, "max_us": 292,
       "write_amp": 1.042, "read_bpp": 0.0,
       "writeFile": 668, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -43,7 +43,7 @@
       "payloadBytes": 2048,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 79, "p90_us": 111, "p99_us": 238, "max_us": 824,
+      "p50_us": 72, "p90_us": 92, "p99_us": 151, "max_us": 628,
       "write_amp": 1.040, "read_bpp": 0.0,
       "writeFile": 2000, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -53,7 +53,7 @@
       "payloadBytes": 64,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 32, "p90_us": 35, "p99_us": 84, "max_us": 380,
+      "p50_us": 29, "p90_us": 32, "p99_us": 55, "max_us": 385,
       "write_amp": 0.317, "read_bpp": 64.0,
       "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0, "listFiles": 0,
       "ok": true
@@ -63,7 +63,7 @@
       "payloadBytes": 256,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 30, "p90_us": 36, "p99_us": 93, "max_us": 335,
+      "p50_us": 28, "p90_us": 31, "p99_us": 58, "max_us": 342,
       "write_amp": 0.079, "read_bpp": 256.0,
       "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0, "listFiles": 0,
       "ok": true
@@ -73,7 +73,7 @@
       "payloadBytes": 1024,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 37, "p90_us": 81, "p99_us": 128, "max_us": 299,
+      "p50_us": 33, "p90_us": 35, "p99_us": 68, "max_us": 248,
       "write_amp": 0.020, "read_bpp": 1024.0,
       "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0, "listFiles": 0,
       "ok": true
@@ -83,7 +83,7 @@
       "payloadBytes": 2048,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 37, "p90_us": 84, "p99_us": 134, "max_us": 507,
+      "p50_us": 34, "p90_us": 35, "p99_us": 74, "max_us": 385,
       "write_amp": 0.010, "read_bpp": 2048.0,
       "writeFile": 10, "writeAt": 1000, "readAt": 1000, "remove": 0, "listFiles": 0,
       "ok": true
@@ -93,7 +93,7 @@
       "payloadBytes": 256,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 31, "p90_us": 56, "p99_us": 108, "max_us": 428,
+      "p50_us": 30, "p90_us": 55, "p99_us": 114, "max_us": 300,
       "write_amp": 1.249, "read_bpp": 0.0,
       "writeFile": 168, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -103,7 +103,7 @@
       "payloadBytes": 1024,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 41, "p90_us": 82, "p99_us": 149, "max_us": 550,
+      "p50_us": 40, "p90_us": 77, "p99_us": 111, "max_us": 642,
       "write_amp": 1.077, "read_bpp": 0.0,
       "writeFile": 668, "writeAt": 1000, "readAt": 0, "remove": 0, "listFiles": 0,
       "ok": true
@@ -113,7 +113,7 @@
       "payloadBytes": 256,
       "records": 0,
       "repeat": 5,
-      "p50_us": 29, "p90_us": 30, "p99_us": 30, "max_us": 54,
+      "p50_us": 24, "p90_us": 28, "p99_us": 28, "max_us": 52,
       "write_amp": 0.000, "read_bpp": 0.0,
       "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0, "listFiles": 2,
       "ok": true
@@ -123,9 +123,9 @@
       "payloadBytes": 256,
       "records": 100,
       "repeat": 5,
-      "p50_us": 576, "p90_us": 578, "p99_us": 578, "max_us": 579,
+      "p50_us": 210, "p90_us": 214, "p99_us": 214, "max_us": 282,
       "write_amp": 0.000, "read_bpp": 282.4,
-      "writeFile": 0, "writeAt": 0, "readAt": 208, "remove": 0, "listFiles": 2,
+      "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0, "listFiles": 2,
       "ok": true
     },
     {
@@ -133,9 +133,9 @@
       "payloadBytes": 256,
       "records": 1000,
       "repeat": 5,
-      "p50_us": 6179, "p90_us": 6216, "p99_us": 6216, "max_us": 6897,
+      "p50_us": 1816, "p90_us": 1849, "p99_us": 1849, "max_us": 2285,
       "write_amp": 0.000, "read_bpp": 281.5,
-      "writeFile": 0, "writeAt": 0, "readAt": 2072, "remove": 0, "listFiles": 2,
+      "writeFile": 0, "writeAt": 0, "readAt": 0, "remove": 0, "listFiles": 2,
       "ok": true
     },
     {
