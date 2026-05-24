@@ -22,11 +22,15 @@ using namespace append_log_detail;
 
 namespace {
 
-constexpr const char* kSegmentPrefix  = "seg-";
-constexpr const char* kSegmentSuffix  = ".bin";
+constexpr const char*   kSegmentPrefix             = "seg-";
+constexpr const char*   kSegmentSuffix             = ".bin";
 // Duplicated from manifest.cpp for format() cleanup; do not create a shared header for these.
-constexpr const char* kManifestSlotA  = "manifest-a.bin";
-constexpr const char* kManifestSlotB  = "manifest-b.bin";
+constexpr const char*   kManifestSlotA             = "manifest-a.bin";
+constexpr const char*   kManifestSlotB             = "manifest-b.bin";
+// Allocation guard for whole-segment replay reads. Not config_.maxSegmentBytes: existing
+// stores may contain segments written under an older/larger config, and tests plant such
+// stores. This cap only prevents a corrupt manifest from forcing a huge RAM allocation.
+constexpr std::uint64_t kMaxReplaySegmentReadBytes = 256u * 1024u;
 
 inline std::uint32_t readLE32(const std::string& buf, std::size_t offset) {
     return static_cast<std::uint32_t>(static_cast<std::uint8_t>(buf[offset]))
@@ -183,17 +187,19 @@ Status AppendLogStore::scanSegments() {
         const bool isLastSegment = (segIdx + 1 == activeGenerations_.size());
         const std::string name = segmentName(gen);
 
-        std::uint64_t fileSize = 0;
-        if (!f->fileSize(name, fileSize).ok() || fileSize < kSegmentHeaderBytes) {
-            return Status::failure(StatusCode::DataCorrupt, "segment missing or too small");
+        std::uint64_t sz = 0;
+        if (!f->fileSize(name, sz).ok() ||
+            sz < kSegmentHeaderBytes ||
+            sz > kMaxReplaySegmentReadBytes) {
+            return Status::failure(StatusCode::DataCorrupt, "segment missing, too small, or too large");
         }
-
-        std::string headerBytes;
-        if (!f->readAt(name, 0, kSegmentHeaderBytes, headerBytes).ok()) {
-            return Status::failure(StatusCode::DataCorrupt, "cannot read segment header");
+        std::string segBuf;
+        if (!f->readFile(name, segBuf).ok() || segBuf.size() != sz) {
+            return Status::failure(StatusCode::DataCorrupt, "cannot read segment");
         }
+        const std::uint32_t fileSize = static_cast<std::uint32_t>(sz);
         SegmentHeader segHeader;
-        if (!parseSegmentHeader(headerBytes, segHeader)) {
+        if (!parseSegmentHeader(segBuf.substr(0, kSegmentHeaderBytes), segHeader)) {
             if (segHeader.version != kFormatVersion) {
                 return Status::failure(StatusCode::DataCorrupt, "segment version mismatch");
             }
@@ -211,9 +217,8 @@ Status AppendLogStore::scanSegments() {
             const std::uint32_t remaining = static_cast<std::uint32_t>(fileSize) - offset;
             if (remaining < 4) break; // too few bytes for magic: potential torn tail
 
-            std::string headerBuf;
             const std::uint32_t toRead = std::min(remaining, static_cast<std::uint32_t>(kEnqueueHeaderBytes));
-            if (!f->readAt(name, offset, toRead, headerBuf).ok()) break;
+            const std::string headerBuf = segBuf.substr(offset, toRead);
             if (headerBuf.size() < 4) break;
 
             const std::uint32_t magic = readLE32(headerBuf, 0);
@@ -232,9 +237,8 @@ Status AppendLogStore::scanSegments() {
 
                 if (totalEventBytes > remaining) break; // torn event (overflow-safe)
 
-                std::string payloadAndTrailer;
-                if (!f->readAt(name, offset + kEnqueueHeaderBytes,
-                               eh.payloadBytes + kEventTrailerBytes, payloadAndTrailer).ok()) break;
+                const std::string payloadAndTrailer = segBuf.substr(
+                    offset + kEnqueueHeaderBytes, eh.payloadBytes + kEventTrailerBytes);
                 if (payloadAndTrailer.size() < eh.payloadBytes + kEventTrailerBytes) break;
 
                 const std::uint32_t storedCrc    = readLE32(payloadAndTrailer, eh.payloadBytes);
@@ -283,8 +287,7 @@ Status AppendLogStore::scanSegments() {
             } else if (magic == kPopMagic) {
                 if (remaining < kPopEventBytes) break; // torn pop event
 
-                std::string popBuf;
-                if (!f->readAt(name, offset, kPopEventBytes, popBuf).ok()) break;
+                const std::string popBuf = segBuf.substr(offset, kPopEventBytes);
                 PopEvent pe;
                 if (!parsePopEvent(popBuf, pe)) { corrupt = true; break; }
 
