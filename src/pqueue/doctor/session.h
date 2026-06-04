@@ -413,16 +413,36 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
 
 namespace pqueue::doctor {
 
-// Blocks until DONE is received. Prints PQUEUE_DOCTOR_START + READY before
-// entering the command loop. Caller should ESP.restart() after this returns.
+// Maximum time with no command received before an idle doctor session gives up
+// and returns so the caller can reboot. This is the guarantee that the device
+// can never stay jammed in doctor mode when the host never sends DONE (crash,
+// timeout, USB unplug, power loss): the host cleanup is best-effort, the device
+// self-heals regardless. Must be comfortably longer than the gap between a
+// host's commands so legitimate sessions are never cut off.
+constexpr unsigned long kDoctorIdleTimeoutMs = 5UL * 60UL * 1000UL; // 5 minutes
+
+// Returns when DONE is received or the session is idle for longer than
+// kDoctorIdleTimeoutMs. Prints PQUEUE_DOCTOR_START + READY before entering the
+// command loop. Caller should ESP.restart() after this returns.
 inline void runSession() {
     using namespace session_detail;
     Serial.println("PQUEUE_DOCTOR_START");
     Serial.println("READY");
     CurrentTarget target;
+    unsigned long lastActivityMs = millis();
     while (true) {
         const std::string line = readLine();
-        if (line.empty()) continue;
+        if (line.empty()) {
+            // readLine() returns empty only on its read timeout. If no command
+            // has arrived for the idle window, assume no host is attached and
+            // exit so the caller reboots instead of blocking the app forever.
+            if (millis() - lastActivityMs >= kDoctorIdleTimeoutMs) {
+                Serial.println("doctor: idle timeout, exiting session");
+                break;
+            }
+            continue;
+        }
+        lastActivityMs = millis();
         if (!dispatch(line, target)) break;
         Serial.println("READY");
     }
