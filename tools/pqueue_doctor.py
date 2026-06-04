@@ -52,6 +52,11 @@ DEFAULT_BAUD = 115200
 RECV_TIMEOUT_S = 60
 READY_TIMEOUT_S = 30
 CMD_TIMEOUT_S = 30
+PROBE_TIMEOUT_S = 3
+# A token the device cannot interpret as a real command. A parked doctor session
+# answers any unknown verb with an error line followed by READY (session.h);
+# a running app ignores it. Used to detect an already-open session on connect.
+PROBE_TOKEN = "PQ_DOCTOR_PROBE"
 MAX_FILE_SIZE = 1 * 1024 * 1024
 
 _VALID_NAME = re.compile(r'^(manifest-[ab]\.bin|seg-[0-9a-f]{8}\.bin)$')
@@ -396,11 +401,28 @@ def _dump_lines(s):
     log("WARNING: timed out waiting for DUMP_END")
 
 
-def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
-    import serial
+def _probe_parked_session(s) -> bool:
+    """Return True if the device is already parked in a doctor session.
 
-    log(f"Opening {port} at {baud} baud")
-    s = serial.Serial(port, baud, timeout=1)
+    A parked session answers any unknown verb with an error line then READY
+    (session.h); a running app emits no READY in response. Sending the probe to
+    a running app is harmless (it ignores serial except for the trigger string).
+    """
+    s.reset_input_buffer()
+    s.write((PROBE_TOKEN + "\n").encode())
+    return _wait_for_ready(s, timeout_s=PROBE_TIMEOUT_S)
+
+
+def _enter_doctor_mode(s, args) -> bool:
+    """Get the device into a doctor session at READY. Returns True on success.
+
+    Detects three states on connect: already parked (recover/attach, no
+    trigger), running app (trigger or reset), or unreachable (fail).
+    """
+    log("Probing for an existing doctor session...")
+    if _probe_parked_session(s):
+        log("Device already parked in a doctor session; attaching to recover it.")
+        return True
 
     if args.trigger:
         # Running app is already up; send trigger and wait for it to enter doctor mode.
@@ -418,10 +440,38 @@ def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
     ready_timeout = READY_TIMEOUT_S * 4 if args.trigger else READY_TIMEOUT_S
     log("Waiting for READY...")
     if not _wait_for_ready(s, timeout_s=ready_timeout):
-        log("ERROR: timed out waiting for READY")
-        s.close()
+        log("ERROR: timed out waiting for READY (device unreachable or busy)")
         return False
+    return True
 
+
+def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
+    import serial
+
+    log(f"Opening {port} at {baud} baud")
+    s = serial.Serial(port, baud, timeout=1)
+
+    entered = False
+    try:
+        entered = _enter_doctor_mode(s, args)
+        if not entered:
+            return False
+        return _run_commands(s, targets, args)
+    finally:
+        # Best-effort cleanup: once in a session, always try to send DONE so the
+        # device reboots out instead of staying parked. This does NOT cover hard
+        # kills (SIGKILL, host power loss, USB unplug) -- the device-side idle
+        # timeout is the actual guarantee.
+        if entered:
+            try:
+                log("\nSending DONE...")
+                s.write(b"DONE\n")
+            except Exception:
+                pass
+        s.close()
+
+
+def _run_commands(s, targets: list, args) -> bool:
     all_ok = True
     multi = len(targets) > 1
 
@@ -533,9 +583,6 @@ def run_serial_session(port: str, baud: int, targets: list, args) -> bool:
                 log("ERROR: timed out waiting for READY after DUMP_ALL")
                 all_ok = False
 
-    log("\nSending DONE...")
-    s.write(b"DONE\n")
-    s.close()
     return all_ok
 
 
@@ -609,6 +656,13 @@ def main() -> None:
     if args.dump_file and not validate_filename(args.dump_file):
         p.error(f"--dump-file name must be manifest-[ab].bin or seg-[0-9a-f]{{8}}.bin, "
                 f"got: {args.dump_file!r}")
+
+    # The session runs commands in a fixed order (format before dump), so a
+    # combined run would wipe the queue and then dump the empty store. Reject it.
+    if args.format and (args.dump_all or args.dump_file):
+        p.error("--format cannot be combined with --dump-all/--dump-file: format "
+                "runs before dump, leaving nothing to capture. Dump in a separate "
+                "invocation, verify it, then format.")
 
     _SERIAL_ONLY = ['info', 'list', 'diag', 'validate', 'compact', 'compact_all',
                     'drop_front_if_corrupt', 'recover_stale_lock', 'format',
