@@ -39,7 +39,7 @@ pqueue::Config appendLogQueueConfigForBase(const char* basePath) {
     cfg.reservedBytes  = 0;
     cfg.minFreeBytes   = 0;
     cfg.maxSegmentBytes = 256;
-    cfg.maxSegments    = 8;
+    cfg.idleCompactionTargetSegments    = 8;
     return cfg;
 }
 

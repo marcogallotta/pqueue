@@ -170,7 +170,7 @@ void test_compaction_burst_workload() {
     cfg.basePath        = kBasePath;
     cfg.backend         = pqueue::StorageBackend::LittleFS;
     cfg.maxSegmentBytes = kMaxSegmentBytes;
-    cfg.maxSegments     = kMaxSegments;
+    cfg.idleCompactionTargetSegments     = kMaxSegments;
     cfg.maxTotalBytes   = kMaxTotalBytes;
     cfg.minFreeBytes    = 0;
     cfg.fileSystem      = countingFs;

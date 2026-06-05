@@ -59,7 +59,7 @@ static pqueue::Config makeConfig(std::uint32_t recordSizeBytes) {
     c.basePath        = kBasePath;
     c.storageBackend  = pqueue::StorageBackend::LittleFS;
     c.recordSizeBytes = recordSizeBytes;
-    c.maxSegments     = 200;
+    c.idleCompactionTargetSegments     = 200;
     c.reservedBytes   = 2108736;
     c.minFreeBytes    = 0;
     return c;

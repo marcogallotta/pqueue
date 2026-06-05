@@ -32,7 +32,7 @@ pqueue::Config queueConfig() {
     cfg.reservedBytes   = 0;
     cfg.minFreeBytes    = 0;
     cfg.maxSegmentBytes = 128;
-    cfg.maxSegments     = 16;
+    cfg.idleCompactionTargetSegments     = 16;
     return cfg;
 }
 

@@ -119,11 +119,12 @@ TEST_CASE("append-log: validate detects corrupt CRC in non-last segment") {
     CHECK_FALSE(result.errors.empty());
 }
 
-TEST_CASE("append-log: compaction triggered by segment count") {
+TEST_CASE("append-log: enqueue/pop cycle with small segment size") {
+    // Verifies basic correctness when records span many segments (small maxSegmentBytes).
+    // idleCompactionTargetSegments is a soft idle hint; no compaction fires on the hot path.
     cleanSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 128;
-    cfg.maxSegments = 3;
     pqueue::Queue q(cfg);
 
     std::vector<std::string> expected;
@@ -141,11 +142,12 @@ TEST_CASE("append-log: compaction triggered by segment count") {
     }
 }
 
-TEST_CASE("compaction trigger: remount after auto-compaction preserves FIFO order (critical)") {
+TEST_CASE("append-log: remount preserves FIFO order with multiple segments") {
+    // Verifies that enqueuing across many segments, dismounting, remounting, and
+    // draining produces the same FIFO order. No hot-path compaction fires.
     cleanSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 128;
-    cfg.maxSegments = 3;
 
     std::vector<std::string> expected;
     {
@@ -170,11 +172,14 @@ TEST_CASE("compaction trigger: remount after auto-compaction preserves FIFO orde
     }
 }
 
-TEST_CASE("compaction trigger: auto-triggers on size-based count after non-monotonic compaction") {
+TEST_CASE("append-log: segment count exceeding idle target does not affect enqueue/pop correctness") {
+    // idleCompactionTargetSegments is a soft hint for idle compaction scheduling,
+    // not a hard limit. Exceeding the target does not trigger hot-path compaction
+    // or break enqueue/pop/remount correctness.
     cleanSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 128;
-    cfg.maxSegments = 2;
+    cfg.idleCompactionTargetSegments = 2; // intentionally low; will be exceeded
 
     std::vector<std::string> expected;
     {

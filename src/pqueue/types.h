@@ -46,7 +46,7 @@ struct Config {
     std::shared_ptr<FileSystem> fileSystem;
     std::uint32_t maxSegmentBytes = 4096;
     std::uint32_t minFreeBytes    = 32 * 1024;
-    std::uint8_t  maxSegments     = 16;
+    std::uint8_t  idleCompactionTargetSegments = 16;
     std::uint32_t drainReserveBytes = 0;
 };
 

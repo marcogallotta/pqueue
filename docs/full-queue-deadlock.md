@@ -640,12 +640,7 @@ Implement in staged, independently-reviewable PRs -- not one giant change. Each
 stage is safe to land on its own and leaves the queue working. Order chosen so
 the deadlock class dies first, then drainability, then churn, then proof.
 
-1. **Elastic cap + mount bounds.** Raise `kManifestMaxRanges` to the derived hard
-   cap (1024); make rotate/parse/compaction gates use it; add mount-time
-   range-span bounds validation BEFORE `applyManifestToRam` expands. Tests:
-   spill past 4 ranges, mount rejects an over-cap / huge-span manifest, the
-   `~/pqdump` specimen drains. (gaps 6 partial, 8; rollover test rewrite.)
-   -> kills the `RangeLimitExceeded` deadlock class.
+1. ~~**Elastic cap + mount bounds.**~~ **DONE.** `kManifestMaxRanges` raised to 1024; rotate/parse/compaction gates updated; mount-time range-span bounds validation added before `applyManifestToRam` expands; rollover test rewritten to assert spill-past-4 behaviour. (gaps 6 partial, 8.) -> kills the `RangeLimitExceeded` deadlock class.
 2. ~~**Admission + drain reserve on enqueue AND rewrite.**~~ **DONE.** `drainReserveBytes`
    added to both `maxTotalBytes` and `minFreeBytes` admission in `commitEnqueue` and
    `rewriteRecord`; `appendGrowthBytes` now includes manifest range-entry cost on rotation;
@@ -658,11 +653,7 @@ the deadlock class dies first, then drainability, then churn, then proof.
 3. ~~**DropOldest loop.**~~ **DONE.** `Queue::enqueue` now loops eviction until
    admission passes or the queue is empty; the single-eviction + one-retry logic
    is replaced by a `while` on `QueueFull`. (gap 4.)
-4. **Move segment-count compaction off the hot path.** `needsCompaction()` stops
-   gating on `activeGenerations_.size() > maxSegments`; hot path compacts only on
-   real `maxTotalBytes`/`minFreeBytes` pressure; keep a soft idle defrag trigger
-   (dead-ratio) toward the 4-range target; `maxSegments` -> soft
-   `idleCompactionTargetSegments`. (gap 7.)
+4. ~~**Move segment-count compaction off the hot path.**~~ **DONE.** Removed `activeGenerations_.size() > maxSegments` from `needsCompaction()`; the pre-rotate compaction block in `commitEnqueue` is removed entirely (dead after segment-count arm gone); `maxSegments` renamed to `idleCompactionTargetSegments` in `AppendLogConfig`, `pqueue::Config`, doctor, tests, and tools; `CompactIdleResult::segmentCountExceedsTarget` added so callers can schedule idle compaction when segment count drifts above the soft target. (gap 7.)
 5. **Targeted front-dead-segment reclaim** wired to drain/admission pressure
    (reuse the dead-prefix path; advance `startGen`, count-neutral). Light
    coalescing of sub-512 B remainders. (gaps 5, 6.)

@@ -98,18 +98,19 @@ TEST_CASE("compaction: compactOneSegment removes dead range without writing a ne
     expectRecord(store, 1, "c");
 }
 
-TEST_CASE("compaction: compactOneSegment is no-op under segment-count pressure when all ranges are live") {
-    // needsCompaction() fires due to segment count; all records live → no-op.
+TEST_CASE("compaction: compactOneSegment is no-op when segment count exceeds soft idle target but all ranges are live") {
+    // idleCompactionTargetSegments is a soft idle hint, not a hot-path trigger.
+    // With all records live and no dead bytes, compaction is still a no-op.
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxSegments     = 1;
+    cfg.idleCompactionTargetSegments = 1;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail; 2 gens > maxSegments=1
+    storeEnqueue(store, 3, "c"); // gen=1 full, gen=2 tail; 2 segs exceeds target of 1
 
     const auto st = store.compactOneSegment();
     CHECK(st.ok());
@@ -658,7 +659,7 @@ TEST_CASE("compaction: manifest state survives remount after rotate-before-compa
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxSegments     = 200;
+    cfg.idleCompactionTargetSegments     = 200;
 
     std::uint32_t seq  = 1;
     std::uint32_t head = 1;
@@ -686,7 +687,7 @@ TEST_CASE("compaction: orphan tail range is eliminated after its records are all
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxSegments     = 200;
+    cfg.idleCompactionTargetSegments     = 200;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 

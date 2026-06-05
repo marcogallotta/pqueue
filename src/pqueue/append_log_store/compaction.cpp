@@ -640,6 +640,8 @@ CompactIdleResult AppendLogStore::compactIdle(std::size_t maxSteps) {
         result.outputSegments += stepOutput;
     }
     result.moreWorkLikely = result.status.ok() && result.noOps == 0 && result.compactions > 0;
+    result.segmentCountExceedsTarget =
+        activeGenerations_.size() > config_.idleCompactionTargetSegments;
     result.remainingDeadBytes = sumDeadBytes();
     result.bytesReclaimed = totalOnDiskBytes_ < diskBefore
         ? diskBefore - totalOnDiskBytes_ : 0;
@@ -655,8 +657,6 @@ Status AppendLogStore::compactFull() {
 }
 
 bool AppendLogStore::needsCompaction() const {
-    if (activeGenerations_.size() > config_.maxSegments) return true;
-
     const std::uint64_t free = fs_ ? fs_->freeBytes() : 0;
     if (free < config_.minFreeBytes) return true;
 

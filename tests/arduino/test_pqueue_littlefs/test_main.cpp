@@ -52,7 +52,7 @@ pqueue::Config appendLogQueueConfigForBase(
     config.storageBackend = pqueue::StorageBackend::LittleFS;
     config.recordSizeBytes = recordSizeBytes;
     config.maxSegmentBytes = 256;
-    config.maxSegments = 8;
+    config.idleCompactionTargetSegments = 8;
     config.reservedBytes = 0;
     config.minFreeBytes = 0;
     return config;

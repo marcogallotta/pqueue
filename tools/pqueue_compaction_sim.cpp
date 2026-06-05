@@ -25,7 +25,7 @@ struct WorkloadParams {
     double        enqueueProb          = 0.6;   // random mode: probability of enqueue vs pop
     std::uint32_t recordSize           = 150;   // bytes per record
     std::uint32_t maxSegmentBytes      = 4096;
-    std::uint8_t  maxSegments          = 200;   // high: disables internal auto-compact
+    std::uint8_t  idleCompactionTargetSegments = 200; // soft idle target; no longer a hot-path trigger
     float         deadRatioTrigger     = 0.25f; // compact if any range >= this fraction dead
     std::uint32_t rangePressureTrigger = 3;     // compact if range count >= this (kManifestMaxRanges is now 1024; retune for >4-range workloads)
     // Burst mode: models offline consumer pattern (enqueue N, drain ratio R, repeat).
@@ -263,8 +263,8 @@ static SimMetrics runSimulation(const WorkloadParams& wp, Strategy& strategy) {
     cfg.basePath        = "sim";
     cfg.fileSystem      = counting;
     cfg.maxSegmentBytes = wp.maxSegmentBytes;
-    cfg.maxSegments     = wp.maxSegments;
-    cfg.maxTotalBytes   = wp.maxSegmentBytes * wp.maxSegments * 4;
+    cfg.idleCompactionTargetSegments = wp.idleCompactionTargetSegments;
+    cfg.maxTotalBytes   = wp.maxSegmentBytes * wp.idleCompactionTargetSegments * 4;
     cfg.minFreeBytes    = 0;
 
     pqueue::AppendLogStore store(cfg);
@@ -451,7 +451,7 @@ int main() {
         WorkloadParams params;
     };
 
-    // maxSegments=200 disables internal auto-compaction so the external strategy
+    // idleCompactionTargetSegments=200 is a high soft target; the external strategy
     // is solely responsible for keeping range count in check.
     //
     // Real-world sizes: maxSegmentBytes=4096, recordSizes=64/150/492,

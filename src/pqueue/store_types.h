@@ -95,6 +95,10 @@ struct CompactIdleResult {
     // one successful compaction -- meaning more candidates likely remain.
     // False when the loop stopped due to a noOp or when maxSteps was 0.
     bool moreWorkLikely = false;
+    // True when segment count still exceeds the soft idle target after this call.
+    // Callers can use this as a hint to schedule another compactIdle when dead
+    // bytes become available (e.g. after the next drain).
+    bool segmentCountExceedsTarget = false;
     std::uint32_t bytesReclaimed = 0;      // totalOnDiskBytes before - after
     std::uint32_t deadBytesBefore = 0;     // dead bytes across referenced sealed segments before the call
     std::uint32_t remainingDeadBytes = 0;  // dead bytes across referenced sealed segments after the call

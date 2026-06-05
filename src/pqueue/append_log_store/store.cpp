@@ -656,36 +656,33 @@ Status AppendLogStore::commitEnqueue(std::uint32_t sequence, const std::string& 
     }
 
     if (config_.minFreeBytes > 0) {
-        const std::uint64_t free = freeBytes();
         const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
-        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes) {
-            return diagnostic(Severity::Warning,
-                Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
-                "commitEnqueue");
+        const std::uint64_t needed = static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes;
+        while (freeBytes() < needed) {
+            Status compact = compactOneSegment();
+            if (!compact.ok()) return diagnostic(Severity::Error, compact, "commitEnqueue");
+            if (compact.isNoOp()) {
+                return diagnostic(Severity::Warning,
+                    Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
+                    "commitEnqueue");
+            }
+#ifdef ARDUINO
+            did_compact = true;
+#endif
         }
     }
 
     if (activeSegmentBytes_ > kSegmentHeaderBytes &&
         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes) {
-        if (needsCompaction()) {
-            Status cst = compactOneSegment();
-            if (!cst.ok()) return diagnostic(Severity::Error, cst, "commitEnqueue");
 #ifdef ARDUINO
-            did_compact = true;
+        const std::uint32_t _tr = millis();
 #endif
-        }
-        if (activeSegmentBytes_ > kSegmentHeaderBytes &&
-            activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes) {
+        Status rst = rotateSegment();
 #ifdef ARDUINO
-            const std::uint32_t _tr = millis();
+        ms_rotate = millis() - _tr;
+        did_rotate = true;
 #endif
-            Status rst = rotateSegment();
-#ifdef ARDUINO
-            ms_rotate = millis() - _tr;
-            did_rotate = true;
-#endif
-            if (!rst.ok()) return diagnostic(Severity::Error, rst, "commitEnqueue");
-        }
+        if (!rst.ok()) return diagnostic(Severity::Error, rst, "commitEnqueue");
     }
 
 #ifdef ARDUINO
@@ -779,12 +776,16 @@ Status AppendLogStore::rewriteRecord(std::uint32_t sequence, const std::string& 
     }
 
     if (config_.minFreeBytes > 0) {
-        const std::uint64_t free = freeBytes();
         const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
-        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes) {
-            return diagnostic(Severity::Warning,
-                Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
-                "rewriteRecord");
+        const std::uint64_t needed = static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes;
+        while (freeBytes() < needed) {
+            Status compact = compactOneSegment();
+            if (!compact.ok()) return diagnostic(Severity::Error, compact, "rewriteRecord");
+            if (compact.isNoOp()) {
+                return diagnostic(Severity::Warning,
+                    Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
+                    "rewriteRecord");
+            }
         }
     }
 

@@ -26,7 +26,7 @@ struct CurrentTarget {
     std::optional<std::uint32_t> recordSizeBytes;
     std::optional<std::uint32_t> maxSegmentBytes;
     std::optional<std::uint32_t> minFreeBytes;
-    std::optional<std::uint8_t>  maxSegments;
+    std::optional<std::uint8_t>  idleCompactionTargetSegments;
 };
 
 inline pqueue::Config makeQueueConfig(const CurrentTarget& t) {
@@ -36,7 +36,7 @@ inline pqueue::Config makeQueueConfig(const CurrentTarget& t) {
     if (t.recordSizeBytes) qConfig.recordSizeBytes = *t.recordSizeBytes;
     if (t.maxSegmentBytes) qConfig.maxSegmentBytes = *t.maxSegmentBytes;
     if (t.minFreeBytes)    qConfig.minFreeBytes    = *t.minFreeBytes;
-    if (t.maxSegments)     qConfig.maxSegments     = *t.maxSegments;
+    if (t.idleCompactionTargetSegments) qConfig.idleCompactionTargetSegments = *t.idleCompactionTargetSegments;
     return qConfig;
 }
 
@@ -329,8 +329,8 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
                 }
             } else if (key == "minFreeBytes") {
                 if (val < 0) { sprintln("error: TARGET config minFreeBytes must be >= 0"); return true; }
-            } else if (key == "maxSegments") {
-                if (val < 1 || val > 255) { sprintln("error: TARGET config maxSegments must be 1-255"); return true; }
+            } else if (key == "idleCompactionTargetSegments" || key == "maxSegments") {
+                if (val < 1 || val > 255) { sprintln("error: TARGET config idleCompactionTargetSegments must be 1-255"); return true; }
             } else {
                 Serial.print("error: TARGET unknown config key: "); Serial.println(key.c_str());
                 return true;
@@ -348,7 +348,7 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
             else if (key == "recordSizeBytes") target.recordSizeBytes = static_cast<std::uint32_t>(val);
             else if (key == "maxSegmentBytes") target.maxSegmentBytes = static_cast<std::uint32_t>(val);
             else if (key == "minFreeBytes")    target.minFreeBytes    = static_cast<std::uint32_t>(val);
-            else if (key == "maxSegments")     target.maxSegments     = static_cast<std::uint8_t>(val);
+            else if (key == "idleCompactionTargetSegments" || key == "maxSegments") target.idleCompactionTargetSegments = static_cast<std::uint8_t>(val);
         }
         target.selected = true;
         Serial.print("target: "); Serial.print(target.name.c_str());
@@ -357,7 +357,7 @@ inline bool dispatch(const std::string& line, CurrentTarget& target) {
         if (target.recordSizeBytes) { Serial.print(" recordSizeBytes="); Serial.print(*target.recordSizeBytes); }
         if (target.maxSegmentBytes) { Serial.print(" maxSegmentBytes="); Serial.print(*target.maxSegmentBytes); }
         if (target.minFreeBytes)    { Serial.print(" minFreeBytes=");    Serial.print(*target.minFreeBytes); }
-        if (target.maxSegments)     { Serial.print(" maxSegments=");     Serial.print(static_cast<int>(*target.maxSegments)); }
+        if (target.idleCompactionTargetSegments) { Serial.print(" idleCompactionTargetSegments="); Serial.print(static_cast<int>(*target.idleCompactionTargetSegments)); }
         Serial.println();
         return true;
     }

@@ -52,7 +52,7 @@ void test_compactIdle_latency() {
     cfg.storageBackend  = pqueue::StorageBackend::LittleFS;
     cfg.reservedBytes   = 2108736;
     cfg.recordSizeBytes = 492;
-    cfg.maxSegments     = 200;
+    cfg.idleCompactionTargetSegments     = 200;
     cfg.minFreeBytes    = 0;
 
     pqueue::Queue q(cfg);

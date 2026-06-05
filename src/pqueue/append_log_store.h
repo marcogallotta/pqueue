@@ -28,7 +28,7 @@ struct AppendLogConfig {
     // queue. Set to kDrainReserveBytes (4096) in production; default 0 preserves the
     // pre-Stage-2 admission threshold so existing tests need no changes.
     std::uint32_t drainReserveBytes = 0;
-    std::uint8_t maxSegments = 16;
+    std::uint8_t idleCompactionTargetSegments = 16;
     std::uint8_t maxOutputSegments = 8; // max output segments per compactOneSegment call
     std::size_t maxRecordBytes = 4096;
     EventOptions events;

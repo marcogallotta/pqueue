@@ -80,7 +80,7 @@ pqueue::Config queueConfig(const std::string& basePath,
     cfg.basePath        = basePath;
     cfg.recordSizeBytes = recordSizeBytes;
     cfg.reservedBytes   = kBenchmarkMaxTotalBytes;
-    cfg.maxSegments     = 200;
+    cfg.idleCompactionTargetSegments = 200;
     cfg.storageBackend  = pqueue::StorageBackend::Posix;
     cfg.fileSystem      = fs;
     return cfg;
@@ -92,7 +92,7 @@ pqueue::Config mountQueueConfig(const std::string& basePath,
     cfg.basePath        = basePath;
     cfg.recordSizeBytes = kMountPayloadBytes;
     cfg.reservedBytes   = kMountMaxTotalBytes;
-    cfg.maxSegments     = 200;
+    cfg.idleCompactionTargetSegments = 200;
     cfg.storageBackend  = pqueue::StorageBackend::Posix;
     cfg.fileSystem      = fs;
     return cfg;
@@ -141,7 +141,7 @@ struct SampleSet {
 struct BenchmarkConfig {
     std::string   gitHash;
     std::uint32_t maxSegmentBytes    = 4096;
-    std::uint32_t maxSegments        = 200;
+    std::uint32_t idleCompactionTargetSegments = 200;
     std::uint32_t maxTotalBytes      = kBenchmarkMaxTotalBytes;
     std::uint32_t maxOutputSegments  = 8;
     std::string   platform           = "posix";
@@ -588,7 +588,7 @@ void emitJson(const std::vector<BenchmarkResult>& results, const BenchmarkConfig
     std::printf("  \"config\": {\n");
     std::printf("    \"gitHash\": \"%s\",\n", cfg.gitHash.c_str());
     std::printf("    \"maxSegmentBytes\": %u,\n", cfg.maxSegmentBytes);
-    std::printf("    \"maxSegments\": %u,\n", cfg.maxSegments);
+    std::printf("    \"idleCompactionTargetSegments\": %u,\n", cfg.idleCompactionTargetSegments);
     std::printf("    \"maxTotalBytes\": %u,\n", cfg.maxTotalBytes);
     std::printf("    \"maxOutputSegments\": %u,\n", cfg.maxOutputSegments);
     std::printf("    \"platform\": \"%s\"\n", cfg.platform.c_str());
@@ -746,10 +746,10 @@ static std::string fmtPay(std::uint32_t v)   { char b[32]; std::snprintf(b,sizeo
 void emitMarkdown(const std::vector<BenchmarkResult>& results, const BenchmarkConfig& cfg) {
     std::printf("# Benchmark Results\n\n");
     std::printf("git: `%s`  platform: %s  "
-                "maxSegmentBytes: %u  maxSegments: %u  maxTotalBytes: %u  "
+                "maxSegmentBytes: %u  idleCompactionTargetSegments: %u  maxTotalBytes: %u  "
                 "maxOutputSegments: %u\n\n",
                 cfg.gitHash.c_str(), cfg.platform.c_str(),
-                cfg.maxSegmentBytes, cfg.maxSegments,
+                cfg.maxSegmentBytes, cfg.idleCompactionTargetSegments,
                 cfg.maxTotalBytes, cfg.maxOutputSegments);
     std::printf("*Wall-clock times are host-local (POSIX in-memory FS) and machine-dependent. "
                 "Use on-device tests for real latency numbers.*\n\n");
