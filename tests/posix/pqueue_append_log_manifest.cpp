@@ -103,7 +103,7 @@ TEST_CASE("manifest: structural byte violations are rejected") {
     run("wrong version",     [](auto& b){ b[4] = 0x02; });
     run("wrong headerBytes", [](auto& b){ b[6] = 0xFF; });
     run("wrong footer",      [](auto& b){ b[b.size()-1] ^= 0xFF; });
-    run("rangeCount > 4",    [](auto& b){ b[16] = 0x05; });
+    run("corrupt rangeCount byte", [](auto& b){ b[16] = 0x05; });
     run("buffer too small",  [](auto& b){ b.pop_back(); });
     run("trailing bytes",    [](auto& b){ b.push_back(0x00); });
 }
@@ -123,9 +123,11 @@ TEST_CASE("manifest: semantic field violations are rejected") {
         ManifestData out;
         CHECK_FALSE(parseManifest(buf.data(), buf.size(), out));
     };
-    run("tailGen==0 with ranges", [](auto& b){ b[26]=b[27]=b[28]=b[29]=0; recomputeManifestCrc(b); });
-    run("startGen == 0",          [](auto& b){ b[18]=b[19]=b[20]=b[21]=0; recomputeManifestCrc(b); });
-    run("endGen < startGen",      [](auto& b){ b[22]=1; b[23]=b[24]=b[25]=0; recomputeManifestCrc(b); });
+    run("tailGen==0 with ranges",    [](auto& b){ b[26]=b[27]=b[28]=b[29]=0; recomputeManifestCrc(b); });
+    run("startGen == 0",             [](auto& b){ b[18]=b[19]=b[20]=b[21]=0; recomputeManifestCrc(b); });
+    run("endGen < startGen",         [](auto& b){ b[22]=1; b[23]=b[24]=b[25]=0; recomputeManifestCrc(b); });
+    // rangeCount=1025 > kManifestMaxRanges=1024; headerBytes left as-is so the range-count gate fires first
+    run("rangeCount > kManifestMaxRanges", [](auto& b){ b[16]=0x01; b[17]=0x04; recomputeManifestCrc(b); });
 }
 
 // --- Manifest publish tests ---
