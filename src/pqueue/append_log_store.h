@@ -134,7 +134,6 @@ private:
 
     Status scanSegments();
 
-    bool needsCompaction() const;
     // Returns the index of the manifest range fully containing [startGen, endGen],
     // or manifestRanges_.size() if none exists.
     std::size_t findParentRangeIdx(std::uint32_t startGen, std::uint32_t endGen) const;

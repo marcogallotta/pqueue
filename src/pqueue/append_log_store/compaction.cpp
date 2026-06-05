@@ -673,12 +673,6 @@ Status AppendLogStore::compactFull() {
     return result.status;
 }
 
-bool AppendLogStore::needsCompaction() const {
-    const std::uint64_t free = fs_ ? fs_->freeBytes() : 0;
-    if (free < config_.minFreeBytes) return true;
-
-    return false;
-}
 
 void AppendLogStore::cleanupInputSegments(const CompactionRange& effectiveRange) {
     auto f = fs();
