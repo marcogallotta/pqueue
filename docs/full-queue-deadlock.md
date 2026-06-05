@@ -288,6 +288,7 @@ admission + out-of-band retry attempts.** (= #1 with its `drainReserveBytes`
 admission, that admission also applied to the rewrite path, plus #5 to remove the
 normal-workload `rewriteFront` churn.) Together they give: impossible wedge, clean
 bytes-full behaviour, and no churn-driven fragmentation in normal operation.
+Stages 1–6 are done; only the fuzz proof (stage 7) remains.
 
 ### Lead candidate (#1, elastic range cap): design + open checks
 
@@ -660,9 +661,11 @@ the deadlock class dies first, then drainability, then churn, then proof.
    advancing the oldest range `startGen` (or dropping the range) before retrying
    admission. This wires the count-neutral dead-prefix path into the drain/admission
    pressure loop. (gap 5; gap 6 light coalescing remains future perf hygiene.)
-6. **Out-of-band retry attempts.** Stop `rewriteFront` rewriting the whole record
-   to bump the attempt counter; store attempts in a sidecar (or RAM-only,
-   reset-on-reboot). Removes the normal-workload churn. (candidate #5.)
+6. ~~**Out-of-band retry attempts.**~~ **DONE.** `Outbox` now tracks `frontAttempts_`
+   in RAM (reset on pop/drop/remount); `drainOne` RetryLater no longer calls
+   `rewriteFront` or re-encodes the envelope. The `attempts` field in the envelope
+   is always written as 0 and is vestigial. Removes the normal-workload churn.
+   (candidate #5.)
 7. **Fuzz the ugly case (gates "resolved").** Near-full + `rewriteFront`-heavy
    retries + interleaved pop/drain + fragmented ranges > 4. Invariant: pop never
    returns `RangeLimitExceeded`; the queue drains without spurious `WriteFailed`.

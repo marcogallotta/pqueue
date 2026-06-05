@@ -37,8 +37,6 @@ using ClockCallback = std::uint64_t (*)(void* context);
 using RandCallback = std::uint32_t (*)(void* context, std::uint32_t range);
 using OutboxPayloadValidator = bool (*)(void* context, const std::string& payload, ValidationIssue& issue);
 
-// Persistent-only v1 outbox config.
-// Retry attempt count is persisted in the envelope; retry cooldown timing is RAM-only.
 struct OutboxConfig {
     // Retryable sends are retried indefinitely. attempts is retained only as a saturated diagnostic counter.
     std::uint16_t maxDrainAttemptsPerSecond = 5;
@@ -163,6 +161,11 @@ private:
     bool hasDrainWindow_ = false;
     std::uint64_t frontNextAttemptMs_ = 0;
     bool hasFrontCooldown_ = false;
+    // Attempt count for the current front record. Front-local: resets to 0 whenever
+    // the front changes (pop, drop, remount). A record that was never front when it was
+    // live-sent (e.g. enqueued directly because the queue was non-empty) starts at 0
+    // when it first reaches the front, which is correct — it hasn't been retried yet.
+    std::uint8_t frontAttempts_ = 0;
     std::uint16_t corruptDropsThisLifetime_ = 0;
 };
 

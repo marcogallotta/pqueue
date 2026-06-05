@@ -301,7 +301,7 @@ TEST_CASE("pqueue outbox keeps retry cooldown in RAM only") {
 #endif
 }
 
-TEST_CASE("pqueue outbox persists retry attempt count across remount") {
+TEST_CASE("pqueue outbox resets retry attempt count on remount") {
 #ifndef ARDUINO
     cleanOutboxSpool();
     FakeSender sender;
@@ -315,16 +315,16 @@ TEST_CASE("pqueue outbox persists retry attempt count across remount") {
         CHECK_EQ(outbox.submit("fresh").status, pqueue::SubmitStatus::Queued);
     }
 
-    // After remount, drain sends successfully; persisted attempt count should be 1.
+    // Attempt count is RAM-only and resets on remount.
     auto restarted = makeOutbox(sender, clock, config);
     auto drain = restarted.drain();
     CHECK_EQ(drain.sent, 1U);
     REQUIRE_GE(sender.retries.size(), 2U);
-    CHECK_EQ(sender.retries[1].attempts, 1U);
+    CHECK_EQ(sender.retries[1].attempts, 0U);
 #endif
 }
 
-TEST_CASE("pqueue outbox passes persisted attempts to sender") {
+TEST_CASE("pqueue outbox increments attempt count on each in-session retry") {
 #ifndef ARDUINO
     cleanOutboxSpool();
     FakeSender sender;
@@ -348,6 +348,38 @@ TEST_CASE("pqueue outbox passes persisted attempts to sender") {
     REQUIRE_GE(sender.retries.size(), 3U);
     CHECK_EQ(sender.retries[1].attempts, 1U);
     CHECK_EQ(sender.retries[2].attempts, 2U);
+#endif
+}
+
+TEST_CASE("pqueue outbox attempt count resets for next front record") {
+#ifndef ARDUINO
+    // A record queued behind an older front starts with attempt count 0 when it
+    // reaches the front. Attempts are front-local and do not carry across records.
+    cleanOutboxSpool();
+    FakeSender sender;
+    sender.decisions.push_back(pqueue::SendDecision::RetryLater); // live send of A fails
+    FakeClock clock;
+    pqueue::OutboxConfig config = testOutboxConfig();
+    config.initialRetryDelayMs = 0;
+
+    auto outbox = makeOutbox(sender, clock, config);
+    // A: empty queue -> live send -> RetryLater -> enqueued, frontAttempts_=1
+    REQUIRE(outbox.submit("A").status == pqueue::SubmitStatus::Queued);
+    // B: queue non-empty -> enqueued directly without a live send
+    REQUIRE(outbox.submit("B").status == pqueue::SubmitStatus::Queued);
+
+    // Drain A (Sent) -> clears frontAttempts_ to 0
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    REQUIRE(outbox.drain().sent == 1U);
+
+    // Drain B: it was never live-sent, so attempts should start at 0.
+    // Advance clock to clear the per-second rate window from draining A.
+    clock.nowMs += 1000;
+    sender.decisions.push_back(pqueue::SendDecision::Sent);
+    REQUIRE(outbox.drain().sent == 1U);
+
+    REQUIRE_GE(sender.retries.size(), 3U);
+    CHECK_EQ(sender.retries[2].attempts, 0U);
 #endif
 }
 

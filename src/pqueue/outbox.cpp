@@ -228,8 +228,10 @@ SubmitResult Outbox::submit(Span payload) {
             return submitResult(SubmitStatus::Dropped, st);
         }
         case SendDecision::RetryLater: {
-            const auto queued = enqueueRecord(payloadStr, 1);
-            if (queued.status == SubmitStatus::Queued) {
+            const bool wasEmpty = queue_.stats().count == 0;
+            const auto queued = enqueueRecord(payloadStr, 0);
+            if (queued.status == SubmitStatus::Queued && wasEmpty) {
+                frontAttempts_ = 1;
                 const std::uint32_t delayMs = computeRetryDelay(0, result.retryAfterMs);
                 setFrontCooldown(clock_(clockContext_) + delayMs);
                 emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "submit", 1, delayMs, 1);
@@ -322,7 +324,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
             Severity::Debug,
             Status::failure(StatusCode::SendFailed, "front request retry cooldown not due"),
             "drain",
-            decoded.attempts,
+            frontAttempts_,
             static_cast<std::uint32_t>(frontNextAttemptMs_ - nowMs));
         return result;
     }
@@ -334,7 +336,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
             Severity::Debug,
             Status::failure(StatusCode::SendFailed, "drain rate limit not due"),
             "drain",
-            decoded.attempts,
+            frontAttempts_,
             drainRateRemainingMs(nowMs));
         return result;
     }
@@ -346,9 +348,9 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
         Severity::Debug,
         Status::success(),
         "drain_send_start",
-        decoded.attempts,
+        frontAttempts_,
         0);
-    const SendResult sendResult = dispatchSend(decoded.payload, RetryState{decoded.attempts});
+    const SendResult sendResult = dispatchSend(decoded.payload, RetryState{frontAttempts_});
     switch (sendResult.decision) {
         case SendDecision::Sent:
             st = queue_.pop();
@@ -361,7 +363,7 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
             clearFrontCooldown();
             result.sent += 1;
             result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
-            emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "drain", decoded.attempts, 0);
+            emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "drain", frontAttempts_, 0);
             return result;
 
         case SendDecision::Drop:
@@ -380,31 +382,17 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
                 Severity::Warning,
                 Status::failure(StatusCode::Dropped, "request was dropped by send policy"),
                 "drain",
-                decoded.attempts,
+                frontAttempts_,
                 0);
             return result;
 
         case SendDecision::RetryLater: {
-            const std::uint8_t nextAttempts = decoded.attempts == std::numeric_limits<std::uint8_t>::max()
-                ? decoded.attempts
-                : static_cast<std::uint8_t>(decoded.attempts + 1);
-
-            if (!envelope::encodeEnvelope(nextAttempts, decoded.payload, record)) {
-                result.queueError = true;
-                result.detail = Status::failure(StatusCode::EncodeFailed, "failed to encode retry envelope");
-                emitDiagnostic(Severity::Error, result.detail, "drain");
-                return result;
+            if (frontAttempts_ < std::numeric_limits<std::uint8_t>::max()) {
+                frontAttempts_++;
             }
-            st = queue_.rewriteFront(record);
-            if (!st.ok()) {
-                result.queueError = true;
-                result.detail = st;
-                emitDiagnostic(Severity::Error, st, "drain");
-                return result;
-            }
-            const std::uint32_t delayMs = computeRetryDelay(decoded.attempts, sendResult.retryAfterMs);
+            const std::uint32_t delayMs = computeRetryDelay(frontAttempts_ - 1, sendResult.retryAfterMs);
             setFrontCooldown(nowMs + delayMs);
-            emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "drain", nextAttempts, delayMs);
+            emitRequestEvent(EventKind::RequestRetried, Severity::Info, Status::success(), "drain", frontAttempts_, delayMs);
             return result;
         }
     }
@@ -479,6 +467,7 @@ void Outbox::setFrontCooldown(std::uint64_t nextAttemptMs) {
 void Outbox::clearFrontCooldown() {
     frontNextAttemptMs_ = 0;
     hasFrontCooldown_ = false;
+    frontAttempts_ = 0;
 }
 
 bool Outbox::frontIsCoolingDown(std::uint64_t nowMs) const {
