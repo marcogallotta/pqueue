@@ -28,7 +28,7 @@ static pqueue::http::Config makeConfig() {
     cfg.queue.reservedBytes   = 65536;    // 64 KB logical cap for queue segment files
     cfg.queue.maxSegmentBytes = 4096;     // 4 KB per segment (matches LittleFS block boundary)
     cfg.queue.minFreeBytes    = 8192;     // leave 8 KB headroom for LittleFS metadata
-    cfg.queue.maxSegments     = 16;
+    cfg.queue.idleCompactionTargetSegments = 16;
 
     // Outbox retry policy
     cfg.outbox.initialRetryDelayMs       = 15000;  // 15 s initial retry delay (doubles each attempt)
