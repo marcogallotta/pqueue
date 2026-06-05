@@ -619,6 +619,19 @@ std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const 
     return eventBytes + kSegmentHeaderBytes + manifestGrowth;
 }
 
+bool AppendLogStore::appendWouldHitAdmissionPressure(std::uint32_t recordSize) const {
+    const std::uint32_t growth = appendGrowthBytes(recordSize);
+    if (config_.maxTotalBytes > 0 &&
+        static_cast<std::uint64_t>(totalOnDiskBytes_) + growth + config_.drainReserveBytes > config_.maxTotalBytes) {
+        return true;
+    }
+    if (config_.minFreeBytes > 0 &&
+        freeBytes() < static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes) {
+        return true;
+    }
+    return false;
+}
+
 
 // --- Store interface implementation ---
 

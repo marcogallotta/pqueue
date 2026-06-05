@@ -89,6 +89,7 @@ public:
     };
     std::vector<SegmentStat> segmentStats() const;
     std::uint32_t totalOnDiskBytes() const { return totalOnDiskBytes_; }
+    bool appendWouldHitAdmissionPressure(std::uint32_t recordSize) const;
 
     const std::vector<append_log_detail::ManifestRange>& manifestRanges() const { return manifestRanges_; }
     std::uint32_t tailGeneration() const { return activeGeneration_; }
