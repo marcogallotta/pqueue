@@ -360,10 +360,13 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
                 emitDiagnostic(Severity::Error, st, "drain");
                 return result;
             }
-            clearFrontCooldown();
-            result.sent += 1;
-            result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
-            emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "drain", frontAttempts_, 0);
+            {
+                const std::uint8_t attemptCount = frontAttempts_;
+                clearFrontCooldown();
+                result.sent += 1;
+                result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
+                emitRequestEvent(EventKind::RequestSent, Severity::Debug, Status::success(), "drain", attemptCount, 0);
+            }
             return result;
 
         case SendDecision::Drop:
@@ -374,16 +377,19 @@ DrainResult Outbox::drainOne(bool enforceRateLimit) {
                 emitDiagnostic(Severity::Error, st, "drain");
                 return result;
             }
-            clearFrontCooldown();
-            result.dropped += 1;
-            result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
-            emitRequestEvent(
-                EventKind::RequestDropped,
-                Severity::Warning,
-                Status::failure(StatusCode::Dropped, "request was dropped by send policy"),
-                "drain",
-                frontAttempts_,
-                0);
+            {
+                const std::uint8_t attemptCount = frontAttempts_;
+                clearFrontCooldown();
+                result.dropped += 1;
+                result.removedQueuedBytes += static_cast<std::uint32_t>(record.size());
+                emitRequestEvent(
+                    EventKind::RequestDropped,
+                    Severity::Warning,
+                    Status::failure(StatusCode::Dropped, "request was dropped by send policy"),
+                    "drain",
+                    attemptCount,
+                    0);
+            }
             return result;
 
         case SendDecision::RetryLater: {
