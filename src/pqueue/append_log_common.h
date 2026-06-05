@@ -45,6 +45,16 @@ constexpr std::uint32_t kEnqueueOverheadBytes = kEnqueueHeaderBytes + kEventTrai
 // kPopEventBytes is the total size of a POP event (no payload)
 static_assert(kPopEventBytes == 20, "pop event must be 20 bytes");
 
+// Bytes of each ManifestRange entry in the on-disk manifest (startGen + endGen, each u32).
+constexpr std::uint32_t kManifestRangeEntryBytes = 8;
+
+// Headroom reserved on every write (enqueue and rewrite) to guarantee that at least one
+// pop can always succeed on a full queue. Covers the tombstone bridge to the first
+// front-segment reclaim (one full segment's worth of pop tombstones at the production
+// segment size), plus one-pop overhead (new-seg header + manifest growth).
+// Default: 0 (opt-in via AppendLogConfig::drainReserveBytes); firmware sets 4096.
+constexpr std::uint32_t kDrainReserveBytes = 4096;
+
 // Segment header (20 bytes, at offset 0 of each segment file)
 struct SegmentHeader {
     std::uint32_t magic       = kSegmentMagic;

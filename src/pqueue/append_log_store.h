@@ -24,6 +24,10 @@ struct AppendLogConfig {
     std::uint32_t maxSegmentBytes = 4096;
     std::uint32_t maxTotalBytes = 128 * 1024; // 0 = unlimited
     std::uint32_t minFreeBytes = 32 * 1024;
+    // Bytes withheld from every write to guarantee a pop can always succeed on a full
+    // queue. Set to kDrainReserveBytes (4096) in production; default 0 preserves the
+    // pre-Stage-2 admission threshold so existing tests need no changes.
+    std::uint32_t drainReserveBytes = 0;
     std::uint8_t maxSegments = 16;
     std::uint8_t maxOutputSegments = 8; // max output segments per compactOneSegment call
     std::size_t maxRecordBytes = 4096;
@@ -165,7 +169,7 @@ private:
     // Active write segment
     std::uint32_t activeGeneration_ = 0;
     std::uint32_t activeSegmentBytes_ = 0;
-    std::uint32_t totalOnDiskBytes_ = 0; // all seg-*.bin files, including dangling
+    std::uint32_t totalOnDiskBytes_ = 0; // all seg-*.bin and manifest-*.bin files, including dangling
     std::uint32_t nextGeneration_ = 1;
 
     // Total bytes per sealed segment generation. Populated at mount, updated on

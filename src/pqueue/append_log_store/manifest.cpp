@@ -112,7 +112,7 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     const std::uint32_t t_write = millis();
 #endif
 
-    Status st = f->writeFile(writeSlot, data);
+    Status st = writeSegmentFileTracked(writeSlot, data, SegmentWriteDisposition::MayOverwrite);
 #ifdef ARDUINO
     ms_write = millis() - t_write;
 #endif

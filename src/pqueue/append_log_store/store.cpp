@@ -383,7 +383,8 @@ Status AppendLogStore::scanSegments() {
         }
     }
 
-    // Initialize RAM footprint counter from all segment files on disk (including dangling).
+    // Initialize RAM footprint counter from all segment files on disk (including dangling)
+    // and both manifest slot files, so totalOnDiskBytes_ reflects the full on-disk footprint.
     totalOnDiskBytes_ = 0;
     for (std::uint32_t gen : sortedGenerations) {
         std::uint64_t sz = 0;
@@ -392,6 +393,10 @@ Status AppendLogStore::scanSegments() {
         const auto szU = static_cast<std::uint32_t>(sz);
         totalOnDiskBytes_ += szU;
         sealedSegmentBytes_[gen] = szU;
+    }
+    for (const char* slot : {kManifestSlotA, kManifestSlotB}) {
+        std::uint64_t sz = 0;
+        if (f->fileSize(slot, sz).ok()) totalOnDiskBytes_ += static_cast<std::uint32_t>(sz);
     }
 
     activeTailDependenciesTracked_ = true;
@@ -569,11 +574,18 @@ Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const st
 
 std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const {
     const std::uint32_t eventBytes = kEnqueueOverheadBytes + recordSize;
-    const bool needsNewSegment =
-        activeSegmentBytes_ == 0 ||
-        (activeSegmentBytes_ > kSegmentHeaderBytes &&
-         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes);
-    return eventBytes + (needsNewSegment ? kSegmentHeaderBytes : 0);
+    // needsRotation: the live tail is full and must be sealed into a new range.
+    // needsNewSegment also fires when activeSegmentBytes_==0 (first-ever write, handled
+    // by ensureActiveSegment), but that case just publishes the existing range list without
+    // adding a range, so it has no manifest growth.
+    const bool needsRotation =
+        activeSegmentBytes_ > kSegmentHeaderBytes &&
+        activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes;
+    const bool needsNewSegment = activeSegmentBytes_ == 0 || needsRotation;
+    // On rotation the manifest may gain one range entry (worst case: non-contiguous tail
+    // adds a new range): 8 bytes per slot x 2 slots = 16 bytes.
+    const std::uint32_t manifestGrowth = needsRotation ? (kManifestRangeEntryBytes * 2u) : 0u;
+    return eventBytes + (needsNewSegment ? kSegmentHeaderBytes : 0u) + manifestGrowth;
 }
 
 
@@ -626,7 +638,7 @@ Status AppendLogStore::commitEnqueue(std::uint32_t sequence, const std::string& 
 #ifdef ARDUINO
         const std::uint32_t _tc = millis();
 #endif
-        while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) > config_.maxTotalBytes) {
+        while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) + config_.drainReserveBytes > config_.maxTotalBytes) {
             Status compact = compactOneSegment();
             if (!compact.ok()) return diagnostic(Severity::Error, compact, "commitEnqueue");
             if (compact.isNoOp()) {
@@ -646,7 +658,7 @@ Status AppendLogStore::commitEnqueue(std::uint32_t sequence, const std::string& 
     if (config_.minFreeBytes > 0) {
         const std::uint64_t free = freeBytes();
         const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
-        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth) {
+        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes) {
             return diagnostic(Severity::Warning,
                 Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
                 "commitEnqueue");
@@ -752,6 +764,28 @@ Status AppendLogStore::rewriteRecord(std::uint32_t sequence, const std::string& 
         return diagnostic(Severity::Warning,
             Status::failure(StatusCode::RecordTooLarge, "record too large to fit in a segment"),
             "rewriteRecord");
+    }
+
+    if (config_.maxTotalBytes > 0) {
+        while (totalOnDiskBytes() + appendGrowthBytes(static_cast<std::uint32_t>(record.size())) + config_.drainReserveBytes > config_.maxTotalBytes) {
+            Status compact = compactOneSegment();
+            if (!compact.ok()) return diagnostic(Severity::Error, compact, "rewriteRecord");
+            if (compact.isNoOp()) {
+                return diagnostic(Severity::Warning,
+                    Status::failure(StatusCode::QueueFull, "queue footprint limit reached"),
+                    "rewriteRecord");
+            }
+        }
+    }
+
+    if (config_.minFreeBytes > 0) {
+        const std::uint64_t free = freeBytes();
+        const std::uint32_t growth = appendGrowthBytes(static_cast<std::uint32_t>(record.size()));
+        if (free < static_cast<std::uint64_t>(config_.minFreeBytes) + growth + config_.drainReserveBytes) {
+            return diagnostic(Severity::Warning,
+                Status::failure(StatusCode::QueueFull, "insufficient filesystem free space"),
+                "rewriteRecord");
+        }
     }
 
     st = appendRewriteEvent(sequence, record);

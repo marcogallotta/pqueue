@@ -1,4 +1,5 @@
 #include "pqueue/queue.h"
+#include "pqueue/append_log_common.h"
 
 #include "doctest/doctest.h"
 
@@ -11,6 +12,8 @@
 
 namespace {
 
+using namespace pqueue::append_log_detail;
+
 const std::filesystem::path kSpoolDir = "build/pqueue-spools/pqueue_full_queue_policy_spool";
 
 void cleanSpool() {
@@ -18,15 +21,22 @@ void cleanSpool() {
     std::filesystem::remove_all(kSpoolDir, ec);
 }
 
+// Budget for behaviour tests: fits 3 records of up to 5-byte payloads, each in its own
+// segment (maxSegmentBytes=50 forces rotation after every record), plus both manifest slots
+// with slack. Not a tight boundary — intent is behavioural, not byte-level.
+constexpr std::uint32_t kThreeRecordBudget =
+    3 * (kSegmentHeaderBytes + kEnqueueOverheadBytes + 5)
+    + 2 * kManifestFixedBytes
+    + 32; // slack
+
 // maxSegmentBytes=50: each record rotates into a sealed segment before the next one.
-// reservedBytes=179: capacity for exactly 3 records of the payloads used below.
 // DropOldest relies on compactOneSegment reclaiming the evicted record's dead bytes
 // from sealed segments; single-segment queues cannot compact and would stall.
 pqueue::Config makeConfig(pqueue::FullQueuePolicy policy = pqueue::FullQueuePolicy::RejectNewest) {
     pqueue::Config cfg;
     cfg.basePath = kSpoolDir.string();
     cfg.maxSegmentBytes = 50;
-    cfg.reservedBytes = 179;
+    cfg.reservedBytes = kThreeRecordBudget;
     cfg.minFreeBytes = 0;
     cfg.fullQueuePolicy = policy;
     return cfg;
@@ -97,23 +107,24 @@ TEST_CASE("queue DropOldest emits warning event on eviction") {
     CHECK(hasEvictionWarning);
 }
 
-TEST_CASE("queue DropOldest preserves FIFO order after evictions") {
+TEST_CASE("queue DropOldest preserves FIFO order after eviction") {
     cleanSpool();
-    pqueue::Queue queue(makeConfig(pqueue::FullQueuePolicy::DropOldest));
+    pqueue::Config cfg = makeConfig(pqueue::FullQueuePolicy::DropOldest);
+    cfg.reservedBytes = kThreeRecordBudget;
+    pqueue::Queue queue(cfg);
 
-    REQUIRE(queue.enqueue("a").ok());
-    REQUIRE(queue.enqueue("b").ok());
-    REQUIRE(queue.enqueue("c").ok());
-    REQUIRE(queue.enqueue("d").ok());
-    REQUIRE(queue.enqueue("e").ok());
+    REQUIRE(queue.enqueue("one").ok());
+    REQUIRE(queue.enqueue("two").ok());
+    REQUIRE(queue.enqueue("three").ok());
+    REQUIRE(queue.enqueue("four").ok());
 
-    // After 5 enqueues into capacity-3 queue: a and b evicted, holds c/d/e
+    // After one eviction, the remaining records must still be FIFO ordered.
     CHECK_EQ(queue.stats().count, 3U);
 
     std::string out;
-    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "c"); queue.pop();
-    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "d"); queue.pop();
-    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "e"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "two"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "three"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "four"); queue.pop();
 }
 
 TEST_CASE("queue DropOldest on empty queue enqueues normally") {

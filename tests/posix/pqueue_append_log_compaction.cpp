@@ -8,7 +8,9 @@ std::uint32_t actualOnDiskBytes() {
     std::uint32_t total = 0;
     for (const auto& entry : std::filesystem::directory_iterator(kSpoolDir)) {
         const std::string name = entry.path().filename().string();
-        if (name.rfind("seg-", 0) == 0 && name.size() > 4)
+        const bool isSeg      = name.rfind("seg-", 0) == 0 && name.size() > 4;
+        const bool isManifest = name == "manifest-a.bin" || name == "manifest-b.bin";
+        if (isSeg || isManifest)
             total += static_cast<std::uint32_t>(std::filesystem::file_size(entry.path()));
     }
     return total;
@@ -491,12 +493,16 @@ TEST_CASE("maxTotalBytes: enqueue blocked when footprint full and nothing to com
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxTotalBytes   = 70;
+    // Includes manifest-a.bin now: seg1(70) + manifest-a(30) = 100.
+    // The third enqueue would need a rotation/new segment, so it must be rejected.
+    cfg.maxTotalBytes   = 100;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
     storeEnqueue(store, 1, "a");
-    storeEnqueue(store, 2, "b"); // on-disk footprint = 70 bytes; cap reached
+    storeEnqueue(store, 2, "b");
+    CHECK_EQ(store.totalOnDiskBytes(), actualOnDiskBytes());
+    CHECK_EQ(store.totalOnDiskBytes(), 100U);
 
     const auto st = store.commitEnqueue(3, "c");
     CHECK_FALSE(st.ok());
@@ -509,15 +515,20 @@ TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
     resetSpool();
     auto cfg = makeStoreConfig();
     cfg.maxSegmentBytes = 70;
-    cfg.maxTotalBytes   = 120;
+    // After two records and one pop the footprint includes both manifest slots:
+    // gen1(70) + gen2(40) + manifest-a(30) + manifest-b(38) = 178.
+    // 178 already exceeds the 170 cap, so commitEnqueue compacts gen1 (dead range)
+    // first, dropping the footprint to 108, then the enqueue fits.
+    cfg.maxTotalBytes   = 170;
     pqueue::AppendLogStore store(cfg);
     CHECK(store.mount().ok());
 
     storeEnqueue(store, 1, "a");
     storeEnqueue(store, 2, "b");
-    storePop(store); // POP overflows gen=1 → rotation; gen=1: 70b (full), gen=2: 40b
+    storePop(store); // POP overflows gen=1 → rotation; gen=1: 70b, gen=2: 40b
+    CHECK_EQ(store.totalOnDiskBytes(), actualOnDiskBytes());
+    CHECK_EQ(store.totalOnDiskBytes(), 178U);
 
-    // footprint=110; +25 for enqueue=135 > 120 → compact gen=1; then fits
     CHECK(store.commitEnqueue(3, "c").ok());
 
     expectRecords(store, {{2,"b"},{3,"c"}});
@@ -528,7 +539,9 @@ TEST_CASE("maxTotalBytes: DropOldest evicts and retries when commitEnqueue retur
     resetSpool();
     auto cfg = makeConfig();
     cfg.maxSegmentBytes = 100;
-    cfg.reservedBytes   = 139; // gen1(94 bytes) + gen2(45 bytes)
+    // Intentionally loose: just needs to allow the first two records and then
+    // force the third through DropOldest eviction and retry.
+    cfg.reservedBytes   = 200;
     cfg.fullQueuePolicy = pqueue::FullQueuePolicy::DropOldest;
     pqueue::Queue q(cfg);
 
