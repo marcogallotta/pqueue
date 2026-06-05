@@ -62,7 +62,8 @@ MAX_FILE_SIZE = 1 * 1024 * 1024
 _VALID_NAME = re.compile(r'^(manifest-[ab]\.bin|seg-[0-9a-f]{8}\.bin)$')
 _VALID_TARGET_NAME = re.compile(r'^[A-Za-z0-9_-]+$')
 _VALID_CONFIG_KEYS = frozenset({
-    'reservedBytes', 'recordSizeBytes', 'maxSegmentBytes', 'minFreeBytes', 'maxSegments',
+    'reservedBytes', 'recordSizeBytes', 'maxSegmentBytes', 'minFreeBytes',
+    'maxSegments', 'idleCompactionTargetSegments',
 })
 
 
@@ -105,7 +106,8 @@ _CONFIG_RULES = {
     'recordSizeBytes': (1,   None),
     'maxSegmentBytes': (1,   None),
     'minFreeBytes':    (0,   None),
-    'maxSegments':     (1,   255),
+    'maxSegments':                    (1, 255),
+    'idleCompactionTargetSegments':   (1, 255),
 }
 
 
