@@ -594,14 +594,15 @@ writer (enqueue and rewrite), enough space remains for at least one pop tombston
 plus a possible segment rotation and manifest update. `drainReserveBytes = 0`
 (default) disables the reserve; firmware sets 4096.
 
-**`totalOnDiskBytes_`** is a RAM counter kept in sync with all segment file I/O.
+**`totalOnDiskBytes_`** is a RAM counter kept in sync with all on-disk file I/O:
+segment files (`seg-*.bin`) and manifest slot files (`manifest-[ab].bin`).
 Appended bytes are added directly. File-level writes go through
 `writeSegmentFileTracked(name, data)`: it reads the old file size (zero if
 absent), writes the file, then applies the delta `newSize - oldSize`. This delta
 approach ensures correctness on failed-publish retries where the same generation
 file may be overwritten. `cleanupOneDanglingSegment` subtracts on successful
-`removeFile`. Initialised on mount by summing all `seg-*.bin` file sizes from
-disk including dangling files.
+`removeFile`. Initialised on mount by summing all segment and manifest slot file
+sizes from disk, including dangling segments.
 
 **`canEnqueue(recordSize)`** performs only the hard FS floor check: returns
 false if `freeBytes() < minFreeBytes`. It does not check `maxTotalBytes` or
