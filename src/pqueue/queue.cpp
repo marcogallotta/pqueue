@@ -399,6 +399,10 @@ Status Queue::rewriteFront(const std::string& record) {
     if (record.size() > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "rewriteFront");
     }
+    // QueueFull here means the byte budget is exhausted with all-live data; the front
+    // record is unchanged. The caller must NOT evict-and-retry: after eviction index_.head
+    // points to the next record, so a retry would rewrite the wrong record. Correct
+    // recovery: pop the front and move on, or surface backpressure to the caller.
     return store_->rewriteRecord(index_.head, record);
 }
 

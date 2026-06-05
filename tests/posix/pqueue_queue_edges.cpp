@@ -111,6 +111,41 @@ TEST_CASE("pqueue visitRecords stops when visitor returns false") {
 // pqueue visitRecords returns read failure from active record -- deferred:
 // needs AppendLog segment read-failure injection, not yet supported.
 
+TEST_CASE("pqueue rewriteFront returns QueueFull when byte budget exhausted; front unchanged") {
+    // Verifies that QueueFull from rewriteFront leaves the front record intact.
+    // The correct caller response is to pop the front and move on — NOT to evict
+    // and retry rewriteFront, which would overwrite the wrong record after eviction.
+    cleanEdgesSpool();
+    using namespace pqueue::append_log_detail;
+
+    // One 1-byte record per segment: kSegmentHeaderBytes(20) + kEnqueueOverheadBytes(24) + 1 = 45 B.
+    // After two records: seg1(45) + seg2(45) + manifest-a(30) + manifest-b(38) = 158 B.
+    // A third write cannot fit: 158 + appendGrowthBytes(61) + drainReserve(45) = 264 > 235.
+    const std::uint32_t kPerRecord    = kSegmentHeaderBytes + kEnqueueOverheadBytes + 1;
+    const std::uint32_t kDrainReserve = kPerRecord;
+    const std::uint32_t kBudget       = 2 * kPerRecord + 2 * kManifestFixedBytes + kDrainReserve + 40;
+
+    pqueue::Config cfg;
+    cfg.basePath          = kEdgesSpoolDir.string();
+    cfg.maxSegmentBytes   = kPerRecord + 4; // forces rotation after each 1-byte record
+    cfg.reservedBytes     = kBudget;
+    cfg.drainReserveBytes = kDrainReserve;
+    cfg.minFreeBytes      = 0;
+    pqueue::Queue queue(cfg);
+
+    REQUIRE(queue.enqueue("a").ok());
+    REQUIRE(queue.enqueue("b").ok());
+
+    const auto st = queue.rewriteFront("x");
+    REQUIRE_FALSE(st.ok());
+    CHECK(st.code == pqueue::StatusCode::QueueFull);
+
+    std::string front;
+    REQUIRE(queue.peek(front).ok());
+    CHECK_EQ(front, "a");
+    CHECK_EQ(queue.stats().count, 2U);
+}
+
 TEST_CASE("pqueue pop preserves front when index write fails") {
     cleanEdgesSpool();
     auto inner = pqueue::makePosixFileSystem();
