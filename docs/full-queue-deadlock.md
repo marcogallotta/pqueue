@@ -654,9 +654,12 @@ the deadlock class dies first, then drainability, then churn, then proof.
    admission passes or the queue is empty; the single-eviction + one-retry logic
    is replaced by a `while` on `QueueFull`. (gap 4.)
 4. ~~**Move segment-count compaction off the hot path.**~~ **DONE.** Removed `activeGenerations_.size() > maxSegments` from `needsCompaction()`; the pre-rotate compaction block in `commitEnqueue` is removed entirely (dead after segment-count arm gone); `maxSegments` renamed to `idleCompactionTargetSegments` in `AppendLogConfig`, `pqueue::Config`, doctor, tests, and tools; `CompactIdleResult::segmentCountExceedsTarget` added so callers can schedule idle compaction when segment count drifts above the soft target. (gap 7.)
-5. **Targeted front-dead-segment reclaim** wired to drain/admission pressure
-   (reuse the dead-prefix path; advance `startGen`, count-neutral). Light
-   coalescing of sub-512 B remainders. (gaps 5, 6.)
+5. ~~**Targeted front-dead-segment reclaim**~~ **DONE.** Space-pressure admission now tries
+   `reclaimDeadFrontSegment()` before general compaction. If the oldest sealed
+   segment is fully dead, it compacts exactly that front segment with zero output,
+   advancing the oldest range `startGen` (or dropping the range) before retrying
+   admission. This wires the count-neutral dead-prefix path into the drain/admission
+   pressure loop. (gap 5; gap 6 light coalescing remains future perf hygiene.)
 6. **Out-of-band retry attempts.** Stop `rewriteFront` rewriting the whole record
    to bump the attempt counter; store attempts in a sidecar (or RAM-only,
    reset-on-reboot). Removes the normal-workload churn. (candidate #5.)

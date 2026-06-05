@@ -600,6 +600,23 @@ AppendLogStore::CompactionRange AppendLogStore::narrowRange(
     return best;
 }
 
+
+Status AppendLogStore::reclaimDeadFrontSegment(std::uint32_t* inputSegs,
+                                               std::uint32_t* outputSegs) {
+    if (manifestRanges_.empty()) return Status::noOp();
+
+    const std::uint32_t frontGen = manifestRanges_.front().startGen;
+    const bool hasLive = std::any_of(records_.begin(), records_.end(),
+        [&](const SegmentRecord& sr) { return sr.segmentGeneration == frontGen; });
+    if (hasLive) return Status::noOp();
+
+    // Space-pressure reclaim path: the oldest sealed segment is fully dead.
+    // Compacting exactly that front segment writes no output and simply advances
+    // the first manifest range startGen (or drops the range if it was length 1).
+    return compactRange({frontGen, frontGen}, outputSegs,
+                        AllowFullRangeFallback::no, inputSegs);
+}
+
 Status AppendLogStore::compactOneSegment(AllowFullRangeFallback allowFallback,
                                          std::uint32_t* inputSegs,
                                          std::uint32_t* outputSegs) {

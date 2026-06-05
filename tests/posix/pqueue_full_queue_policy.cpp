@@ -6,6 +6,7 @@
 #ifndef ARDUINO
 
 #include <algorithm>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -28,6 +29,12 @@ constexpr std::uint32_t kThreeRecordBudget =
     3 * (kSegmentHeaderBytes + kEnqueueOverheadBytes + 5)
     + 2 * kManifestFixedBytes
     + 32; // slack
+
+std::filesystem::path segmentPath(std::uint32_t gen) {
+    char name[32];
+    std::snprintf(name, sizeof(name), "seg-%08x.bin", gen);
+    return kSpoolDir / name;
+}
 
 // maxSegmentBytes=50: each record rotates into a sealed segment before the next one.
 // DropOldest relies on compactOneSegment reclaiming the evicted record's dead bytes
@@ -144,6 +151,37 @@ TEST_CASE("queue DropOldest evicts repeatedly until new record fits") {
     std::string out;
     REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "three"); queue.pop();
     REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, std::string(80, 'x')); queue.pop();
+}
+
+
+TEST_CASE("queue DropOldest reclaims already-dead front segment before evicting") {
+    cleanSpool();
+    pqueue::Config cfg = makeConfig(pqueue::FullQueuePolicy::DropOldest);
+    cfg.maxSegmentBytes = 70;
+    cfg.reservedBytes   = 260;
+    pqueue::Queue queue(cfg);
+
+    REQUIRE(queue.enqueue("a").ok());
+    REQUIRE(queue.enqueue("bb").ok());
+    REQUIRE(queue.enqueue("ccc").ok());
+    REQUIRE(queue.pop().ok()); // makes gen=1 dead while gen=2 remains live
+
+    REQUIRE(std::filesystem::exists(segmentPath(1)));
+    REQUIRE(std::filesystem::exists(segmentPath(2)));
+
+    REQUIRE(queue.enqueue("d").ok());
+
+    // The enqueue should reclaim the already-dead front segment before entering
+    // DropOldest eviction. If it evicted instead, count would stay at 2 and the
+    // front record would be "ccc".
+    CHECK_EQ(queue.stats().count, 3U);
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2))); // live gen=2 was not rewritten away
+
+    std::string out;
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "bb"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "ccc"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "d"); queue.pop();
 }
 
 TEST_CASE("queue DropOldest on empty queue enqueues normally") {

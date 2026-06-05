@@ -254,8 +254,27 @@ Status Queue::enqueue(Span record) {
     }
     const std::uint32_t sequence = index_.tail;
     const std::string recordStr = spanToString(record);
+
+    if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest &&
+        config_.reservedBytes > 0 && index_.count > 0) {
+        if (auto* appendStore = dynamic_cast<AppendLogStore*>(store_.get())) {
+            const std::uint32_t minGrowth = static_cast<std::uint32_t>(recordStr.size())
+                + append_log_detail::kEnqueueOverheadBytes
+                + append_log_detail::kSegmentHeaderBytes;
+            // Approximate prefilter: minGrowth omits manifest growth, so this may
+            // under-trigger slightly, but it avoids an O(n) scan on every enqueue.
+            if (appendStore->totalOnDiskBytes() + minGrowth + config_.drainReserveBytes > config_.reservedBytes) {
+                // Near the byte budget: try space-free front reclaim before any
+                // DropOldest eviction so a dead front segment is removed instead
+                // of evicting a live record.
+                const Status reclaimStatus = appendStore->reclaimDeadFrontSegment();
+                if (!reclaimStatus.ok()) return diagnostic(Severity::Error, reclaimStatus, "enqueue");
+            }
+        }
+    }
+
     st = store_->commitEnqueue(sequence, recordStr);
-    while (st.code == StatusCode::QueueFull &&
+    while (!st.ok() && st.code == StatusCode::QueueFull &&
            config_.fullQueuePolicy == FullQueuePolicy::DropOldest &&
            index_.count > 0) {
         const Status evictStatus = evictFront();

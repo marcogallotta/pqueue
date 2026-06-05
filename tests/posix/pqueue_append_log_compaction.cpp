@@ -536,6 +536,47 @@ TEST_CASE("maxTotalBytes: compaction makes room for a blocked enqueue") {
     expectRecordsAfterRemount(cfg, {{2,"b"},{3,"c"}});
 }
 
+TEST_CASE("reclaimDeadFrontSegment peels dead front segment before live compaction") {
+    using namespace pqueue::append_log_detail;
+    resetSpool();
+
+    const std::string gen2Body = serializeEnqueueEvent(2, "bb");
+
+    ManifestData md;
+    md.epoch = 1;
+    md.ranges = {{1, 2}};
+    md.tailGeneration = 3;
+    md.nextGeneration = 4;
+    plantManifest(md, 'a');
+    plantManifest(md, 'b'); // keep both slots present so publish does not add slot bytes
+
+    plantSegment(1, 1);                 // fully dead front segment
+    plantSegment(2, 2, gen2Body);       // live seq=2 remains in place
+    plantSegment(3, 3);                 // empty active tail
+
+    auto cfg = makeStoreConfig();
+    cfg.maxSegmentBytes = 70;
+    cfg.maxTotalBytes = 170; // current+enqueue is over; after peeling gen1 it fits
+    pqueue::AppendLogStore store(cfg);
+    REQUIRE(store.mount().ok());
+    CHECK_EQ(store.totalOnDiskBytes(), actualOnDiskBytes());
+
+    REQUIRE(store.reclaimDeadFrontSegment().ok());
+    REQUIRE(store.commitEnqueue(3, "c").ok());
+
+    // The targeted reclaim should remove only dead gen=1. It must not rewrite
+    // live gen=2 to nextGeneration as ordinary live-range compaction would.
+    REQUIRE_EQ(store.manifestRanges().size(), 1U);
+    CHECK_EQ(store.manifestRanges()[0].startGen, 2U);
+    CHECK_EQ(store.manifestRanges()[0].endGen, 2U);
+    CHECK_FALSE(std::filesystem::exists(segmentPath(1)));
+    CHECK(std::filesystem::exists(segmentPath(2)));
+    CHECK_FALSE(std::filesystem::exists(segmentPath(4)));
+
+    expectRecords(store, {{2, "bb"}, {3, "c"}});
+    expectRecordsAfterRemount(cfg, {{2, "bb"}, {3, "c"}});
+}
+
 TEST_CASE("maxTotalBytes: DropOldest evicts and retries when commitEnqueue returns QueueFull") {
     resetSpool();
     auto cfg = makeConfig();
