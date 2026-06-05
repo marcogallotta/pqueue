@@ -127,7 +127,7 @@ Multiple targets are processed in order; each gets its own command run.
   - **Type:** uint32
   - **Constraint:** >= 0
   - **Default:** 32768
-- **Key:** maxSegments
+- **Key:** idleCompactionTargetSegments (alias: maxSegments)
   - **Type:** uint8
   - **Constraint:** 1-255
   - **Default:** 16

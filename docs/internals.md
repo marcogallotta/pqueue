@@ -470,12 +470,12 @@ after at least one successful compaction. `Queue::compactIdle` is a lock-guarded
 thin wrapper.
 
 `commitEnqueue` calls `compactOneSegment()` directly (one bounded step per
-enqueue) when `needsCompaction()` is true. `needsCompaction()` triggers on
-segment count (`activeGenerations_.size() > maxSegments`) or low free space
-(`freeBytes < minFreeBytes`); it does not trigger on dead ratio alone. Under
-segment-count pressure with all ranges fully live, `needsCompaction()` returns
-true but `compactOneSegment()` returns noOp on every call -- nothing to reclaim,
-one wasted attempt per enqueue until records are popped.
+enqueue) when `needsCompaction()` is true. `needsCompaction()` triggers on low
+free space (`freeBytes < minFreeBytes`) only; segment count is no longer a
+hot-path trigger. Segment count is a soft idle target
+(`idleCompactionTargetSegments`, default 16) surfaced via
+`CompactIdleResult::segmentCountExceedsTarget`; callers schedule another
+`compactIdle` pass when that flag is set and dead bytes are available.
 
 ---
 
@@ -576,15 +576,23 @@ directory scans and per-record fileSize calls on the hot path.
 ## Capacity enforcement
 
 **`maxTotalBytes`** caps total on-disk footprint (live + dead bytes, including
-dangling files). `commitEnqueue` is the enforcement point: before appending, it
-computes `totalOnDiskBytes() + appendGrowthBytes(recordSize)`. If this exceeds
-`maxTotalBytes`, it loops `compactOneSegment()` until the footprint fits or
-compaction returns noOp, then returns `QueueFull`. The hard FS floor
-(`minFreeBytes`) is checked after the compaction loop: `freeBytes() <
-minFreeBytes + appendGrowthBytes(recordSize)`, i.e. the write is rejected if it
-would push remaining free space below the floor. `maxTotalBytes = 0` disables
-the footprint cap; `minFreeBytes = 0` disables the FS floor. `Queue` maps
-`Config::reservedBytes` to `maxTotalBytes`.
+dangling files). Both `commitEnqueue` and `rewriteRecord` enforce admission:
+before appending, each checks `totalOnDiskBytes() + appendGrowthBytes(recordSize)
++ drainReserveBytes > maxTotalBytes`. If true, they loop `compactOneSegment()`
+until the footprint fits or compaction returns noOp, then return `QueueFull`.
+The hard FS floor is checked similarly: `freeBytes() < minFreeBytes +
+appendGrowthBytes(recordSize) + drainReserveBytes`. `maxTotalBytes = 0`
+disables the footprint cap; `minFreeBytes = 0` disables the FS floor. `Queue`
+maps `Config::reservedBytes` to `maxTotalBytes` and `Config::drainReserveBytes`
+to `drainReserveBytes`.
+
+**`drainReserveBytes`** reserves headroom within `maxTotalBytes` so that pop is
+always drainable. Pop physically appends a tombstone to the active tail and may
+need to rotate the tail first; without reserved headroom a bytes-full queue
+blocks both enqueue and pop -- a write wedge. With the reserve enforced on every
+writer (enqueue and rewrite), enough space remains for at least one pop tombstone
+plus a possible segment rotation and manifest update. `drainReserveBytes = 0`
+(default) disables the reserve; firmware sets 4096.
 
 **`totalOnDiskBytes_`** is a RAM counter kept in sync with all segment file I/O.
 Appended bytes are added directly. File-level writes go through
@@ -600,13 +608,11 @@ false if `freeBytes() < minFreeBytes`. It does not check `maxTotalBytes` or
 require free space for the record itself -- `commitEnqueue` is authoritative for
 both.
 
-**`FullQueuePolicy::DropOldest`** with `maxTotalBytes`: `Queue::enqueue()` calls
-`canEnqueue()` before `commitEnqueue()`. Since `canEnqueue()` does not check
-`maxTotalBytes`, a footprint-full queue returns `QueueFull` from
-`commitEnqueue`. `Queue::enqueue()` handles this: if `commitEnqueue()` returns
-`QueueFull` and the policy is `DropOldest`, it evicts the front record and
-retries `commitEnqueue()` once. A second `QueueFull` is returned as an error
-without further eviction.
+**`FullQueuePolicy::DropOldest`** with `maxTotalBytes`: when `commitEnqueue()`
+returns `QueueFull`, `Queue::enqueue()` loops: it first tries
+`reclaimDeadFrontSegment()` to reclaim space without evicting live records, then
+calls `evictFront()` and retries `commitEnqueue()`, repeating until admission
+passes or the queue is empty.
 
 ---
 
@@ -633,10 +639,15 @@ dead-range elimination reclaims it once popped, but the fragmentation is
 inelegant.
 
 **Elastic range cap.** `kManifestMaxRanges = 1024` (derived from flash byte
-budget). The common case stays at ≤4 ranges (inline manifest, ~62 B, fast
-publish); the cap is only approached under pathological fragmentation. Idle
-compaction gravitates back toward 4 ranges via dead-ratio-based compaction.
-See `docs/full-queue-deadlock.md` for the full derivation and design rationale.
+budget so byte exhaustion is always the binding constraint before slot
+exhaustion). Without this, a fragmented manifest at the old hard cap of 4 ranges
+would block both enqueue and pop: rotation is required when the tail is full, and
+rotation is gated by the range cap -- so a bytes-full queue with 4 non-contiguous
+ranges wedges permanently. With a byte-derived ceiling, `RangeLimitExceeded` is
+structurally unreachable before flash is full. The common case stays at ≤4 ranges
+(inline manifest, ~62 B, fast publish); exceeding 4 spills past the LittleFS
+inline threshold (~7 ms slower per publish) but remains correct. Idle compaction
+gravitates back toward 4 ranges via dead-ratio-based compaction.
 
 **Cost-aware compaction strategy.** Score ranges by `bytes_reclaimed /
 estimated_compaction_ms`, where estimated cost is derived from the latency

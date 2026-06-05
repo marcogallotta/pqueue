@@ -483,12 +483,13 @@ These fields on `pqueue::Config` control the AppendLog backend:
     (`maxTotalBytes` in the underlying store). Does not reserve or preallocate
     flash. When the total size of all segment files approaches this limit,
     writes compact or fail rather than growing further.
-- **Field:** `maxSegments`
+- **Field:** `idleCompactionTargetSegments`
   - **Default:** 16
-  - **Description:** Compaction pressure threshold. When the live segment count
-    exceeds this value, `enqueue` attempts one compaction step before rotating.
-    Not a hard file-count limit: if compaction is a no-op (all data is live),
-    segment count can exceed this value.
+  - **Description:** Soft idle compaction target. When segment count exceeds
+    this value after a `compactIdle` pass,
+    `CompactIdleResult::segmentCountExceedsTarget` is set as a hint to schedule
+    another pass when dead bytes become available. Not a hard limit; not checked
+    on the enqueue path.
 - **Field:** `minFreeBytes`
   - **Default:** 32768
   - **Description:** Real filesystem safety floor. Writes are rejected when
@@ -580,8 +581,8 @@ Each step is bounded by `maxOutputSegments` (default 8), but a single step can
 still block for several seconds on slow flash or a large backlog. Run compaction
 after drains or during reconnect windows, not on the enqueue path.
 
-For the full strategy rationale, deadlock analysis, and on-device validation
-results, see `docs/internals.md`.
+For the full strategy rationale and on-device validation results, see
+`docs/internals.md`.
 
 ---
 
