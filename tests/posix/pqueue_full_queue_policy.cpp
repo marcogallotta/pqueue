@@ -127,6 +127,25 @@ TEST_CASE("queue DropOldest preserves FIFO order after eviction") {
     REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "four"); queue.pop();
 }
 
+TEST_CASE("queue DropOldest evicts repeatedly until new record fits") {
+    cleanSpool();
+    pqueue::Config cfg = makeConfig(pqueue::FullQueuePolicy::DropOldest);
+    cfg.maxSegmentBytes = 130;
+    cfg.reservedBytes   = 250; // tight enough that one eviction is insufficient for the 80-byte record
+    pqueue::Queue queue(cfg);
+
+    REQUIRE(queue.enqueue("one").ok());
+    REQUIRE(queue.enqueue("two").ok());
+    REQUIRE(queue.enqueue("three").ok());
+    REQUIRE(queue.enqueue(std::string(80, 'x')).ok());
+
+    CHECK_EQ(queue.stats().count, 2U);
+
+    std::string out;
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, "three"); queue.pop();
+    REQUIRE(queue.peek(out).ok()); CHECK_EQ(out, std::string(80, 'x')); queue.pop();
+}
+
 TEST_CASE("queue DropOldest on empty queue enqueues normally") {
     cleanSpool();
     pqueue::Queue queue(makeConfig(pqueue::FullQueuePolicy::DropOldest));

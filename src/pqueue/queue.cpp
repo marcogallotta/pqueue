@@ -251,30 +251,20 @@ Status Queue::enqueue(Span record) {
     if (record.len > config_.recordSizeBytes) {
         return diagnostic(Severity::Warning, Status::failure(StatusCode::RecordTooLarge, "record exceeds configured queue maximum"), "enqueue");
     }
-    if (!store_->canEnqueue(record.len)) {
-        if (config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
-            const Status evictStatus = evictFront();
-            if (!evictStatus.ok()) {
-                return evictStatus;
-            }
-            diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
-        } else {
-            return diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue is full"), "enqueue");
-        }
-    }
-
     const std::uint32_t sequence = index_.tail;
     const std::string recordStr = spanToString(record);
     st = store_->commitEnqueue(sequence, recordStr);
-    if (!st.ok() && st.code == StatusCode::QueueFull &&
-        config_.fullQueuePolicy == FullQueuePolicy::DropOldest && index_.count > 0) {
+    while (st.code == StatusCode::QueueFull &&
+           config_.fullQueuePolicy == FullQueuePolicy::DropOldest &&
+           index_.count > 0) {
         const Status evictStatus = evictFront();
         if (!evictStatus.ok()) return evictStatus;
         diagnostic(Severity::Warning, Status::failure(StatusCode::QueueFull, "queue full: oldest record evicted"), "enqueue");
         st = store_->commitEnqueue(sequence, recordStr);
     }
     if (!st.ok()) {
-        return diagnostic(Severity::Error, st, "enqueue");
+        const Severity sev = (st.code == StatusCode::QueueFull) ? Severity::Warning : Severity::Error;
+        return diagnostic(sev, st, "enqueue");
     }
 
     index_.tail += 1;

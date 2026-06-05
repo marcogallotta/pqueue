@@ -646,13 +646,18 @@ the deadlock class dies first, then drainability, then churn, then proof.
    spill past 4 ranges, mount rejects an over-cap / huge-span manifest, the
    `~/pqdump` specimen drains. (gaps 6 partial, 8; rollover test rewrite.)
    -> kills the `RangeLimitExceeded` deadlock class.
-2. **Admission + drain reserve on enqueue AND rewrite.** Add `drainReserveBytes`
-   (~8 KB) to admission; fix `appendGrowthBytes` to include manifest growth; fix
-   manifest-byte accounting (count manifest slots, or subtract worst-case
-   `2*(30+8*cap)` from `maxTotalBytes`); add full admission to `rewriteRecord`.
-   (gaps 1, 2, 3.)
-3. **DropOldest loop.** Evict/retry until admission passes or the queue is empty,
-   not a single eviction. (gap 4.)
+2. ~~**Admission + drain reserve on enqueue AND rewrite.**~~ **DONE.** `drainReserveBytes`
+   added to both `maxTotalBytes` and `minFreeBytes` admission in `commitEnqueue` and
+   `rewriteRecord`; `appendGrowthBytes` now includes manifest range-entry cost on rotation;
+   `totalOnDiskBytes_` now counts both manifest slot files; `AppendLogConfig::drainReserveBytes`
+   field added (default 0, firmware sets 4096). (gaps 1, 2, 3.)
+**Pre-conditions before proceeding past stage 3** (found in code review, not yet fixed):
+- **`drainReserveBytes` not wired in `Queue::makeStore`** (`queue.cpp`). `AppendLogConfig::drainReserveBytes` defaults to 0; `makeStore` never sets it. The drain-reserve protection from stage 2 is inactive for all `Queue` callers.
+- **`rewriteFront` ignores `QueueFull` under `DropOldest`** (`queue.cpp`). `enqueue` loops and evicts; `rewriteFront` returns `QueueFull` raw. Outbox stalls permanently under a full queue on retries.
+
+3. ~~**DropOldest loop.**~~ **DONE.** `Queue::enqueue` now loops eviction until
+   admission passes or the queue is empty; the single-eviction + one-retry logic
+   is replaced by a `while` on `QueueFull`. (gap 4.)
 4. **Move segment-count compaction off the hot path.** `needsCompaction()` stops
    gating on `activeGenerations_.size() > maxSegments`; hot path compacts only on
    real `maxTotalBytes`/`minFreeBytes` pressure; keep a soft idle defrag trigger
