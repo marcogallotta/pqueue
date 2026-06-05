@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
@@ -197,6 +198,8 @@ Status AppendLogStore::scanSegments() {
     activeSegmentBytes_ = 0;
     nextGeneration_ = 1;
     nextSequence_ = 0;
+    manifestSlotBytes_[0] = 0;
+    manifestSlotBytes_[1] = 0;
 
     ManifestData manifest;
     if (readManifest(manifest)) {
@@ -394,9 +397,14 @@ Status AppendLogStore::scanSegments() {
         totalOnDiskBytes_ += szU;
         sealedSegmentBytes_[gen] = szU;
     }
-    for (const char* slot : {kManifestSlotA, kManifestSlotB}) {
+    for (int i = 0; i < 2; ++i) {
+        const char* slot = (i == 0) ? kManifestSlotA : kManifestSlotB;
         std::uint64_t sz = 0;
-        if (f->fileSize(slot, sz).ok()) totalOnDiskBytes_ += static_cast<std::uint32_t>(sz);
+        if (f->fileSize(slot, sz).ok()) {
+            const auto szU = static_cast<std::uint32_t>(sz);
+            totalOnDiskBytes_ += szU;
+            manifestSlotBytes_[i] = szU;
+        }
     }
 
     activeTailDependenciesTracked_ = true;
@@ -574,18 +582,41 @@ Status AppendLogStore::writeSegmentFileTracked(const std::string& name, const st
 
 std::uint32_t AppendLogStore::appendGrowthBytes(std::uint32_t recordSize) const {
     const std::uint32_t eventBytes = kEnqueueOverheadBytes + recordSize;
-    // needsRotation: the live tail is full and must be sealed into a new range.
-    // needsNewSegment also fires when activeSegmentBytes_==0 (first-ever write, handled
-    // by ensureActiveSegment), but that case just publishes the existing range list without
-    // adding a range, so it has no manifest growth.
+    // needsRotation: the live tail is full and will be sealed before the new segment.
     const bool needsRotation =
         activeSegmentBytes_ > kSegmentHeaderBytes &&
         activeSegmentBytes_ + eventBytes > config_.maxSegmentBytes;
     const bool needsNewSegment = activeSegmentBytes_ == 0 || needsRotation;
-    // On rotation the manifest may gain one range entry (worst case: non-contiguous tail
-    // adds a new range): 8 bytes per slot x 2 slots = 16 bytes.
-    const std::uint32_t manifestGrowth = needsRotation ? (kManifestRangeEntryBytes * 2u) : 0u;
-    return eventBytes + (needsNewSegment ? kSegmentHeaderBytes : 0u) + manifestGrowth;
+
+    if (!needsNewSegment) return eventBytes;
+
+    // A new segment always triggers a manifest publish. Compute a conservative manifest
+    // slot delta: the inactive slot is overwritten with the updated manifest.
+    // prospectiveRanges: rotation may add one non-contiguous range (worst case +1).
+    const std::uint32_t prospectiveRanges =
+        static_cast<std::uint32_t>(manifestRanges_.size()) + (needsRotation ? 1u : 0u);
+    const std::uint32_t newSlotSize =
+        kManifestFixedBytes + kManifestRangeEntryBytes * prospectiveRanges;
+    // The inactive slot is the one written next. cachedWrittenSlot_ points to whichever
+    // slot was last written (set in manifest.cpp); use strcmp since both translation
+    // units keep their own copy of the name constants.
+    // When the cache is unknown (null: fresh mount or no publish yet this session),
+    // use the smaller slot size — that's the conservative lower bound on what the
+    // inactive slot holds, ensuring we never undercount.
+    std::uint32_t inactiveSize;
+    if (cachedWrittenSlot_ != nullptr &&
+        std::strcmp(cachedWrittenSlot_, kManifestSlotA) == 0) {
+        inactiveSize = manifestSlotBytes_[1];
+    } else if (cachedWrittenSlot_ != nullptr &&
+               std::strcmp(cachedWrittenSlot_, kManifestSlotB) == 0) {
+        inactiveSize = manifestSlotBytes_[0];
+    } else {
+        inactiveSize = std::min(manifestSlotBytes_[0], manifestSlotBytes_[1]);
+    }
+    const std::uint32_t manifestGrowth =
+        newSlotSize > inactiveSize ? newSlotSize - inactiveSize : 0u;
+
+    return eventBytes + kSegmentHeaderBytes + manifestGrowth;
 }
 
 
@@ -903,6 +934,8 @@ Status AppendLogStore::format() {
     activeTailDependenciesTracked_ = true;
     activeTailAffectedGenerations_.clear();
     nextSequence_ = 0;
+    manifestSlotBytes_[0] = 0;
+    manifestSlotBytes_[1] = 0;
     mounted_ = true;
     return Status::success();
 }

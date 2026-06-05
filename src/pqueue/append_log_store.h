@@ -182,6 +182,11 @@ private:
     // + 2x readFile probe. Cleared on mount/format to force a fresh read from disk.
     const char* cachedWrittenSlot_ = nullptr; // points to one of the kManifest* constants
     std::uint32_t cachedWrittenEpoch_ = 0;
+    // On-disk size of each manifest slot: [0]=manifest-a.bin, [1]=manifest-b.bin.
+    // 0 if the slot does not exist. Initialised at mount; updated after each
+    // publishManifest(). Used by appendGrowthBytes() to compute a conservative delta
+    // estimate for what a manifest publish will contribute to totalOnDiskBytes_.
+    std::uint32_t manifestSlotBytes_[2] = {0, 0};
 
 #ifdef ARDUINO
     // Scratch timing set by publishManifest(), read by its callers for consolidated logs.

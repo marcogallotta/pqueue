@@ -123,6 +123,9 @@ Status AppendLogStore::publishManifest(const ManifestData& manifest) {
     // Update cache: the slot we just wrote is now the winner.
     cachedWrittenSlot_ = writeSlot;
     cachedWrittenEpoch_ = toWrite.epoch;
+    // Track per-slot sizes so appendGrowthBytes() can compute exact manifest deltas.
+    manifestSlotBytes_[writeSlot == kManifestSlotA ? 0 : 1] =
+        static_cast<std::uint32_t>(data.size());
 
 #ifdef ARDUINO
     dbgLastProbeMs_ = ms_probe;

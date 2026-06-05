@@ -146,6 +146,73 @@ TEST_CASE("pqueue rewriteFront returns QueueFull when byte budget exhausted; fro
     CHECK_EQ(queue.stats().count, 2U);
 }
 
+TEST_CASE("admission: fresh store budget includes manifest-a creation") {
+    using namespace pqueue::append_log_detail;
+    // Growth for the first write = segment header + event + manifest-a creation.
+    const std::uint32_t firstWriteGrowth =
+        kSegmentHeaderBytes + kEnqueueOverheadBytes + 1 + kManifestFixedBytes;
+
+    cleanEdgesSpool();
+    {
+        pqueue::Config cfg;
+        cfg.basePath          = kEdgesSpoolDir.string();
+        cfg.maxSegmentBytes   = 1024;
+        cfg.reservedBytes     = firstWriteGrowth - 1;
+        cfg.drainReserveBytes = 0;
+        cfg.minFreeBytes      = 0;
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("a").code == pqueue::StatusCode::QueueFull);
+    }
+    cleanEdgesSpool();
+    {
+        pqueue::Config cfg;
+        cfg.basePath          = kEdgesSpoolDir.string();
+        cfg.maxSegmentBytes   = 1024;
+        cfg.reservedBytes     = firstWriteGrowth;
+        cfg.drainReserveBytes = 0;
+        cfg.minFreeBytes      = 0;
+        pqueue::Queue q(cfg);
+        CHECK(q.enqueue("a").ok());
+    }
+}
+
+TEST_CASE("admission: first rotation budget includes creating manifest-b") {
+    using namespace pqueue::append_log_detail;
+    // One 1-byte record per segment.
+    const std::uint32_t kPerRecord = kSegmentHeaderBytes + kEnqueueOverheadBytes + 1;
+    // After the first enqueue: totalOnDiskBytes = kPerRecord + kManifestFixedBytes.
+    // Second enqueue triggers rotation and writes manifest-b for the first time:
+    // growth = segment header + event + (kManifestFixedBytes + 1 range entry).
+    const std::uint32_t afterFirst   = kPerRecord + kManifestFixedBytes;
+    const std::uint32_t secondGrowth = kSegmentHeaderBytes + kEnqueueOverheadBytes + 1
+                                     + kManifestFixedBytes + kManifestRangeEntryBytes;
+
+    cleanEdgesSpool();
+    {
+        pqueue::Config cfg;
+        cfg.basePath          = kEdgesSpoolDir.string();
+        cfg.maxSegmentBytes   = kPerRecord + 4;
+        cfg.reservedBytes     = afterFirst + secondGrowth - 1;
+        cfg.drainReserveBytes = 0;
+        cfg.minFreeBytes      = 0;
+        pqueue::Queue q(cfg);
+        REQUIRE(q.enqueue("a").ok());
+        CHECK(q.enqueue("b").code == pqueue::StatusCode::QueueFull);
+    }
+    cleanEdgesSpool();
+    {
+        pqueue::Config cfg;
+        cfg.basePath          = kEdgesSpoolDir.string();
+        cfg.maxSegmentBytes   = kPerRecord + 4;
+        cfg.reservedBytes     = afterFirst + secondGrowth;
+        cfg.drainReserveBytes = 0;
+        cfg.minFreeBytes      = 0;
+        pqueue::Queue q(cfg);
+        REQUIRE(q.enqueue("a").ok());
+        CHECK(q.enqueue("b").ok());
+    }
+}
+
 TEST_CASE("pqueue pop preserves front when index write fails") {
     cleanEdgesSpool();
     auto inner = pqueue::makePosixFileSystem();

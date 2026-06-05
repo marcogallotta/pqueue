@@ -650,10 +650,12 @@ TEST_CASE("pqueue outbox returns QueueFull when retry enqueue cannot fit") {
     sender.decisions.push_back(pqueue::SendDecision::RetryLater);
     FakeClock clock;
 
-    // Capacity for exactly 1 record: 20 (seg header) + 24 (record overhead) + 17 (envelope for "one") = 61 bytes.
+    // Capacity for exactly 1 record: 20 (seg header) + 24 (record overhead) + 17 (envelope for "one") = 61 bytes
+    // plus 30 bytes for manifest-a creation on the first write = 91 bytes total.
+    using namespace pqueue::append_log_detail;
     pqueue::Config queueConfig = makeOutboxQueueConfig();
     queueConfig.maxSegmentBytes = 128;
-    queueConfig.reservedBytes = 61;
+    queueConfig.reservedBytes = kSegmentHeaderBytes + kEnqueueOverheadBytes + 17 + kManifestFixedBytes;
 
     pqueue::OutboxConfig config = testOutboxConfig();
     config.initialRetryDelayMs = 0;
