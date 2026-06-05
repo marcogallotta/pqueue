@@ -3,7 +3,7 @@ CLI11_INCLUDE ?= third_party
 DOCTEST_INCLUDE ?= third_party/doctest
 
 CXXFLAGS := -std=c++20 -Wall -Wextra -Wpedantic -O2 -MMD -MP \
-	-Isrc -Itests -I$(DOCTEST_INCLUDE) -I$(CLI11_INCLUDE)
+	-Isrc -Itests -I$(DOCTEST_INCLUDE) -I$(CLI11_INCLUDE) -DPQUEUE_TESTING
 LDFLAGS := -lcurl
 
 BUILD_DIR := build

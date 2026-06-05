@@ -7,10 +7,7 @@
 #include <string>
 #include <vector>
 
-#define private public
 #include "pqueue/queue.h"
-#undef private
-
 #include "pqueue/file_system.h"
 #include "pqueue_append_log_support.h"
 
@@ -69,7 +66,7 @@ TEST_CASE("pqueue rewriteFront rejects oversized record and keeps front unchange
     pqueue::Queue queue(config);
 
     REQUIRE(queue.enqueue("1234").ok());
-    const auto status = queue.rewriteFront("12345");
+    const auto status = pqueue::QueueTestAccess::rewriteFront(queue, "12345");
 
     CHECK_FALSE(status.ok());
     CHECK(status.code == pqueue::StatusCode::RecordTooLarge);
@@ -84,7 +81,7 @@ TEST_CASE("pqueue visitRecords rejects null visitor") {
     pqueue::Queue queue(makeEdgesConfig());
     REQUIRE(queue.enqueue("one").ok());
 
-    const auto status = queue.visitRecords(nullptr, nullptr);
+    const auto status = pqueue::QueueTestAccess::visitRecords(queue, nullptr, nullptr);
 
     CHECK_FALSE(status.ok());
     CHECK(status.code == pqueue::StatusCode::InvalidArgument);
@@ -99,7 +96,7 @@ TEST_CASE("pqueue visitRecords stops when visitor returns false") {
 
     VisitContext context;
     context.stopAfter = 1;
-    const auto status = queue.visitRecords(capturingVisitor, &context);
+    const auto status = pqueue::QueueTestAccess::visitRecords(queue, capturingVisitor, &context);
 
     CHECK(status.ok());
     REQUIRE_EQ(context.records.size(), 1U);
@@ -136,7 +133,7 @@ TEST_CASE("pqueue rewriteFront returns QueueFull when byte budget exhausted; fro
     REQUIRE(queue.enqueue("a").ok());
     REQUIRE(queue.enqueue("b").ok());
 
-    const auto st = queue.rewriteFront("x");
+    const auto st = pqueue::QueueTestAccess::rewriteFront(queue, "x");
     REQUIRE_FALSE(st.ok());
     CHECK(st.code == pqueue::StatusCode::QueueFull);
 

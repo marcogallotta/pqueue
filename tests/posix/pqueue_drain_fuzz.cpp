@@ -4,14 +4,11 @@
 #include <filesystem>
 #include <string>
 
-// Access Queue::store_ and Queue::rewriteFront (both private).
-#define private public
 #include "pqueue/queue.h"
-#undef private
-
 #include "pqueue/append_log_store.h"
 #include "pqueue/status.h"
 
+#include "pqueue_append_log_support.h"
 #include "doctest/doctest.h"
 
 namespace {
@@ -39,7 +36,7 @@ pqueue::Config makeFuzzConfig(pqueue::FullQueuePolicy policy = pqueue::FullQueue
 }
 
 std::size_t rangeCount(pqueue::Queue& q) {
-    auto* s = dynamic_cast<pqueue::AppendLogStore*>(q.store_.get());
+    auto* s = pqueue::QueueTestAccess::appendLogStore(q);
     return s ? s->manifestRanges().size() : 0;
 }
 
@@ -99,7 +96,7 @@ TEST_CASE("fuzz: fill then rewrite-storm then drain") {
     // QueueFull is the expected exit once compaction can no longer reclaim enough.
     for (int i = 0; i < 200; ++i) {
         maxRangesObserved = std::max(maxRangesObserved, rangeCount(queue));
-        const auto st = queue.rewriteFront(rewritten);
+        const auto st = pqueue::QueueTestAccess::rewriteFront(queue, rewritten);
         if (st.code == pqueue::StatusCode::QueueFull) break;
         REQUIRE(st.ok());
         if (i % 10 == 9) queue.compactIdle(4);
@@ -149,7 +146,7 @@ TEST_CASE("fuzz: random interleaved near-capacity - pop always succeeds") {
             }
         } else if (r < 0.80) {
             if (queue.stats().count > 0) {
-                const auto st = queue.rewriteFront(rewritten);
+                const auto st = pqueue::QueueTestAccess::rewriteFront(queue, rewritten);
                 // QueueFull is expected when all-live data fills the budget.
                 if (!st.ok() && st.code != pqueue::StatusCode::QueueFull) {
                     ++unexpectedErrors;

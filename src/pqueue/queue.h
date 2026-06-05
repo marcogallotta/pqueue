@@ -33,21 +33,24 @@ public:
     ValidationResult validate(const ValidationOptions& options = ValidationOptions{});
     StatsResult statsResult();
     Stats stats();
-
 private:
     friend class Outbox;
+#ifdef PQUEUE_TESTING
+    friend struct QueueTestAccess;
+#endif
+
     using RecordVisitor = bool (*)(void* context, const std::string& record, std::uint32_t sequence, std::uint32_t ordinal);
 
-    Status rewriteFront(const std::string& record);
-
     class ScopedLock;
+
+    Status rewriteFront(const std::string& record);
+    Status visitRecords(RecordVisitor visitor, void* context);
 
     Status loadLatestIndex();
     Status evictFront();
     Status acquireLock();
     void releaseLock();
     Status emit(Event event) const;
-    Status visitRecords(RecordVisitor visitor, void* context);
     Status diagnostic(Severity severity, Status status, const char* operation) const;
 
     Config config_;

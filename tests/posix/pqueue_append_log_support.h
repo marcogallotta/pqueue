@@ -9,6 +9,22 @@
 
 #include "doctest/doctest.h"
 
+#ifdef PQUEUE_TESTING
+namespace pqueue {
+struct QueueTestAccess {
+    static AppendLogStore* appendLogStore(Queue& q) {
+        return dynamic_cast<AppendLogStore*>(q.store_.get());
+    }
+    static Status rewriteFront(Queue& q, const std::string& r) {
+        return q.rewriteFront(r);
+    }
+    static Status visitRecords(Queue& q, Queue::RecordVisitor v, void* ctx) {
+        return q.visitRecords(v, ctx);
+    }
+};
+} // namespace pqueue
+#endif
+
 #ifndef ARDUINO
 #include <filesystem>
 #include <fstream>
