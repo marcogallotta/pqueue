@@ -131,6 +131,7 @@ std::unique_ptr<Store> makeStore(const Config& config) {
     ac.maxSegmentBytes = config.maxSegmentBytes;
     ac.minFreeBytes = config.minFreeBytes;
     ac.maxSegments = config.maxSegments;
+    ac.drainReserveBytes = config.drainReserveBytes;
     return std::make_unique<AppendLogStore>(std::move(ac));
 }
 

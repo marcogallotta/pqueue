@@ -651,9 +651,9 @@ the deadlock class dies first, then drainability, then churn, then proof.
    `rewriteRecord`; `appendGrowthBytes` now includes manifest range-entry cost on rotation;
    `totalOnDiskBytes_` now counts both manifest slot files; `AppendLogConfig::drainReserveBytes`
    field added (default 0, firmware sets 4096). (gaps 1, 2, 3.)
-**Pre-conditions before proceeding past stage 3** (found in code review, not yet fixed):
-- **`drainReserveBytes` not wired in `Queue::makeStore`** (`queue.cpp`). `AppendLogConfig::drainReserveBytes` defaults to 0; `makeStore` never sets it. The drain-reserve protection from stage 2 is inactive for all `Queue` callers.
-- **`rewriteFront` ignores `QueueFull` under `DropOldest`** (`queue.cpp`). `enqueue` loops and evicts; `rewriteFront` returns `QueueFull` raw. Outbox stalls permanently under a full queue on retries.
+~~**Pre-conditions before proceeding past stage 3** (found in code review, not yet fixed):~~
+- ~~**`drainReserveBytes` not wired in `Queue::makeStore`**~~ **DONE.** `pqueue::Config::drainReserveBytes` field added (default 0; firmware sets `kDrainReserveBytes`); wired through `makeStore` into `AppendLogConfig`.
+- **`rewriteFront` ignores `QueueFull` under `DropOldest`** — deferred. Evicting then retrying `rewriteRecord(index_.head, record)` is a data-corruption bug: after eviction `index_.head` points to the next record, so the retry overwrites the wrong record. Correct resolution requires the caller (Outbox) to handle `QueueFull` explicitly — either drop the front and move on, or surface backpressure. Not fixed here.
 
 3. ~~**DropOldest loop.**~~ **DONE.** `Queue::enqueue` now loops eviction until
    admission passes or the queue is empty; the single-eviction + one-retry logic
