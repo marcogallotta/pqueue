@@ -22,7 +22,18 @@ constexpr std::uint16_t kManifestVersion = 1;
 // Fixed overhead: magic(4)+version(2)+headerBytes(2)+epoch(4)+nextGeneration(4)+
 //                 rangeCount(2)+tailGeneration(4)+crc(4)+footer(4) = 30 bytes
 constexpr std::uint16_t kManifestFixedBytes = 30;
-constexpr std::uint16_t kManifestMaxRanges  = 4;
+// Hard cap on manifest range count. Sized so slot-jam is impossible before flash
+// bytes run out (assuming >=512 B sealed segments). Idle compaction targets <=4
+// ranges to stay within the 64-byte LittleFS inline threshold; the hard cap is
+// only approached under pathological fragmentation.
+constexpr std::uint16_t kManifestMaxRanges = 1024;
+// Safety ceiling on total active generation count (sum of all range spans + tail).
+// Validated before applyManifestToRam expands gen-by-gen to prevent RAM explosion
+// from a corrupt-but-CRC-valid manifest with a pathologically wide span.
+// Derived from deployment assumptions: maxTotalBytes=512 KiB and tolerated min
+// sealed segment ~512 B -> max segments = 512K/512 = 1024 = kManifestMaxRanges;
+// add 1 for the tail. Larger deployments should raise both caps together.
+constexpr std::uint32_t kManifestMaxTotalGenerations = kManifestMaxRanges + 1;
 
 constexpr std::uint16_t kSegmentHeaderBytes  = 20;
 constexpr std::uint16_t kEnqueueHeaderBytes  = 16; // fixed header only: magic(4)+version(2)+headerBytes(2)+sequence(4)+payloadBytes(4)
@@ -87,7 +98,7 @@ struct ManifestRange {
 struct ManifestData {
     std::uint32_t epoch          = 0;
     std::uint32_t nextGeneration = 1;
-    std::vector<ManifestRange> ranges; // max kManifestMaxRanges entries
+    std::vector<ManifestRange> ranges; // up to kManifestMaxRanges entries; idle compaction targets <=4
     std::uint32_t tailGeneration = 0;
 };
 

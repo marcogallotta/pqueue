@@ -27,7 +27,7 @@ struct WorkloadParams {
     std::uint32_t maxSegmentBytes      = 4096;
     std::uint8_t  maxSegments          = 200;   // high: disables internal auto-compact
     float         deadRatioTrigger     = 0.25f; // compact if any range >= this fraction dead
-    std::uint32_t rangePressureTrigger = 3;     // compact if range count >= this (out of kManifestMaxRanges=4)
+    std::uint32_t rangePressureTrigger = 3;     // compact if range count >= this (kManifestMaxRanges is now 1024; retune for >4-range workloads)
     // Burst mode: models offline consumer pattern (enqueue N, drain ratio R, repeat).
     // When burst=true, enqueueProb is ignored.
     bool          burst                = false;

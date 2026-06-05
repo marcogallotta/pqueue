@@ -26,19 +26,20 @@ TEST_CASE("rollover: manifest published after each rotation (critical)") {
     }
 }
 
-TEST_CASE("rollover: range limit exceeded returns failure") {
-    // Verify that rotateSegment() fails cleanly when promoting the current tail
-    // would push the range count past kManifestMaxRanges (4).
-    // Setup: plant a manifest with 4 non-contiguous full ranges and tail=9.
+TEST_CASE("rollover: spills past 4 ranges when needed") {
+    // With the elastic cap (kManifestMaxRanges=1024), a non-contiguous tail no
+    // longer causes RangeLimitExceeded at 4 ranges; the store spills into a 5th.
+    // Setup: 4 non-contiguous sealed ranges + a tail at gen 9 (each segment holds
+    // exactly one record so gen 9 fills after the first enqueue).
     const std::uint32_t maxSeg =
         kSegmentHeaderBytes + kEnqueueHeaderBytes + 1 + kEventTrailerBytes;
 
     plantLayout({
         .ranges = {{1,1},{3,3},{5,5},{7,7}}, .tail = 9, .next = 10,
         .segments = {
-            {.gen=1,.firstSeq=0,.body={}},{.gen=3,.firstSeq=0,.body={}},
-            {.gen=5,.firstSeq=0,.body={}},{.gen=7,.firstSeq=0,.body={}},
-            {.gen=9,.firstSeq=0,.body={}},
+            {.gen=1,.firstSeq=0},{.gen=3,.firstSeq=0},
+            {.gen=5,.firstSeq=0},{.gen=7,.firstSeq=0},
+            {.gen=9,.firstSeq=0},
         },
     });
 
@@ -48,20 +49,47 @@ TEST_CASE("rollover: range limit exceeded returns failure") {
     pqueue::AppendLogStore store(storeCfg);
     REQUIRE(store.mount().ok());
 
-    REQUIRE(store.commitEnqueue(0, "x").ok()); // seg 9 now full
+    REQUIRE(store.commitEnqueue(0, "x").ok()); // fills seg 9
+    REQUIRE(store.commitEnqueue(1, "y").ok()); // rotation to seg 10 — must succeed
 
-    const auto st = store.commitEnqueue(1, "y"); // triggers rotateSegment() → limit exceeded
-    CHECK_FALSE(st.ok());
-    CHECK_EQ(st.code, pqueue::StatusCode::RangeLimitExceeded);
+    CHECK(std::filesystem::exists(segmentPath(10)));
 
-    CHECK_FALSE(std::filesystem::exists(segmentPath(10)));
-
+    // Manifest should now have 5 ranges: {1,1},{3,3},{5,5},{7,7},{9,9} + tail=10.
     ManifestData onDisk;
-    REQUIRE(readManifestSlot('a', onDisk));
-    CHECK_EQ(onDisk.tailGeneration, 9U);
-    REQUIRE_EQ(onDisk.ranges.size(), 4U);
-    CHECK_EQ(onDisk.ranges[0].startGen, 1U); CHECK_EQ(onDisk.ranges[0].endGen, 1U);
-    CHECK_EQ(onDisk.ranges[3].startGen, 7U); CHECK_EQ(onDisk.ranges[3].endGen, 7U);
+    REQUIRE((readManifestSlot('a', onDisk) || readManifestSlot('b', onDisk)));
+    ManifestData onDiskB;
+    if (readManifestSlot('b', onDiskB) && onDiskB.epoch > onDisk.epoch) onDisk = onDiskB;
+    REQUIRE_EQ(onDisk.ranges.size(), 5U);
+    CHECK_EQ(onDisk.ranges[4].startGen, 9U);
+    CHECK_EQ(onDisk.ranges[4].endGen,   9U);
+    CHECK_EQ(onDisk.tailGeneration,    10U);
+
+    // Remount and verify both records are readable in FIFO order.
+    pqueue::AppendLogStore store2(storeCfg);
+    REQUIRE(store2.mount().ok());
+    std::string out;
+    REQUIRE(store2.readRecord(0, out).ok()); CHECK_EQ(out, "x");
+    REQUIRE(store2.readRecord(1, out).ok()); CHECK_EQ(out, "y");
+}
+
+TEST_CASE("rollover: mount rejects manifest with excessive generation span") {
+    // A CRC-valid manifest whose total generation span exceeds
+    // kManifestMaxTotalGenerations (= kManifestMaxRanges + 1 = 1025) must be
+    // rejected as DataCorrupt before applyManifestToRam expands gen-by-gen.
+    using namespace pqueue::append_log_detail;
+    resetSpool();
+
+    ManifestData md;
+    md.epoch = 1;
+    md.ranges = {{1u, 1100u}}; // span 1100 > kManifestMaxTotalGenerations (1025)
+    md.tailGeneration = 1101u;
+    md.nextGeneration = 1102u;
+    plantManifest(md);
+
+    pqueue::AppendLogStore store(makeStoreConfig());
+    const auto st = store.mount();
+    CHECK_FALSE(st.ok());
+    CHECK_EQ(st.code, pqueue::StatusCode::DataCorrupt);
 }
 
 

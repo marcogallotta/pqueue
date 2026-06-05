@@ -200,6 +200,17 @@ Status AppendLogStore::scanSegments() {
 
     ManifestData manifest;
     if (readManifest(manifest)) {
+        // Bounds-check total generation span before the gen-by-gen expansion in
+        // applyManifestToRam to prevent RAM explosion from a corrupt-but-CRC-valid
+        // manifest with a pathologically wide range.
+        std::uint64_t totalGens = manifest.tailGeneration != 0 ? 1u : 0u;
+        for (const auto& r : manifest.ranges) {
+            totalGens += static_cast<std::uint64_t>(r.endGen) - r.startGen + 1;
+        }
+        if (totalGens > kManifestMaxTotalGenerations) {
+            return Status::failure(StatusCode::DataCorrupt,
+                "manifest generation span exceeds maximum");
+        }
         applyManifestToRam(manifest);
     } else if (!sortedGenerations.empty()) {
         return Status::failure(StatusCode::DataCorrupt,

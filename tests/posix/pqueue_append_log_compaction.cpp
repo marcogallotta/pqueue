@@ -958,12 +958,12 @@ TEST_CASE("subrange: remount after middle split preserves three-range manifest")
     expectRecord(store2, 5, kP5);
 }
 
-TEST_CASE("subrange: gate 1 fallback=yes on live middle expands to full parent and compacts it") {
-    // 3 ranges. Live record in gen=2 (middle of {1,3}).
-    // Middle {2,2}: liveDelta=2, 3+2=5>4 -> gate 1 fires.
-    // fallback=yes -> inputRange widened to {1,3}, hasLeft=false, hasRight=false.
-    // Full parent compacted: only live record is seq=2 -> output gen=31.
-    // Result: ranges=[{31,31},{10,11},{20,20}].
+TEST_CASE("subrange: full-parent compaction reclaims dead middle gens") {
+    // 3 ranges. Only gen=2 in {1,3} has a live record; gens 1 and 3 are dead.
+    // At cap=1024 the gate does not fire for a middle {2,2} subrange (no dead bytes
+    // in {2,2} itself), so chooseCompactionRange would pick the full parent {1,3}
+    // (highest dead ratio). Targeting {1,3} directly: gens 1 and 3 dead, gen=2 live.
+    // Output: gen=31 with seq=2. 3 ranges -> 3 ranges (exact-match, no split).
     plantLayout({
         .ranges = {{1,3},{10,11},{20,20}},
         .tail   = 30,
@@ -982,13 +982,13 @@ TEST_CASE("subrange: gate 1 fallback=yes on live middle expands to full parent a
     CHECK(store.mount().ok());
     REQUIRE_EQ(store.manifestRanges().size(), 3u);
 
-    const auto st = store.compactRange({2, 2},
+    const auto st = store.compactRange({1, 3},
                                        nullptr,
                                        pqueue::AppendLogStore::AllowFullRangeFallback::yes);
     CHECK(st.ok());
     CHECK_FALSE(st.isNoOp());
 
-    // Full parent {1,3} was compacted, not just {2,2}. Gen=1 and gen=3 had no records.
+    // Exact-match: {1,3} replaced by output {31,31}. Range count unchanged.
     REQUIRE_EQ(store.manifestRanges().size(), 3u);
     CHECK_EQ(store.manifestRanges()[0].startGen, 31u);
     CHECK_EQ(store.manifestRanges()[0].endGen,   31u);
@@ -1004,7 +1004,7 @@ TEST_CASE("subrange: gate 1 fallback=yes on live middle expands to full parent a
     checkTracking(store);
 }
 
-TEST_CASE("subrange: gate 1 fallback=yes on live suffix at range count 4 widens and rotate fires") {
+TEST_CASE("subrange: gate 1 fallback=yes on live suffix at range count 4 does not widen at cap=1024") {
     // 4 ranges; last range has live suffix with hasLeft=true and contiguous tail.
     // State built via live ops so activeTailDependenciesTracked_=true.
     //
@@ -1016,13 +1016,14 @@ TEST_CASE("subrange: gate 1 fallback=yes on live suffix at range count 4 widens 
     //
     // compactRange({32,34}, fallback=yes):
     //   suffix of {30,34}: hasLeft=true, hasRight=false.
-    //   rangeHasLive=true (seq=2 in gen=34). liveDelta=1. 4+1=5>4 -> gate 1 fires.
-    //   fallback=yes -> inputRange={30,34}, hasLeft=false.
+    //   rangeHasLive=true (seq=2 in gen=34). liveDelta=1. 4+1=5 <= 1024 -> gate does NOT fire.
+    //   No widening. inputRange stays {32,34}.
     //   wouldRotate=true (34==lastRange.endGen, tail=35 contiguous, deps={}).
-    //   hypoHasLive=true (seq=1,2,3 in [30,35]). Gate 2: hasLeft=false -> does not fire.
-    //   Rotate: gen=35 sealed -> {30,35}, tail=36. inputRange extended to {30,35}.
-    //   Live records: seq=1(gen=30), seq=2(gen=34), seq=3(gen=35). Output: gen=37,38,39.
-    //   Splice: erase {30,35}, insert {37,39}. Result: [{1,2},{10,11},{20,21},{37,39}], tail=36.
+    //   hypoHasLive=true (seq=2,3 in [32,35]). Gate 2: 4+1=5<=1024 -> does not fire.
+    //   Rotate: gen=35 sealed -> {30,35}, tail=36. inputRange extended to {32,35}.
+    //   Live records in [32,35]: seq=2(gen=34), seq=3(gen=35). Output: gen=37,38.
+    //   Left remainder {30,31} (seq=1 stays in gen=30).
+    //   Splice: erase {30,35}, insert [{30,31},{37,38}]. 4->5 ranges. tail=36 (orphan).
 
     plantLayout({
         .ranges = {{1,2},{10,11},{20,21},{30,33}},
@@ -1062,16 +1063,20 @@ TEST_CASE("subrange: gate 1 fallback=yes on live suffix at range count 4 widens 
 
     CHECK_EQ(store.tailGeneration(), 36u); // rotate fired
 
-    REQUIRE_EQ(store.manifestRanges().size(), 4u);
-    CHECK_EQ(store.manifestRanges()[3].startGen, 37u);
-    CHECK_EQ(store.manifestRanges()[3].endGen,   39u);
+    // No widening: suffix {32,35} compacted, leaving remainder {30,31} and output {37,38}.
+    REQUIRE_EQ(store.manifestRanges().size(), 5u);
+    CHECK_EQ(store.manifestRanges()[3].startGen, 30u);
+    CHECK_EQ(store.manifestRanges()[3].endGen,   31u);
+    CHECK_EQ(store.manifestRanges()[4].startGen, 37u);
+    CHECK_EQ(store.manifestRanges()[4].endGen,   38u);
 
-    CHECK_FALSE(std::filesystem::exists(segmentPath(30)));
-    CHECK_FALSE(std::filesystem::exists(segmentPath(34)));
-    CHECK_FALSE(std::filesystem::exists(segmentPath(35)));
-    CHECK(std::filesystem::exists(segmentPath(37)));
-    CHECK(std::filesystem::exists(segmentPath(38)));
-    CHECK(std::filesystem::exists(segmentPath(39)));
+    CHECK(std::filesystem::exists(segmentPath(30)));    // left remainder
+    CHECK(std::filesystem::exists(segmentPath(31)));    // left remainder
+    CHECK_FALSE(std::filesystem::exists(segmentPath(34))); // compacted input
+    CHECK_FALSE(std::filesystem::exists(segmentPath(35))); // compacted input
+    CHECK(std::filesystem::exists(segmentPath(37)));   // output
+    CHECK(std::filesystem::exists(segmentPath(38)));   // output
+    CHECK_FALSE(std::filesystem::exists(segmentPath(39))); // only 2 output segs, not 3
 
     expectRecord(store, 1, kP1);
     expectRecord(store, 2, kP2);
