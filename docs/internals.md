@@ -178,9 +178,13 @@ crc            4 bytes   CRC32 over all preceding bytes
 footer         4 bytes   0x214B4F50 ("POK!")
 ```
 
-Fixed overhead: 30 bytes. With 4 ranges: 30 + 32 = 62 bytes. Hard limit: 64
-bytes total (LittleFS inline file threshold). Maximum 4 ranges
-(`kManifestMaxRanges`).
+Fixed overhead: 30 bytes. With 4 ranges: 30 + 32 = 62 bytes, which fits
+within the LittleFS 64-byte inline threshold (one block, no separate
+allocation). `kManifestMaxRanges = 1024` is the hard cap, derived from the
+flash byte budget so byte exhaustion is always the binding constraint before
+slot exhaustion. Manifests with more than 4 ranges exceed the inline threshold
+(~7 ms slower per publish) but are valid. The soft target is 4 ranges; idle
+compaction gravitates back toward it.
 
 Segment files are named `seg-{08x}.bin`. `parseManifest` returns false (not
 `DataCorrupt`) on any validation failure; the caller treats an invalid slot the
@@ -628,14 +632,11 @@ cannot immediately merge with the output range. Range count stays bounded and
 dead-range elimination reclaims it once popped, but the fragmentation is
 inelegant.
 
-**Configurable `kManifestMaxRanges`.** The current manifest format (30B fixed +
-4x8B = 62B) fits within the LittleFS 64-byte inline threshold. For devices with
-larger flash queueing megabytes of data, compaction latency scales with queue
-size and can become a data-loss mechanism: if the store cannot compact fast
-enough, QueueFull drops records. More ranges (e.g. 8 ranges = 94B) enable more
-subrange splits and tighter per-step latency bounds at scale. Deferred: touches
-the manifest binary format, requires a version bump, and expands the test matrix
-significantly.
+**Elastic range cap.** `kManifestMaxRanges = 1024` (derived from flash byte
+budget). The common case stays at ≤4 ranges (inline manifest, ~62 B, fast
+publish); the cap is only approached under pathological fragmentation. Idle
+compaction gravitates back toward 4 ranges via dead-ratio-based compaction.
+See `docs/full-queue-deadlock.md` for the full derivation and design rationale.
 
 **Cost-aware compaction strategy.** Score ranges by `bytes_reclaimed /
 estimated_compaction_ms`, where estimated cost is derived from the latency
