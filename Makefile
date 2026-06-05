@@ -52,6 +52,7 @@ TEST_SRC := \
 	tests/posix/pqueue_outbox.cpp \
 	tests/posix/pqueue_repair.cpp \
 	tests/posix/pqueue_queue_edges.cpp \
+	tests/posix/pqueue_drain_fuzz.cpp \
 	$(PQUEUE_SRC)
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(TEST_SRC))
